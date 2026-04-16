@@ -180,13 +180,13 @@ document.addEventListener('DOMContentLoaded', () => {
         // Parse and sort by PCA value descending
         const chartData = filteredRows.map(row => {
             const { valText, colorHex } = parsePCA(row['PCA_Values']);
-            const numVal = parseFloat(valText.replace(',', '.')); // Handle polish commas
+            const numVal = parsePolishDecimal(valText);
             return {
                 ticker: row['Ticker'],
-                value: isNaN(numVal) ? 0 : numVal,
+                value: Number.isFinite(numVal) ? numVal : NaN,
                 color: colorHex || 'rgba(59, 130, 246, 0.8)'
             };
-        }).filter(d => d.value !== 0) // Remove zero-value entries from chart
+        }).filter(d => Number.isFinite(d.value)) // tylko poprawnie sparsowane liczby (nie ukrywaj całego wykresu przy 0)
           .sort((a,b) => b.value - a.value);
 
         if (chartData.length === 0) {
@@ -268,13 +268,27 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    /** Polskie / TV: "61,33", "1 234,56", "1 234,56" (NBSP) */
+    function parsePolishDecimal(text) {
+        if (text == null || text === '' || text === '--') return NaN;
+        let s = String(text).trim().replace(/\u00a0/g, ' ').replace(/\s/g, '');
+        if (!s) return NaN;
+        if (s.includes(',') && s.includes('.')) {
+            s = s.replace(/\./g, '').replace(',', '.');
+        } else if (s.includes(',')) {
+            s = s.replace(',', '.');
+        }
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : NaN;
+    }
+
     // Get PCA value for a ticker group (based on current chart interval) for sorting
     function getGroupPCA(rows) {
         const targetRow = rows.find(r => r['Interval'] === currentChartInterval);
         if (!targetRow || !targetRow['PCA_Values']) return 0;
         const { valText } = parsePCA(targetRow['PCA_Values']);
-        const num = parseFloat(valText.replace(',', '.'));
-        return isNaN(num) ? 0 : num;
+        const num = parsePolishDecimal(valText);
+        return Number.isFinite(num) ? num : 0;
     }
 
     // Build compact summary pills for collapsed header
@@ -404,7 +418,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 summaryContainer.innerHTML = `<span class="skip-error-banner">⚠ Pominięty ticker</span>`;
                 cardClone.querySelector('.company-name').textContent = '—';
             } else {
-                summaryContainer.innerHTML = buildSummaryPills(rows);
+                const noDataRow = rows.find(r => (r['Scrape_Status'] || '').toUpperCase() === 'NO_DATA');
+                let summaryHtml = buildSummaryPills(rows);
+                if (noDataRow) {
+                    cardEl.classList.add('ticker-no-data');
+                    const hint = noDataRow['Scrape_Error'] || 'Brak danych wskaźników na wykresie';
+                    summaryHtml =
+                        `<span class="no-data-banner" title="${escapeHtml(hint)}">⚠ Brak danych</span> ` +
+                        summaryHtml;
+                }
+                summaryContainer.innerHTML = summaryHtml;
             }
             
             // Add watchlist signal badges if available
@@ -597,37 +620,52 @@ document.addEventListener('DOMContentLoaded', () => {
         return `0 0 ${blurPx}px ${cssColor}`;
     }
 
-    // Parse PCA value like "61,33 (color: rgb(255, 243, 0);)" — improved regex
+    // Parse PCA value like "61,33 (color: rgb(255, 243, 0);)" lub "(color: rgba(...))"
     function parsePCA(rawStr) {
         if (!rawStr || rawStr === 'Brak danych na wykresie') return { valText: '--', colorHex: null };
-        
-        // Try matching: value (color: rgb(R, G, B);)
-        const match = rawStr.match(/^(.*?)\s*\(color:\s*(rgb\(\d+,\s*\d+,\s*\d+\))\s*;?\s*\)/);
-        if (match) {
-            return {
-                valText: match[1]?.trim(),
-                colorHex: match[2]?.trim()
-            };
+        const s = String(rawStr).trim();
+
+        // value (color: rgb(...) lub rgba(...))
+        const matchColor = s.match(
+            /^(.*?)\s*\(\s*color:\s*(rgba?\([^)]+\))\s*;?\s*\)/i
+        );
+        if (matchColor) {
+            let vt = matchColor[1]?.trim();
+            if (/^ok$/i.test(vt)) vt = '--';
+            return { valText: vt, colorHex: matchColor[2]?.trim() };
         }
-        
-        // Try matching: value (ColorName)
-        const namedMatch = rawStr.match(/^(.*?)\s*\(([^)]+)\)/);
+
+        // value (rgb(...)) / (rgba(...)) bez słowa "color:" — częsty format w eksporcie TV
+        const matchBareRgb = s.match(/^(.*?)\s*\(\s*(rgba?\(\s*\d[^)]*\))\s*\)\s*$/i);
+        if (matchBareRgb) {
+            let vt = matchBareRgb[1]?.trim();
+            if (/^ok$/i.test(vt)) vt = '--';
+            return { valText: vt, colorHex: matchBareRgb[2]?.trim() };
+        }
+
+        // value (ColorName)
+        const namedMatch = s.match(/^(.*?)\s*\(([^)]+)\)/);
         if (namedMatch) {
-            const colorName = namedMatch[2].trim().toLowerCase();
+            const inner = namedMatch[2].trim();
+            const colorName = inner.toLowerCase();
             let mappedColor = null;
             if (colorName.includes('czerwon')) mappedColor = 'rgb(239, 68, 68)';
             else if (colorName.includes('niebiesk')) mappedColor = 'rgb(59, 130, 246)';
             else if (colorName.includes('zielon')) mappedColor = 'rgb(16, 185, 129)';
             else if (colorName.includes('pomarańcz')) mappedColor = 'rgb(245, 158, 11)';
-            
+            else if (/^rgba?\(/i.test(inner)) mappedColor = inner;
+
+            let vt = namedMatch[1]?.trim();
+            if (/^ok$/i.test(vt)) vt = '--';
             return {
-                valText: namedMatch[1]?.trim(),
+                valText: vt,
                 colorHex: mappedColor
             };
         }
-        
-        // Fallback: just the raw string as value, no color
-        return { valText: rawStr.trim(), colorHex: null };
+
+        let vt = s.trim();
+        if (/^ok$/i.test(vt)) vt = '--';
+        return { valText: vt, colorHex: null };
     }
 
     // ==========================================
@@ -638,7 +676,7 @@ document.addEventListener('DOMContentLoaded', () => {
         tickers: [],
         intervals: [],
         indicators: [],
-        auto_schedule: { enabled: false, hour: 7, minute: 30 },
+        auto_schedule: { enabled: false, hour: 7, minute: 30, run_on_startup: true },
     };
     let statusInterval = null;
 
@@ -659,6 +697,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const autoScheduleEnabled = document.getElementById('auto-schedule-enabled');
     const autoScheduleHour = document.getElementById('auto-schedule-hour');
     const autoScheduleMinute = document.getElementById('auto-schedule-minute');
+    const autoScheduleRunOnStartup = document.getElementById('auto-schedule-run-on-startup');
 
     // Scraper elements
     const statusText = document.getElementById('scraper-status-text');
@@ -772,10 +811,11 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
 
-        const sched = currentConfig.auto_schedule || { enabled: false, hour: 7, minute: 30 };
+        const sched = currentConfig.auto_schedule || { enabled: false, hour: 7, minute: 30, run_on_startup: true };
         autoScheduleEnabled.checked = !!sched.enabled;
         autoScheduleHour.value = String(Math.max(0, Math.min(23, parseInt(sched.hour, 10) || 7)));
         autoScheduleMinute.value = String(Math.max(0, Math.min(59, parseInt(sched.minute, 10) || 0)));
+        autoScheduleRunOnStartup.checked = sched.run_on_startup !== false;
     }
 
     // --- Config Actions ---
@@ -821,6 +861,7 @@ document.addEventListener('DOMContentLoaded', () => {
             enabled: autoScheduleEnabled.checked,
             hour: Math.max(0, Math.min(23, parseInt(autoScheduleHour.value, 10) || 0)),
             minute: Math.max(0, Math.min(59, parseInt(autoScheduleMinute.value, 10) || 0)),
+            run_on_startup: autoScheduleRunOnStartup.checked,
         };
 
         btnSaveConfig.disabled = true;

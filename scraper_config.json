@@ -183,5 +183,11 @@
     "PCA",
     "HTS Panel",
     "MacD"
-  ]
+  ],
+  "auto_schedule": {
+    "enabled": true,
+    "hour": 8,
+    "minute": 0,
+    "run_on_startup": true
+  }
 }

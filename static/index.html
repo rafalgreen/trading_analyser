@@ -150,6 +150,11 @@
                                     <input type="number" id="auto-schedule-minute" min="0" max="59" value="30" class="schedule-time-input">
                                     pobierz wszystkie tickery z konfiguracji
                                 </label>
+                                <label class="checkbox-container schedule-enable-row mt-2">
+                                    <input type="checkbox" id="auto-schedule-run-on-startup">
+                                    <span class="checkmark"></span>
+                                    Przy starcie serwera (<code>uvicorn</code>) automatycznie uruchom pełny odczyt na dzisiejszy dzień (po krótkim opóźnieniu)
+                                </label>
                             </div>
                         </div>
 
@@ -326,6 +331,6 @@
         </div>
     </template>
 
-    <script src="app.js?v=5"></script>
+    <script src="app.js?v=7"></script>
 </body>
 </html>

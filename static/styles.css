@@ -1296,6 +1296,22 @@ input[type="text"]:focus {
     font-size: 0.85rem;
     font-weight: 600;
 }
+
+.ticker-no-data {
+    border-color: rgba(245, 158, 11, 0.5) !important;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.2);
+}
+.no-data-banner {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--warning, #f59e0b);
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-right: 6px;
+    vertical-align: middle;
+}
 .skip-detail {
     padding: 16px;
     color: var(--text-secondary);

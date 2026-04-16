@@ -56,3 +56,76 @@ def test_is_dirty_company_name():
     assert m.is_dirty_company_name("MSFT", "MSFT 123") is True
     assert m.is_dirty_company_name("MSFT", "▼ −1%") is True
     assert m.is_dirty_company_name("MSFT", "Microsoft") is False
+
+
+def test_wl_signal_visibility_for_ticker():
+    import app as m
+
+    IND3 = ["PCA", "HTS Panel", "MacD"]
+
+    def full_interval(iv: str):
+        return {
+            "Scrape_Status": "OK",
+            "PCA_Values": "10 (Niebieski)",
+            "HTS Panel_Trend": "Wzrostowy",
+            "MacD_Trend": "Spadkowy",
+            "Interval": iv,
+        }
+
+    assert m.wl_signal_visibility_for_ticker([]) == {
+        "daily": False,
+        "weekly": False,
+        "monthly": False,
+    }
+    assert m.wl_signal_visibility_for_ticker(
+        [{"Scrape_Status": "SKIPPED", "PCA_Values": "", "Interval": "1D"}]
+    ) == {"daily": False, "weekly": False, "monthly": False}
+
+    base_bad = {
+        "Scrape_Status": "OK",
+        "PCA_Values": "Brak danych na wykresie",
+        "HTS Panel_Trend": "Brak",
+        "MacD_Trend": "Brak",
+    }
+    assert m.wl_signal_visibility_for_ticker(
+        [{**base_bad, "Interval": "1D"}], IND3
+    ) == {"daily": False, "weekly": False, "monthly": False}
+
+    # Samo PCA bez HTS/MacD — nie pokazujemy sygnałów z watchlisty
+    assert m.wl_signal_visibility_for_ticker(
+        [
+            {
+                "Scrape_Status": "OK",
+                "PCA_Values": "10 (Niebieski)",
+                "HTS Panel_Trend": "Brak",
+                "MacD_Trend": "Brak",
+                "Interval": "1D",
+            }
+        ],
+        IND3,
+    ) == {"daily": False, "weekly": False, "monthly": False}
+
+    # Tylko HTS — nadal za mało
+    assert m.wl_signal_visibility_for_ticker(
+        [
+            {
+                "Scrape_Status": "OK",
+                "PCA_Values": "Brak danych na wykresie",
+                "HTS Panel_Trend": "Wzrostowy",
+                "MacD_Trend": "Brak",
+                "Interval": "1W",
+            }
+        ],
+        IND3,
+    ) == {"daily": False, "weekly": False, "monthly": False}
+
+    assert m.wl_signal_visibility_for_ticker([full_interval("1D")], IND3) == {
+        "daily": True,
+        "weekly": False,
+        "monthly": False,
+    }
+
+    assert m.wl_signal_visibility_for_ticker(
+        [full_interval("1D"), {**base_bad, "Interval": "1W"}],
+        IND3,
+    ) == {"daily": True, "weekly": False, "monthly": False}

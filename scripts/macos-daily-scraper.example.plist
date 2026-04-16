@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Przykład LaunchAgent: codziennie o 8:00 uruchamia tv_scraper.py.
+  1. Skopiuj plik: cp scripts/macos-daily-scraper.example.plist ~/Library/LaunchAgents/com.trading_analyser.scraper.plist
+  2. Edytuj ścieżki: WorkingDirectory, ProgramArguments (venv Python + tv_scraper.py).
+  3. Załaduj: launchctl load ~/Library/LaunchAgents/com.trading_analyser.scraper.plist
+  4. Test: launchctl start com.trading_analyser.scraper
+
+  Wymagania: o 8:00 Mac jest wybudzony, Brave z CDP (9222) i karta TradingView są dostępne.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trading_analyser.scraper</string>
+    <key>WorkingDirectory</key>
+    <string>/ZAMIEN_NA_PELNA_SCIEZKE/trading_analyser</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ZAMIEN_NA_PELNA_SCIEZKE/trading_analyser/venv/bin/python</string>
+        <string>tv_scraper.py</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/ZAMIEN_NA_PELNA_SCIEZKE/trading_analyser/app.log</string>
+    <key>StandardErrorPath</key>
+    <string>/ZAMIEN_NA_PELNA_SCIEZKE/trading_analyser/app.log</string>
+</dict>
+</plist>

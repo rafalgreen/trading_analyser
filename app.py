@@ -5,6 +5,7 @@ import re
 import json
 import subprocess
 import sys
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
@@ -12,18 +13,32 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+from collections import defaultdict
+
+import pandas as pd
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-DEFAULT_AUTO_SCHEDULE = {"enabled": False, "hour": 7, "minute": 30}
+from tv_scraper import row_has_indicator_data
+
+DEFAULT_AUTO_SCHEDULE = {
+    "enabled": False,
+    "hour": 7,
+    "minute": 30,
+    "run_on_startup": True,
+}
 _scheduler = BackgroundScheduler()
+
+# Opóźnienie przed startem scrapera po włączeniu uvicorn (sekundy)
+STARTUP_SCRAPER_DELAY_SEC = 15
 
 
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
     reschedule_auto_scraper()
     _scheduler.start()
+    _schedule_startup_scrape()
     yield
     _scheduler.shutdown(wait=False)
 
@@ -112,6 +127,22 @@ def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, A
 
 def _scheduled_scraper_run():
     start_scraper_subprocess(None)
+
+
+def _schedule_startup_scrape() -> None:
+    """Po starcie serwera uruchamia pełny odczyt na bieżący dzień (jeśli włączone w konfiguracji)."""
+    if os.environ.get("PYTEST_RUNNING"):
+        return
+    cfg = load_config()
+    if not (cfg.get("auto_schedule") or {}).get("run_on_startup", True):
+        return
+
+    def _run():
+        start_scraper_subprocess(None)
+
+    t = threading.Timer(STARTUP_SCRAPER_DELAY_SEC, _run)
+    t.daemon = True
+    t.start()
 
 
 def reschedule_auto_scraper() -> None:
@@ -234,6 +265,50 @@ def clean_company_name(ticker: str, raw_name: str, watchlist: Dict) -> str:
     
     return raw_name
 
+
+def row_allows_watchlist_signals(row: Dict[str, Any], indicators: List[str]) -> bool:
+    """
+    Te same kryteria co kompletny wiersz w tv_scraper: status OK oraz każdy wskaźnik
+    z konfiguracji ma realne dane (nie wystarczy jeden HTS/MacD ze „śmieciowego” DOM).
+    """
+    if (row.get("Scrape_Status") or "").strip().upper() != "OK":
+        return False
+    if not indicators:
+        return False
+    ser = pd.Series(row)
+    try:
+        return all(row_has_indicator_data(ser, ind) for ind in indicators)
+    except Exception:
+        return False
+
+
+def wl_signal_visibility_for_ticker(
+    rows: List[Dict[str, Any]],
+    indicators: Optional[List[str]] = None,
+) -> Dict[str, bool]:
+    """
+    Sygnały D / W / M z eksportu watchlisty: osobno na interwał, tylko gdy wiersz 1D/1W/1M
+    ma pełny zestaw wskaźników z konfiguracji (zgodnie z row_has_indicator_data).
+    """
+    inds = indicators if indicators is not None else ["PCA", "HTS Panel", "MacD"]
+    if not rows:
+        return {"daily": False, "weekly": False, "monthly": False}
+
+    def iv(r: Dict[str, Any]) -> str:
+        return (r.get("Interval") or "").strip().upper()
+
+    def allow_for(interval: str) -> bool:
+        return any(
+            row_allows_watchlist_signals(r, inds) and iv(r) == interval for r in rows
+        )
+
+    return {
+        "daily": allow_for("1D"),
+        "weekly": allow_for("1W"),
+        "monthly": allow_for("1M"),
+    }
+
+
 def parse_date_from_filename(filename: str) -> str:
     base = os.path.basename(filename)
     date_str = base.replace(CSV_PREFIX, "").replace(".csv", "")
@@ -282,7 +357,8 @@ def get_results(date_id: str):
         raise HTTPException(status_code=404, detail="Data not found for this date")
     
     watchlist = get_watchlist()
-    
+    indicators = load_config().get("indicators") or ["PCA", "HTS Panel", "MacD"]
+
     results = []
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -314,6 +390,27 @@ def get_results(date_id: str):
                     row["WL_1Y"] = wl_data.get("1Y", "")
                 
                 results.append(row)
+
+        by_ticker: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in results:
+            by_ticker[row.get("Ticker", "") or ""].append(row)
+        wl_vis = {
+            t: wl_signal_visibility_for_ticker(rs, indicators)
+            for t, rs in by_ticker.items()
+        }
+        for row in results:
+            t = row.get("Ticker", "") or ""
+            vis = wl_vis.get(t) or {
+                "daily": False,
+                "weekly": False,
+                "monthly": False,
+            }
+            if not vis["daily"]:
+                row["WL_Daily_Signal"] = ""
+            if not vis["weekly"]:
+                row["WL_Weekly_Signal"] = ""
+            if not vis["monthly"]:
+                row["WL_Monthly_Signal"] = ""
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
         
@@ -357,6 +454,7 @@ async def update_config(request: Request):
             "enabled": bool(a.get("enabled", False)),
             "hour": max(0, min(23, int(a.get("hour", 7)))),
             "minute": max(0, min(59, int(a.get("minute", 0)))),
+            "run_on_startup": bool(a.get("run_on_startup", True)),
         }
 
     save_config(config)

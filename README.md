@@ -52,37 +52,56 @@ Pliki zapisywane są w katalogu **`results/`**, nazwa w stylu:
 
 `tradingview_results_YYYY-MM-DD.csv`
 
-Kolumny zależą od wskaźników; dodatkowo:
+Kolejność kolumn jest stała na początku każdego wiersza (meta), potem kolumny wskaźników z konfiguracji:
+
+1. **`Ticker`**, **`Company_Name`**, **`Current_Price`**, **`Interval`**
+2. **`Scrape_Status`**, **`Scrape_Error`**
+3. dalej m.in. `PCA_Values`, `HTS Panel_*`, `MacD_*` — zależnie od **`indicators`** w `scraper_config.json`
+
+Znaczenie meta:
 
 - **`Scrape_Status`**: `OK` dla normalnego wiersza, **`SKIPPED`** gdy ticker został pominięty (nie znaleziono symbolu / błędny symbol).
 - **`Scrape_Error`**: przy `SKIPPED` — krótki opis powodu; przy `OK` zwykle puste.
 
 W panelu web tickery z `SKIPPED` są wizualnie oznaczone (czerwona ramka + komunikat).
 
-## Automatyczny dzienny odczyt (harmonogram)
+Starsze pliki CSV mogły być zapisane **bez** kolumn `Scrape_Status` / `Scrape_Error` w nagłówku, przez co pole statusu trafiało do złej kolumny (np. `PCA_Values` pokazywało `OK`). Aby wyrównać nagłówek i wiersze do obecnego formatu:
 
-W **`scraper_config.json`** (lub w panelu **Konfiguracja**) możesz ustawić:
+```bash
+python3 scripts/repair_results_csv.py results/tradingview_results_YYYY-MM-DD.csv
+```
+
+Możesz podać kilka plików naraz. Jeśli nagłówek już zawiera `Scrape_Status`, skrypt nic nie zmienia.
+
+## Automatyczny odczyt (harmonogram + start serwera)
+
+W **`scraper_config.json`** (lub w panelu **Konfiguracja**) pole **`auto_schedule`**:
 
 ```json
 "auto_schedule": {
   "enabled": true,
-  "hour": 7,
-  "minute": 30
+  "hour": 8,
+  "minute": 0,
+  "run_on_startup": true
 }
 ```
 
-O ustalonej **godzinie lokalnej** (zegar systemowy) aplikacja uruchomi `tv_scraper.py` z **pełną listą tickerów** z konfiguracji — tak jak przycisk „Uruchom wszystkie”.  
-**Musisz mieć stale uruchomiony proces `uvicorn`** oraz realną możliwość działania scrapera (Brave z CDP + karta TradingView). Harmonogram nie uruchamia przeglądarki za Ciebie.
+- **`enabled` + `hour` / `minute`** — codziennie o tej **godzinie lokalnej** uruchamiany jest pełny przebieg (jak „Uruchom wszystkie”).
+- **`run_on_startup`** (domyślnie `true`) — przy **każdym starcie** `uvicorn` po ok. **15 sekundach** uruchamiany jest ten sam pełny odczyt, żeby od razu zaktualizować plik wynikowy na **bieżący dzień**. Wyłącz (`false`), jeśli nie chcesz długiego scrapowania przy każdym restarcie serwera podczas developmentu.
+
+**Musisz mieć uruchomiony `uvicorn`** oraz możliwość działania scrapera (Brave z CDP + karta TradingView). Harmonogram ani start nie otwierają samej przeglądarki.
 
 ## Dane pomocnicze
 
 - **`data/`** — opcjonalnie eksport watchlisty (np. `Portfel_Watchlist_*.csv`); pliki CSV z tego katalogu są domyślnie ignorowane przez Git — nie commituj prywatnych list bez potrzeby.
 - Zrzuty DOM do debugowania zapisuj pod **`data/tv_dom_dump.html`** (ścieżka ignorowana w repozytorium); skrypt `scripts/get_dom.py` tworzy ten plik w `data/`.
+- **`scripts/repair_results_csv.py`** — naprawa starych plików wynikowych (patrz sekcja [Wyniki](#wyniki)).
+- **`scripts/macos-daily-scraper.example.plist`** — przykład **launchd** na macOS: codzienne `python tv_scraper.py` o wybranej godzinie (dostosuj ścieżki i `WorkingDirectory`, potem `launchctl load`).
 
 ## Testy
 
 ```bash
-pytest tests/ -q
+python3 -m pytest tests/ -q
 ```
 
 Testy jednostkowe nie wymagają uruchomionej przeglądarki. Skrypty integracyjne Playwright w `tests/` są wyłączone z domyślnego zbierania testów (patrz `tests/conftest.py`).
