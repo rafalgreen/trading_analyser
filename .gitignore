@@ -1,0 +1,26 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Local / secrets
+.env
+.env.*
+
+# Runtime logs & scraper state
+app.log
+scraper_state.json
+scraper_status.json
+
+# Generated data (large / personal)
+results/
+data/*.csv
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Trading Analyser — Dashboard do analizy sygnałów PCA, HTS Panel i MacD dla Twojego portfela inwestycyjnego.">
+    <title>Trading Analyzer</title>
+    <!-- Favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='24' font-size='24'>📈</text></svg>" type="image/svg+xml">
+    <!-- Modern Font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Phosphor Icons for modern iconography -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="styles.css?v=4">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar for History -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <i class="ph ph-trend-up logo-icon"></i>
+                <h2>Trading Analyser</h2>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-link active" data-target="dashboard-view">
+                    <i class="ph ph-squares-four"></i>
+                    Dashboard
+                </a>
+                <a href="#" class="nav-link" data-target="config-view">
+                    <i class="ph ph-gear"></i>
+                    Konfiguracja
+                </a>
+            </nav>
+            
+            <div class="history-section">
+                <h3>Historia Wyników</h3>
+                <div class="history-list" id="history-list">
+                    <!-- History items will be injected here -->
+                    <div class="loading-spinner sidebar-spinner"></div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="top-nav">
+                <div class="current-view-info">
+                    <h1 id="current-date-title">Wczytywanie...</h1>
+                    <p class="subtitle" id="record-count">-- wyników</p>
+                </div>
+                <div class="header-actions" style="display:flex; gap:12px; align-items:center;">
+                    <!-- Sort Dropdown -->
+                    <div class="sort-container">
+                        <select id="sort-select" class="sort-select" title="Sortuj karty">
+                            <option value="default">Domyślne</option>
+                            <option value="pca-desc">PCA ↓ (najwyższe)</option>
+                            <option value="pca-asc">PCA ↑ (najniższe)</option>
+                            <option value="ticker-asc">Ticker A→Z</option>
+                            <option value="ticker-desc">Ticker Z→A</option>
+                        </select>
+                    </div>
+                    <div class="search-container">
+                        <i class="ph ph-magnifying-glass search-icon"></i>
+                        <input type="text" id="search-input" class="search-input" placeholder="Szukaj tickera...">
+                    </div>
+                    <button class="icon-btn" id="refresh-btn" title="Odśwież dane">
+                        <i class="ph ph-arrows-clockwise"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="view-container">
+                <!-- Dashboard View -->
+                <div id="dashboard-view" class="view-panel active">
+                    <div class="dashboard">
+                <div id="loading-overlay" class="loading-overlay">
+                    <div class="loading-spinner main-spinner"></div>
+                    <p>Wczytywanie danych z TradingView...</p>
+                </div>
+                
+                <div id="error-message" class="error-message hidden">
+                    <i class="ph ph-warning-circle"></i>
+                    <p id="error-text">Wystąpił błąd podczas pobierania danych.</p>
+                </div>
+                
+                <!-- Chart Panel -->
+                <div class="chart-panel glass-panel hidden" id="chart-panel">
+                    <div class="chart-header">
+                        <h2 id="chart-title">Wartość PCA (1D) dla tickerów</h2>
+                        <div class="chart-interval-toggle" id="chart-interval-toggle">
+                            <button class="interval-toggle-btn active" data-interval="1D">1D</button>
+                            <button class="interval-toggle-btn" data-interval="1W">1W</button>
+                            <button class="interval-toggle-btn" data-interval="1M">1M</button>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="pcaChart"></canvas>
+                    </div>
+                </div>
+
+                    <!-- Grid for Ticker Cards -->
+                    <div class="grid-container" id="results-grid">
+                        <!-- Cards will be injected here -->
+                    </div>
+                </div> <!-- /dashboard -->
+                </div> <!-- /dashboard-view -->
+
+                <!-- Config View -->
+                <div id="config-view" class="view-panel">
+                    <div class="config-panel glass-panel">
+                        <h2>Konfiguracja Scrapera</h2>
+                        
+                        <!-- Status Section -->
+                        <div class="config-section status-section">
+                            <h3>Status: <span id="scraper-status-text" class="status-badge idle">Gotowy</span></h3>
+                            <div id="scraper-error-msg" class="error-text hidden" style="margin-bottom: 10px; color: #ff5c5c; font-weight: bold;"></div>
+                            <div class="progress-container hidden" id="scraper-progress-container">
+                                <div class="progress-info">
+                                    <span id="scraper-progress-text">0/0</span>
+                                    <span id="scraper-current-ticker" class="current-ticker-label"></span>
+                                </div>
+                                <div class="progress-bar-bg">
+                                    <div class="progress-bar-fill" id="scraper-progress-fill" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="scraper-actions">
+                                <button id="btn-run-scraper-all" class="btn btn-primary">
+                                    <i class="ph ph-play"></i> Uruchom wszystkie
+                                </button>
+                                <button id="btn-run-scraper-selected" class="btn btn-secondary">
+                                    <i class="ph ph-play-circle"></i> Uruchom wybrane
+                                </button>
+                                <button id="btn-stop-scraper" class="btn btn-danger hidden">
+                                    <i class="ph ph-stop"></i> Zatrzymaj
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="config-grid">
+                            <!-- Left Col: Tickers -->
+                            <div class="config-section tickers-section">
+                                <div class="section-header">
+                                    <h3>Tickery <span class="badge" id="tickers-count">0</span></h3>
+                                    <div class="ticker-add">
+                                        <input type="text" id="new-ticker-input" placeholder="Wpisz ticker (np. AAPL)">
+                                        <button id="btn-add-ticker" class="btn btn-sm btn-primary">Dodaj</button>
+                                    </div>
+                                </div>
+                                
+                                <div class="tickers-list-container">
+                                    <!-- Header for list -->
+                                    <div class="tickers-list-header">
+                                        <label class="checkbox-container">
+                                            <input type="checkbox" id="select-all-tickers">
+                                            <span class="checkmark"></span>
+                                        </label>
+                                        <span>Zaznacz wszystkie do pobrania</span>
+                                    </div>
+                                    <div class="tickers-list" id="config-tickers-list">
+                                        <!-- Tickers will be injected here -->
+                                        <div class="loading-spinner"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right Col: Intervals & Indicators -->
+                            <div class="config-right-col">
+                                <div class="config-section intervals-section">
+                                    <h3>Interwały</h3>
+                                    <div class="checkbox-group" id="config-intervals-group">
+                                        <label class="checkbox-container">
+                                            <input type="checkbox" value="1D" class="config-interval-cb">
+                                            <span class="checkmark"></span>
+                                            1D (Dzienny)
+                                        </label>
+                                        <label class="checkbox-container">
+                                            <input type="checkbox" value="1W" class="config-interval-cb">
+                                            <span class="checkmark"></span>
+                                            1W (Tygodniowy)
+                                        </label>
+                                        <label class="checkbox-container">
+                                            <input type="checkbox" value="1M" class="config-interval-cb">
+                                            <span class="checkmark"></span>
+                                            1M (Miesięczny)
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div class="config-section indicators-section">
+                                    <h3>Wskaźniki</h3>
+                                    <div class="indicators-tags" id="config-indicators-list">
+                                        <!-- Tags injected here -->
+                                    </div>
+                                    <div class="indicator-add mt-2">
+                                        <input type="text" id="new-indicator-input" placeholder="Dodaj wskaźnik">
+                                        <button id="btn-add-indicator" class="btn btn-sm btn-secondary">Dodaj</button>
+                                    </div>
+                                </div>
+                                
+                                <div class="config-save-section mt-4">
+                                    <button id="btn-save-config" class="btn btn-success btn-lg w-100">
+                                        <i class="ph ph-floppy-disk"></i> Zapisz Konfigurację
+                                    </button>
+                                    <p class="save-status" id="config-save-status"></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div> <!-- /config-view -->
+            </div> <!-- /view-container -->
+        </main>
+    </div>
+
+    <!-- Template for a Ticker Group Card -->
+    <template id="ticker-card-template">
+        <div class="ticker-card glass-panel collapsed" style="grid-column: 1 / -1;">
+            <div class="card-header">
+                <div class="ticker-info">
+                    <h2 class="ticker-name">BTCUSDT</h2>
+                    <span class="company-name">Nazwa Firmy</span>
+                </div>
+                <div class="card-header-right">
+                    <div class="watchlist-badges"></div>
+                    <div class="card-summary"></div>
+                    <i class="ph ph-caret-down card-chevron"></i>
+                </div>
+            </div>
+            
+            <div class="card-body">
+                <div class="intervals-container">
+                    <!-- Intervals columns injected here -->
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Template for an Interval Column -->
+    <template id="interval-column-template">
+        <div class="interval-column">
+            <h3 class="interval-title"><span class="interval-badge">1D</span></h3>
+            
+            <!-- HTS Section -->
+            <div class="indicator-section">
+                <div class="section-title">HTS Panel</div>
+                <div class="data-row">
+                    <span class="label">Trend</span>
+                    <span class="value trend-value hts-trend">Bez trendu</span>
+                </div>
+                <div class="data-row">
+                    <span class="label">Cross</span>
+                    <span class="value tag hts-cross">Brak</span>
+                </div>
+                <div class="values-grid values-grid-4">
+                    <div class="value-box">
+                        <span class="box-label">Fast High</span>
+                        <span class="box-value hts-fast-high">--</span>
+                    </div>
+                    <div class="value-box">
+                        <span class="box-label">Fast Low</span>
+                        <span class="box-value hts-fast-low">--</span>
+                    </div>
+                    <div class="value-box">
+                        <span class="box-label">Slow High</span>
+                        <span class="box-value hts-slow-high">--</span>
+                    </div>
+                    <div class="value-box">
+                        <span class="box-label">Slow Low</span>
+                        <span class="box-value hts-slow-low">--</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="divider"></div>
+
+            <!-- MacD Section -->
+            <div class="indicator-section">
+                <div class="section-title">MacD</div>
+                <div class="data-row">
+                    <span class="label">Trend</span>
+                    <span class="value trend-value macd-trend">Bez trendu</span>
+                </div>
+                <div class="data-row">
+                    <span class="label">Cross</span>
+                    <span class="value tag macd-cross">Brak</span>
+                </div>
+                <div class="values-grid">
+                    <div class="value-box">
+                        <span class="box-label">Fast</span>
+                        <span class="box-value macd-fast">--</span>
+                    </div>
+                    <div class="value-box">
+                        <span class="box-label">Slow</span>
+                        <span class="box-value macd-slow">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="divider"></div>
+            
+            <!-- PCA Section -->
+            <div class="indicator-section">
+                <div class="section-title">PCA</div>
+                <div class="data-row">
+                    <span class="label">Wartość</span>
+                    <span class="value pca-value">--</span>
+                </div>
+                <div class="pca-color-bar"></div>
+            </div>
+        </div>
+    </template>
+
+    <script src="app.js?v=5"></script>
+</body>
+</html>
