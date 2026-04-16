@@ -138,6 +138,19 @@
                                     <i class="ph ph-stop"></i> Zatrzymaj
                                 </button>
                             </div>
+                            <div class="auto-schedule-section mt-3">
+                                <h4 class="schedule-heading">Automatyczny odczyt (w tle)</h4>
+                                <p class="schedule-hint">Wymaga ciągłego działania serwera <code>uvicorn</code> oraz Brave z TradingView. Czas wg zegara systemowego.</p>
+                                <label class="checkbox-container schedule-enable-row">
+                                    <input type="checkbox" id="auto-schedule-enabled">
+                                    <span class="checkmark"></span>
+                                    Codziennie o
+                                    <input type="number" id="auto-schedule-hour" min="0" max="23" value="7" class="schedule-time-input">
+                                    :
+                                    <input type="number" id="auto-schedule-minute" min="0" max="59" value="30" class="schedule-time-input">
+                                    pobierz wszystkie tickery z konfiguracji
+                                </label>
+                            </div>
                         </div>
 
                         <div class="config-grid">

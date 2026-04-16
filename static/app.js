@@ -376,9 +376,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const columnTemplate = document.getElementById('interval-column-template');
 
+        function escapeHtml(str) {
+            if (str == null || str === '') return '';
+            const d = document.createElement('div');
+            d.textContent = String(str);
+            return d.innerHTML;
+        }
+
         // Render one card per Ticker
         sortedKeys.forEach(ticker => {
             const rows = groupedData[ticker];
+            const skipRow = rows.find(r => (r['Scrape_Status'] || '').toUpperCase() === 'SKIPPED');
             const companyName = rows[0]['Company_Name'] || 'Nieznana';
             
             // Clone Ticker Card template
@@ -390,7 +398,14 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // Build summary pills for collapsed view
             const summaryContainer = cardClone.querySelector('.card-summary');
-            summaryContainer.innerHTML = buildSummaryPills(rows);
+            if (skipRow) {
+                cardEl.classList.add('ticker-skipped');
+                const err = skipRow['Scrape_Error'] || 'Nie udało się pobrać danych';
+                summaryContainer.innerHTML = `<span class="skip-error-banner">⚠ Pominięty ticker</span>`;
+                cardClone.querySelector('.company-name').textContent = '—';
+            } else {
+                summaryContainer.innerHTML = buildSummaryPills(rows);
+            }
             
             // Add watchlist signal badges if available
             const badgesContainer = cardClone.querySelector('.watchlist-badges');
@@ -412,6 +427,13 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             const intervalsContainer = cardClone.querySelector('.intervals-container');
+
+            if (skipRow) {
+                const err = skipRow['Scrape_Error'] || '';
+                intervalsContainer.innerHTML = `<div class="skip-detail">${escapeHtml(err)}</div>`;
+                resultsGrid.appendChild(cardClone);
+                return;
+            }
             
             // Sort rows by interval (1D -> 1W -> 1M)
             const sortOrder = {"1D": 1, "1W": 2, "1M": 3};
@@ -612,7 +634,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // CONFIG & SCRAPER PANEL LOGIC
     // ==========================================
     
-    let currentConfig = { tickers: [], intervals: [], indicators: [] };
+    let currentConfig = {
+        tickers: [],
+        intervals: [],
+        indicators: [],
+        auto_schedule: { enabled: false, hour: 7, minute: 30 },
+    };
     let statusInterval = null;
 
     // Elements Config
@@ -629,6 +656,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnAddIndicator = document.getElementById('btn-add-indicator');
     const btnSaveConfig = document.getElementById('btn-save-config');
     const configSaveStatus = document.getElementById('config-save-status');
+    const autoScheduleEnabled = document.getElementById('auto-schedule-enabled');
+    const autoScheduleHour = document.getElementById('auto-schedule-hour');
+    const autoScheduleMinute = document.getElementById('auto-schedule-minute');
 
     // Scraper elements
     const statusText = document.getElementById('scraper-status-text');
@@ -741,6 +771,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderConfigUI();
             });
         });
+
+        const sched = currentConfig.auto_schedule || { enabled: false, hour: 7, minute: 30 };
+        autoScheduleEnabled.checked = !!sched.enabled;
+        autoScheduleHour.value = String(Math.max(0, Math.min(23, parseInt(sched.hour, 10) || 7)));
+        autoScheduleMinute.value = String(Math.max(0, Math.min(59, parseInt(sched.minute, 10) || 0)));
     }
 
     // --- Config Actions ---
@@ -781,6 +816,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const selectedIntervals = Array.from(intervalsCheckboxes)
             .filter(cb => cb.checked).map(cb => cb.value);
         currentConfig.intervals = selectedIntervals;
+
+        currentConfig.auto_schedule = {
+            enabled: autoScheduleEnabled.checked,
+            hour: Math.max(0, Math.min(23, parseInt(autoScheduleHour.value, 10) || 0)),
+            minute: Math.max(0, Math.min(59, parseInt(autoScheduleMinute.value, 10) || 0)),
+        };
 
         btnSaveConfig.disabled = true;
         configSaveStatus.textContent = 'Zapisywanie...';

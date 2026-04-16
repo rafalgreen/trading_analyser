@@ -135,6 +135,35 @@ def parse_indicators(html_content, indicators_to_find):
 
     return results
 
+
+def record_skipped_ticker(current_run_file: str, ticker: str, reason: str) -> None:
+    """Zapisuje jeden wiersz w CSV: ticker pominięty (nie znaleziony / błędny symbol)."""
+    row_base = {
+        "Ticker": ticker,
+        "Company_Name": "—",
+        "Current_Price": "",
+        "Interval": "-",
+        "Scrape_Status": "SKIPPED",
+        "Scrape_Error": reason,
+    }
+    if os.path.exists(current_run_file):
+        df = pd.read_csv(current_run_file, encoding="utf-8")
+        if "Scrape_Status" in df.columns:
+            mask_skip = (df["Ticker"].astype(str) == ticker) & (
+                df["Scrape_Status"].astype(str) == "SKIPPED"
+            )
+            df = df[~mask_skip]
+        for col in df.columns:
+            if col not in row_base:
+                row_base[col] = ""
+        ordered = {c: row_base.get(c, "") for c in df.columns}
+        out = pd.concat([df, pd.DataFrame([ordered])], ignore_index=True)
+    else:
+        out = pd.DataFrame([row_base])
+    out.to_csv(current_run_file, index=False, encoding="utf-8")
+    print(f"    [CSV] Zapisano pominięty ticker {ticker}: {reason}")
+
+
 def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
     print(f"[*] Łączenie z przeglądarką na porcie {port}...")
     
@@ -240,6 +269,11 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                         print(f"[-] BŁĄD: Ticker {ticker} nie został odnaleziony (okno wyszukiwania wciąż otwarte). Daję na pauzę i pomijam...")
                         target_page.keyboard.press("Escape")
                         time.sleep(1)
+                        record_skipped_ticker(
+                            current_run_file,
+                            ticker,
+                            "Nie znaleziono w wyszukiwarce (brak dopasowania lub zły format)",
+                        )
                         for interval in intervals:
                             update_state(ticker, interval)
                         continue
@@ -253,6 +287,11 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                     title_text = target_page.title()
                     if "Błędny symbol" in title_text or "Invalid symbol" in title_text or "Nie znaleziono" in title_text:
                         print(f"[-] BŁĄD: Ticker {ticker} nie istnieje. Pomijam...")
+                        record_skipped_ticker(
+                            current_run_file,
+                            ticker,
+                            "Błędny symbol / nie znaleziono na TradingView",
+                        )
                         for interval in intervals:
                             update_state(ticker, interval) # Skrót by pomijać również przy wznowieniu
                         continue
@@ -296,7 +335,9 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                         "Ticker": ticker,
                         "Company_Name": company_name,
                         "Current_Price": current_price,
-                        "Interval": interval
+                        "Interval": interval,
+                        "Scrape_Status": "OK",
+                        "Scrape_Error": "",
                     }
                     
                     # Logika dynamicznego dodawania/usuwania wskaźników z listy

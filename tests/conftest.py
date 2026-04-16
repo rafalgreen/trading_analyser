@@ -1,6 +1,9 @@
 import pytest
 from fastapi.testclient import TestClient
 
+# Skrypty integracyjne (Playwright + CDP) — nie uruchamiać w zwykłym CI
+collect_ignore = ["test_clear.py", "test_macd.py", "test_add_indicator.py"]
+
 
 @pytest.fixture
 def app_env(tmp_path, monkeypatch):

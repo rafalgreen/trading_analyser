@@ -1254,3 +1254,52 @@ input[type="text"]:focus {
 .save-status.success { color: var(--success); }
 .save-status.error { color: var(--danger); }
 
+.auto-schedule-section {
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+.schedule-heading {
+    font-size: 1rem;
+    margin-bottom: 8px;
+}
+.schedule-hint {
+    font-size: 0.85rem;
+    margin-bottom: 10px;
+    color: var(--text-muted);
+}
+.schedule-enable-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+.schedule-time-input {
+    width: 52px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-panel);
+    color: var(--text-primary);
+}
+
+.ticker-skipped {
+    border-color: rgba(239, 68, 68, 0.45) !important;
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.2);
+}
+.skip-error-banner {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--danger-bg);
+    color: var(--danger);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+.skip-detail {
+    padding: 16px;
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+

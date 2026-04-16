@@ -5,6 +5,7 @@ import re
 import json
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +13,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
-app = FastAPI(title="Trading Analyser API")
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+DEFAULT_AUTO_SCHEDULE = {"enabled": False, "hour": 7, "minute": 30}
+_scheduler = BackgroundScheduler()
+
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    reschedule_auto_scraper()
+    _scheduler.start()
+    yield
+    _scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title="Trading Analyser API", lifespan=_app_lifespan)
 
 # Setup CORS (credentials + wildcard is invalid in browsers; API does not need cookies)
 app.add_middleware(
@@ -46,12 +62,74 @@ class HistoryResponse(BaseModel):
 def load_config() -> Dict[str, Any]:
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {"tickers": [], "intervals": ["1D", "1W", "1M"], "indicators": ["PCA", "HTS Panel", "MacD"]}
+            cfg = json.load(f)
+    else:
+        cfg = {
+            "tickers": [],
+            "intervals": ["1D", "1W", "1M"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+        }
+    if "auto_schedule" not in cfg:
+        cfg["auto_schedule"] = DEFAULT_AUTO_SCHEDULE.copy()
+    else:
+        for k, v in DEFAULT_AUTO_SCHEDULE.items():
+            cfg["auto_schedule"].setdefault(k, v)
+    return cfg
+
 
 def save_config(config: Dict[str, Any]):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+# --- Scraper subprocess (współdzielone: API + harmonogram) ---
+_scraper_process: Optional[subprocess.Popen] = None
+
+
+def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Uruchamia `tv_scraper.py` w tle. Pusta lista tickerów = pełna lista z konfiguracji."""
+    global _scraper_process
+    if _scraper_process is not None and _scraper_process.poll() is None:
+        return {"status": "already_running", "message": "Scraper jest już uruchomiony."}
+    cmd = [sys.executable, "tv_scraper.py"]
+    if tickers:
+        cmd.extend(["--ticker", ",".join(tickers)])
+    try:
+        _scraper_process = subprocess.Popen(
+            cmd,
+            cwd=ROOT_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return {
+            "status": "started",
+            "pid": _scraper_process.pid,
+            "tickers_count": len(tickers) if tickers else "all",
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def _scheduled_scraper_run():
+    start_scraper_subprocess(None)
+
+
+def reschedule_auto_scraper() -> None:
+    """Przeładuje harmonogram codziennego scrapera z pliku konfiguracji."""
+    _scheduler.remove_all_jobs()
+    cfg = load_config()
+    sched = cfg.get("auto_schedule") or {}
+    if not sched.get("enabled"):
+        return
+    h = max(0, min(23, int(sched.get("hour", 7))))
+    m = max(0, min(59, int(sched.get("minute", 0))))
+    _scheduler.add_job(
+        _scheduled_scraper_run,
+        CronTrigger(hour=h, minute=m),
+        id="daily_tv_scraper",
+        replace_existing=True,
+    )
+
 
 # --- Watchlist Loader ---
 def load_watchlist() -> Dict[str, Dict[str, str]]:
@@ -273,48 +351,26 @@ async def update_config(request: Request):
         config["intervals"] = body["intervals"]
     if "indicators" in body:
         config["indicators"] = [i.strip() for i in body["indicators"] if i.strip()]
-    
+    if "auto_schedule" in body and isinstance(body["auto_schedule"], dict):
+        a = body["auto_schedule"]
+        config["auto_schedule"] = {
+            "enabled": bool(a.get("enabled", False)),
+            "hour": max(0, min(23, int(a.get("hour", 7)))),
+            "minute": max(0, min(59, int(a.get("minute", 0)))),
+        }
+
     save_config(config)
+    reschedule_auto_scraper()
     return {"status": "saved", "config": config}
 
 # ===================== SCRAPER API =====================
 
-# Track the running scraper process
-_scraper_process: Optional[subprocess.Popen] = None
-
 @app.post("/api/scraper/run")
 async def run_scraper(request: Request):
     """Start the scraper as a background subprocess."""
-    global _scraper_process
-    
-    # Check if already running
-    if _scraper_process is not None and _scraper_process.poll() is None:
-        return {"status": "already_running", "message": "Scraper jest już uruchomiony."}
-    
     body = await request.json()
     tickers = body.get("tickers", [])  # Empty = use config
-    
-    # Build command
-    cmd = [sys.executable, "tv_scraper.py"]
-    if tickers:
-        cmd.extend(["--ticker", ",".join(tickers)])
-    
-    try:
-        # Start scraper in background
-        _scraper_process = subprocess.Popen(
-            cmd,
-            cwd=ROOT_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        
-        return {
-            "status": "started",
-            "pid": _scraper_process.pid,
-            "tickers_count": len(tickers) if tickers else "all"
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return start_scraper_subprocess(tickers if tickers else None)
 
 @app.get("/api/scraper/status")
 def get_scraper_status():
