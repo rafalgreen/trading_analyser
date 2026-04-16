@@ -23,6 +23,26 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSortMode = 'default';
     let currentChartInterval = '1D'; // Current chart interval
 
+    function escapeHtml(str) {
+        if (str == null || str === '') return '';
+        const d = document.createElement('div');
+        d.textContent = String(str);
+        return d.innerHTML;
+    }
+
+    /** Zwraca bezpieczne CSS `color` albo fallback #555. Odrzuca ', ", ; , { } itd. */
+    function sanitizeCssColor(raw) {
+        if (!raw) return '#555';
+        const s = String(raw).trim();
+        if (/[;'"<>(){}\\]/.test(s) && !/^rgba?\([^()'"<>;\\]+\)$/i.test(s)) {
+            return '#555';
+        }
+        if (/^#[0-9a-f]{3,8}$/i.test(s)) return s;
+        if (/^rgba?\([\d\s,.%]+\)$/i.test(s)) return s;
+        if (/^[a-zA-Z]+$/.test(s)) return s;
+        return '#555';
+    }
+
     // Initialize App
     async function init() {
         await fetchHistory();
@@ -114,7 +134,7 @@ document.addEventListener('DOMContentLoaded', () => {
             
             item.innerHTML = `
                 <i class="ph ph-calendar-blank"></i>
-                <span>${date.label}</span>
+                <span>${escapeHtml(date.label)}</span>
             `;
             
             item.addEventListener('click', () => selectDate(date.id, date.label));
@@ -282,13 +302,32 @@ document.addEventListener('DOMContentLoaded', () => {
         return Number.isFinite(n) ? n : NaN;
     }
 
-    // Get PCA value for a ticker group (based on current chart interval) for sorting
+    // Get PCA value for a ticker group (based on current chart interval) for sorting.
+    // Returns NaN if there's no value to sort by — sorters treat NaN as "na dół".
     function getGroupPCA(rows) {
         const targetRow = rows.find(r => r['Interval'] === currentChartInterval);
-        if (!targetRow || !targetRow['PCA_Values']) return 0;
+        if (!targetRow || !targetRow['PCA_Values']) return NaN;
         const { valText } = parsePCA(targetRow['PCA_Values']);
         const num = parsePolishDecimal(valText);
-        return Number.isFinite(num) ? num : 0;
+        return Number.isFinite(num) ? num : NaN;
+    }
+
+    function cmpPcaDesc(a, b) {
+        const aNaN = Number.isNaN(a);
+        const bNaN = Number.isNaN(b);
+        if (aNaN && bNaN) return 0;
+        if (aNaN) return 1;
+        if (bNaN) return -1;
+        return b - a;
+    }
+
+    function cmpPcaAsc(a, b) {
+        const aNaN = Number.isNaN(a);
+        const bNaN = Number.isNaN(b);
+        if (aNaN && bNaN) return 0;
+        if (aNaN) return 1;
+        if (bNaN) return -1;
+        return a - b;
     }
 
     // Build compact summary pills for collapsed header
@@ -324,16 +363,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const dotColor = colorHex || '#555';
             const pcaDisplay = valText !== '--' ? valText : '';
             
+            const safeDotColor = sanitizeCssColor(dotColor);
             let pillHTML = `<span class="summary-pill">`;
-            pillHTML += `<span class="pill-label">${interval}</span>`;
+            pillHTML += `<span class="pill-label">${escapeHtml(interval)}</span>`;
             if (pcaDisplay) {
-                pillHTML += `<span class="pill-dot" style="background:${dotColor}; box-shadow: 0 0 4px ${dotColor};"></span>`;
-                pillHTML += `<span>${pcaDisplay}</span>`;
+                pillHTML += `<span class="pill-dot" style="background:${safeDotColor}; box-shadow: 0 0 4px ${safeDotColor};"></span>`;
+                pillHTML += `<span>${escapeHtml(pcaDisplay)}</span>`;
             }
             if (trendDir) {
-                pillHTML += `<span class="pill-trend ${trendClass}">${trendDir}</span>`;
+                pillHTML += `<span class="pill-trend ${trendClass}">${escapeHtml(trendDir)}</span>`;
             }
-            if (crossIcon) pillHTML += ` ${crossIcon}`;
+            if (crossIcon) pillHTML += ` ${escapeHtml(crossIcon)}`;
             pillHTML += `</span>`;
             
             pills.push(pillHTML);
@@ -373,10 +413,10 @@ document.addEventListener('DOMContentLoaded', () => {
         let sortedKeys = [...tickerOrder];
         switch (currentSortMode) {
             case 'pca-desc':
-                sortedKeys.sort((a, b) => getGroupPCA(groupedData[b]) - getGroupPCA(groupedData[a]));
+                sortedKeys.sort((a, b) => cmpPcaDesc(getGroupPCA(groupedData[a]), getGroupPCA(groupedData[b])));
                 break;
             case 'pca-asc':
-                sortedKeys.sort((a, b) => getGroupPCA(groupedData[a]) - getGroupPCA(groupedData[b]));
+                sortedKeys.sort((a, b) => cmpPcaAsc(getGroupPCA(groupedData[a]), getGroupPCA(groupedData[b])));
                 break;
             case 'ticker-asc':
                 sortedKeys.sort((a, b) => a.localeCompare(b));
@@ -389,13 +429,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const columnTemplate = document.getElementById('interval-column-template');
-
-        function escapeHtml(str) {
-            if (str == null || str === '') return '';
-            const d = document.createElement('div');
-            d.textContent = String(str);
-            return d.innerHTML;
-        }
 
         // Render one card per Ticker
         sortedKeys.forEach(ticker => {
@@ -545,12 +578,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function setTrendTextAndColor(node, val) {
-        val = val.trim();
+        val = (val == null ? '' : String(val)).trim();
         node.textContent = val;
         node.className = 'value trend-value'; // reset
-        if (val.toLowerCase().includes('wzrostowy') || val.toLowerCase() === 'up') {
+        const low = val.toLowerCase();
+        if (low.includes('wzrostowy') || low === 'up') {
             node.classList.add('trend-up');
-        } else if (val.toLowerCase().includes('spadkowy') || val.toLowerCase() === 'down') {
+        } else if (low.includes('spadkowy') || low === 'down') {
             node.classList.add('trend-down');
         } else {
             node.classList.add('trend-neutral');
@@ -558,20 +592,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function setCrossTag(node, val) {
-        val = val.trim();
-        // Remove parenthesis explanation for cleaner UI if present
+        val = (val == null ? '' : String(val)).trim();
         let displayVal = val;
-        if(val.includes('(')) {
+        if (val.includes('(')) {
             displayVal = val.split('(')[0].trim();
-            node.title = val; // Put full text in tooltip
+            node.title = val;
         }
-        
+
         node.textContent = displayVal;
         node.className = 'value tag'; // reset
-        
-        if (val.toLowerCase().includes('bull')) {
+        const low = val.toLowerCase();
+        if (low.includes('bull')) {
             node.classList.add('bull');
-        } else if (val.toLowerCase().includes('bear')) {
+        } else if (low.includes('bear')) {
             node.classList.add('bear');
         } else {
             node.classList.add('neutral');
@@ -582,14 +615,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // Parse values like "74 635,86 (Niebieski)" or "-1 216,62 (color: rgb(0, 255, 0);)"
     function parseValueWithColor(rawStr) {
         if (!rawStr || rawStr === 'NaN' || rawStr === 'undefined') return '--';
-        
-        const match = rawStr.match(/(.*?)\s*\((.*?)\)/);
+        const safeRaw = escapeHtml(rawStr);
+        const match = String(rawStr).match(/(.*?)\s*\((.*?)\)/);
         if (match) {
             const val = match[1].trim();
             const colorInfo = match[2].trim();
             let colorSpan = '';
-            
-            // Extract RGB if present
+
             const rgbMatch = colorInfo.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
             if (rgbMatch) {
                 const r = rgbMatch[1];
@@ -597,17 +629,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 const b = rgbMatch[3];
                 colorSpan = `<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background-color: rgb(${r},${g},${b}); margin-left: 6px; box-shadow: 0 0 5px rgba(${r},${g},${b},0.8);"></span>`;
             } else if (colorInfo.toLowerCase() !== 'brak') {
-                // If text color like "Niebieski"
                 let mappedColor = '#fff';
-                if(colorInfo.toLowerCase().includes('niebieski')) mappedColor = '#3b82f6';
-                if(colorInfo.toLowerCase().includes('zielony')) mappedColor = '#10b981';
-                if(colorInfo.toLowerCase().includes('czerwony')) mappedColor = '#ef4444';
-                
+                if (colorInfo.toLowerCase().includes('niebieski')) mappedColor = '#3b82f6';
+                if (colorInfo.toLowerCase().includes('zielony')) mappedColor = '#10b981';
+                if (colorInfo.toLowerCase().includes('czerwony')) mappedColor = '#ef4444';
+
                 colorSpan = `<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background-color: ${mappedColor}; margin-left: 6px;"></span>`;
             }
-            return `${val} ${colorSpan}`;
+            return `${escapeHtml(val)} ${colorSpan}`;
         }
-        return rawStr;
+        return safeRaw;
     }
 
     /** Valid CSS for box-shadow glow; appends "80" to rgb() which is invalid. */
@@ -733,6 +764,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadConfig();
                 pollScraperStatus(); // Start polling if we check config tab
             } else if (targetId === 'dashboard-view') {
+                if (statusInterval) {
+                    clearInterval(statusInterval);
+                    statusInterval = null;
+                }
                 fetchHistory();
             }
         });
@@ -757,17 +792,18 @@ document.addEventListener('DOMContentLoaded', () => {
         tickersCountEl.textContent = currentConfig.tickers.length;
         tickersListEl.innerHTML = '';
         currentConfig.tickers.forEach(t => {
+            const safe = escapeHtml(t);
             const item = document.createElement('div');
             item.className = 'ticker-item';
             item.innerHTML = `
                 <div class="ticker-item-left">
                     <label class="checkbox-container">
-                        <input type="checkbox" class="ticker-select-cb" value="${t}">
+                        <input type="checkbox" class="ticker-select-cb" value="${safe}">
                         <span class="checkmark"></span>
                     </label>
-                    <span class="ticker-name-bold" style="font-weight: 500">${t}</span>
+                    <span class="ticker-name-bold" style="font-weight: 500">${safe}</span>
                 </div>
-                <button class="btn-remove-ticker" data-ticker="${t}"><i class="ph ph-trash"></i></button>
+                <button class="btn-remove-ticker" data-ticker="${safe}"><i class="ph ph-trash"></i></button>
             `;
             tickersListEl.appendChild(item);
         });
@@ -793,11 +829,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // Render Indicators
         indicatorsListEl.innerHTML = '';
         currentConfig.indicators.forEach(ind => {
+            const safe = escapeHtml(ind);
             const tag = document.createElement('span');
             tag.className = 'tag-item';
             tag.innerHTML = `
-                ${ind} 
-                <button class="tag-remove" data-ind="${ind}"><i class="ph ph-x"></i></button>
+                ${safe} 
+                <button class="tag-remove" data-ind="${safe}"><i class="ph ph-x"></i></button>
             `;
             indicatorsListEl.appendChild(tag);
         });

@@ -106,6 +106,23 @@ python3 -m pytest tests/ -q
 
 Testy jednostkowe nie wymagają uruchomionej przeglądarki. Skrypty integracyjne Playwright w `tests/` są wyłączone z domyślnego zbierania testów (patrz `tests/conftest.py`).
 
+## Struktura modułów
+
+- **`tv_scraper.py`** — logika scrapowania (Playwright, TradingView, parsowanie legendy).
+- **`app.py`** — FastAPI: serwowanie `/api/*`, zarządzanie konfiguracją i procesem scrapera, harmonogram.
+- **`results_store.py`** — wspólny moduł I/O dla plików CSV z wynikami: stałe kolumn meta (`CSV_META_COLUMNS`), zapis `upsert` po (Ticker, Interval), odczyt odporny na uszkodzone wiersze, predykaty kompletności wiersza. Używany przez `tv_scraper.py`, `app.py` i `scripts/repair_results_csv.py`.
+- **`static/`** — panel web (HTML/CSS/JS).
+
+## Logging
+
+Scraper i API używają standardowej biblioteki `logging`. Poziom kontroluje zmienna środowiskowa:
+
+```bash
+TV_LOG_LEVEL=DEBUG uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+Dopuszczalne wartości: `DEBUG`, `INFO` (domyślnie), `WARNING`, `ERROR`.
+
 ## Jak to działa w skrócie
 
 1. Playwright łączy się z przeglądarką przez **CDP** (`localhost:9222`).
