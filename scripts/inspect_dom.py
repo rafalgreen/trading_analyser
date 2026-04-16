@@ -1,7 +1,12 @@
+import os
+
 import bs4
 import json
 
-soup = bs4.BeautifulSoup(open('tv_dom_dump.html', encoding='utf-8'), 'lxml')
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DUMP = os.path.join(_ROOT, "data", "tv_dom_dump.html")
+
+soup = bs4.BeautifulSoup(open(_DUMP, encoding="utf-8"), "lxml")
 
 legend_items = soup.find_all('div', attrs={'data-qa-id': 'legend-source-item'})
 

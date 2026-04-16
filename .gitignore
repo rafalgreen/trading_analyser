@@ -20,6 +20,9 @@ scraper_status.json
 results/
 data/*.csv
 
+# TradingView DOM dumps (may contain session / account identifiers)
+data/tv_dom_dump.html
+
 # OS / IDE
 .DS_Store
 .idea/

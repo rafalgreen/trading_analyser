@@ -2,6 +2,9 @@ import os
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def get_dom_structure(port=9222):
     print(f"[*] Łączenie z przeglądarką na porcie {port}...")
     
@@ -34,8 +37,8 @@ def get_dom_structure(port=9222):
             # Formujemy HTML przez BeautifulSoup, aby był czytelniejszy
             soup = BeautifulSoup(html_content, 'lxml')
             
-            # Zapisujemy do pliku .html, aby móc to przeanalizować
-            output_file = "tv_dom_dump.html"
+            os.makedirs(os.path.join(_ROOT, "data"), exist_ok=True)
+            output_file = os.path.join(_ROOT, "data", "tv_dom_dump.html")
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write(soup.prettify())
                 
