@@ -5,7 +5,14 @@ po Interval, tak aby wiersze zapisane ze statusem OK miały poprawne mapowanie k
 """
 import argparse
 import csv
+import os
 import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from results_store import CSV_META_COLUMNS  # noqa: E402
 
 
 def repair_path(path: str) -> None:
@@ -16,8 +23,9 @@ def repair_path(path: str) -> None:
         return
 
     header = rows[0]
-    if "Scrape_Status" in header:
-        print("OK:", path, "— nagłówek już zawiera Scrape_Status")
+    meta_after_interval = [c for c in CSV_META_COLUMNS if c not in ("Ticker", "Company_Name", "Current_Price", "Interval")]
+    if all(c in header for c in meta_after_interval):
+        print("OK:", path, "— nagłówek już zawiera kolumny meta (Scrape_Status/Scrape_Error)")
         return
 
     try:
@@ -26,17 +34,19 @@ def repair_path(path: str) -> None:
         print("Brak kolumny Interval w:", path, file=sys.stderr)
         return
 
+    missing_meta = [c for c in meta_after_interval if c not in header]
     insert_at = idx_iv + 1
-    new_header = header[:insert_at] + ["Scrape_Status", "Scrape_Error"] + header[insert_at:]
+    new_header = header[:insert_at] + missing_meta + header[insert_at:]
     n_old = len(header)
     n_new = len(new_header)
+    n_added = len(missing_meta)
 
     out_rows = [new_header]
     for row in rows[1:]:
         if len(row) == n_new:
             out_rows.append(row)
         elif len(row) == n_old:
-            out_rows.append(row[:insert_at] + ["", ""] + row[insert_at:])
+            out_rows.append(row[:insert_at] + [""] * n_added + row[insert_at:])
         elif len(row) < n_new:
             padded = row + [""] * (n_new - len(row))
             out_rows.append(padded)
@@ -46,7 +56,9 @@ def repair_path(path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerows(out_rows)
 
-    print(f"Naprawiono: {path} ({len(out_rows) - 1} wierszy danych, {n_old}→{n_new} kolumn)")
+    print(
+        f"Naprawiono: {path} ({len(out_rows) - 1} wierszy danych, {n_old}→{n_new} kolumn)"
+    )
 
 
 def main() -> None:
