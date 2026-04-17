@@ -36,6 +36,50 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 W przeglądarce: `http://127.0.0.1:8000` — historia plików CSV z katalogu `results/`, karty per ticker, wykres PCA, zakładka konfiguracji (tickery, interwały, wskaźniki, harmonogram).
 
+## Panel web — funkcjonalność
+
+### Karty tickerów (widok główny)
+
+Dla każdego tickera z wybranego pliku wynikowego generowana jest karta z ikonami akcji po prawej stronie nagłówka:
+
+- 🔄 **odśwież** — zleca ponowne pobranie tylko tego tickera (`POST /api/scraper/run` z `tickers=[ticker]`). Spinner gaśnie po zakończeniu runu lub po 60 s bezpiecznika.
+- 🕘 **historia** — modal z wykresem historycznym PCA dla wybranego interwału (`1D` / `1W` / `1M`), złączony z danych wszystkich dostępnych plików wynikowych.
+- ✏️ **zmiana nazwy** — modal do zmiany symbolu tickera w konfiguracji (np. gdy TradingView rozpoznaje go pod innym zapisem). Stara nazwa znika z bieżącego widoku (ukrywana w `localStorage`), nowy symbol jest automatycznie zlecany do pobrania.
+
+Po każdej karcie widać trzy kolumny interwałów (`1D`, `1W`, `1M`) z sekcjami dla każdego wskaźnika z konfiguracji. Jeśli brakuje danych dla konkretnego wskaźnika / interwału, pojawia się żółty banner „Brak danych dla: …", a jeśli cały ticker nie ma danych — dodatkowo baner „⚠ Brak danych" z podpowiedzią żeby sprawdzić zapis symbolu lub zmienić nazwę. Diagnostyka jest liczona niezależnie od kolumny `Scrape_Status` (`/api/results/{date_id}` zwraca pola `Missing_Indicators` oraz `All_Indicators_Missing`).
+
+Na górze widoku:
+
+- **Pasek wyszukiwania** — filtrowanie po tickerze / nazwie spółki.
+- **Sortowanie** — domyślne, po PCA (rosnąco / malejąco), po nazwie tickera.
+- **Licznik rekordów** — pokazuje liczbę widocznych / wszystkich wierszy i ewentualnie „N ukrytych po zmianie nazwy · (pokaż)" by przywrócić ukryte karty.
+- **Wskaźnik świeżości danych** — kropka kolorowa + wiek pliku („dzisiaj 08:12", „wczoraj", „7 dni temu").
+
+### Zmiana nazwy tickera (`POST /api/tickers/rename`)
+
+- Walidacja symbolu przez regex `^[A-Z0-9._-]{1,20}$`.
+- Fuzzy match starej nazwy: najpierw **dokładne trafienie**, potem **bazowy symbol** (prefiks przed pierwszą kropką, np. `LULU.O` ↔ `LULU`). Jeśli w konfigu jest jeden kandydat z tą samą bazą — używany; przy wielu kandydatach endpoint zwraca `409` i wymaga ręcznego rozstrzygnięcia.
+- CSV-y historyczne **nie są modyfikowane** (stare wiersze zostają jako audyt).
+- W UI stara karta jest ukrywana w `localStorage`, żeby reload jej nie przywrócił; przyciskiem „(pokaż)" przy liczniku rekordów można przywrócić ukryte symbole.
+
+### Zakładka „Konfiguracja"
+
+- **Tickery** — dodawanie / usuwanie symboli (walidacja po regexie jak wyżej).
+- **Interwały** i **wskaźniki** — checkboxy.
+- **Auto-schedule** — codzienny przebieg o ustawionej godzinie (APScheduler `CronTrigger`).
+- **`run_on_startup`** — **domyślnie wyłączone** (patrz niżej sekcję o harmonogramie).
+- Przyciski **„Uruchom wszystkie"** i **„Zatrzymaj"** — Uruchom potwierdza akcją w własnym modalu (natywne `confirm()` bywa wyciszane przez przeglądarki po „nie pokazuj kolejnych okien dialogowych"). Stop zabija całą grupę procesów scrapera (SIGTERM → SIGKILL) + fallback przez `pgrep -f tv_scraper.py` dla osieroconych procesów po restarcie serwera.
+- **Pasek postępu scrapera** — odświeżany co ~1 s (`GET /api/scraper/status`), pokazuje bieżący ticker i fazę `ticker x/N · wsk. y/M`.
+
+### Watchlista (zakładka „Watchlist")
+
+Jeśli w `data/` jest plik `Portfel_Watchlist_*.csv`, panel dołącza do tickerów pola: `Name`, `Last`, `Market_Cap`, `P/E`, `EPS`, `Beta`, `Revenue`, `Daily_Signal` / `Weekly_Signal` / `Monthly_Signal`, `Chg. %`, `YTD`, `1Y`. W widoku watchlisty można filtrować po sygnale (Strong Buy / Buy / Neutral / Sell / Strong Sell) i interwale — filtry pamiętają się w `localStorage`.
+
+### Powiadomienia i skróty
+
+- **Toasty** informują o starcie / zakończeniu scrapera, `already_running` (z informacją który ticker obecnie leci), sukcesie rename, błędach sieci.
+- **Skróty klawiaturowe**: `/` — focus na wyszukiwanie, `Esc` — zamyka aktywny modal / czyści filtr.
+
 ### Sam skrypt (CLI)
 
 ```bash
@@ -82,12 +126,12 @@ W **`scraper_config.json`** (lub w panelu **Konfiguracja**) pole **`auto_schedul
   "enabled": true,
   "hour": 8,
   "minute": 0,
-  "run_on_startup": true
+  "run_on_startup": false
 }
 ```
 
-- **`enabled` + `hour` / `minute`** — codziennie o tej **godzinie lokalnej** uruchamiany jest pełny przebieg (jak „Uruchom wszystkie”).
-- **`run_on_startup`** (domyślnie `true`) — przy **każdym starcie** `uvicorn` po ok. **15 sekundach** uruchamiany jest ten sam pełny odczyt, żeby od razu zaktualizować plik wynikowy na **bieżący dzień**. Wyłącz (`false`), jeśli nie chcesz długiego scrapowania przy każdym restarcie serwera podczas developmentu.
+- **`enabled` + `hour` / `minute`** — codziennie o tej **godzinie lokalnej** uruchamiany jest pełny przebieg (jak „Uruchom wszystkie").
+- **`run_on_startup`** — **domyślnie `false`**. Włącz (`true`), jeśli chcesz żeby `uvicorn` po każdym starcie automatycznie odpalał pełny scrape po ~15 s. W trakcie developmentu (częste restarty) to zaskakuje i preemptuje ręczne „rescrape" pojedynczych tickerów — dlatego domyślnie jest wyłączone.
 
 **Musisz mieć uruchomiony `uvicorn`** oraz możliwość działania scrapera (Brave z CDP + karta TradingView). Harmonogram ani start nie otwierają samej przeglądarki.
 
@@ -122,6 +166,20 @@ TV_LOG_LEVEL=DEBUG uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 Dopuszczalne wartości: `DEBUG`, `INFO` (domyślnie), `WARNING`, `ERROR`.
+
+Gdy scraper jest uruchamiany przez API (`POST /api/scraper/run` lub auto-schedule), jego **stdout/stderr** lądują w pliku **`scraper.log`** w katalogu projektu — każdy run zaczyna się nagłówkiem `===== <timestamp> start tickers=… =====`. Plik jest rotowany po przekroczeniu 2 MB (→ `scraper.log.1`). `scraper.log*` są w `.gitignore`.
+
+## REST API (skrót)
+
+- `GET /api/history` — lista plików wynikowych (data + liczba rekordów).
+- `GET /api/results/{date_id}` — wiersze z CSV dla danego dnia + per-row `Missing_Indicators` / `All_Indicators_Missing`.
+- `GET /api/ticker/{ticker}/history?interval=1D` — historia PCA dla tickera (dla modala wykresu historycznego).
+- `GET /api/config` / `POST /api/config` — pełna konfiguracja (tickery, interwały, wskaźniki, `auto_schedule`).
+- `POST /api/scraper/run` — uruchomienie scrapera, `body: {"tickers": ["LULU"]}` albo `[]` dla pełnego przebiegu. Zwraca `started` / `already_running` / `error`.
+- `POST /api/scraper/stop` — zatrzymanie (zabija grupę procesów + fallback przez `pgrep`).
+- `GET /api/scraper/status` — `status` (`idle` / `running` / `done` / `error`), `progress`, `current_ticker`, `pid`.
+- `POST /api/tickers/rename` — `body: {"old": "LULU.O", "new": "LULU"}`, fuzzy-match po bazowym symbolu.
+- `GET /api/watchlist` — dane z najnowszego `Portfel_Watchlist_*.csv` (jeśli jest).
 
 ## Jak to działa w skrócie
 
