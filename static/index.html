@@ -14,9 +14,17 @@
     <!-- Phosphor Icons for modern iconography -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=4">
+    <link rel="stylesheet" href="styles.css?v=8">
 </head>
 <body>
+    <div id="global-scrape-banner" class="global-scrape-banner" aria-live="polite">
+        <div class="banner-text">
+            <span class="banner-spinner" aria-hidden="true"></span>
+            <span id="global-scrape-banner-text">Scraper w toku…</span>
+        </div>
+        <div class="banner-progress"><div class="banner-progress-fill" id="global-scrape-banner-fill"></div></div>
+    </div>
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
     <div class="app-container">
         <!-- Sidebar for History -->
         <aside class="sidebar">
@@ -50,7 +58,10 @@
             <header class="top-nav">
                 <div class="current-view-info">
                     <h1 id="current-date-title">Wczytywanie...</h1>
-                    <p class="subtitle" id="record-count">-- wyników</p>
+                    <p class="subtitle record-count-wrap">
+                        <span id="record-count">-- wyników</span>
+                        <span id="data-freshness" class="data-freshness" hidden></span>
+                    </p>
                 </div>
                 <div class="header-actions" style="display:flex; gap:12px; align-items:center;">
                     <!-- Sort Dropdown -->
@@ -67,7 +78,10 @@
                         <i class="ph ph-magnifying-glass search-icon"></i>
                         <input type="text" id="search-input" class="search-input" placeholder="Szukaj tickera...">
                     </div>
-                    <button class="icon-btn" id="refresh-btn" title="Odśwież dane">
+                    <button class="icon-btn" id="expand-all-btn" title="Rozwiń / zwiń wszystko (E)" aria-label="Rozwiń lub zwiń wszystkie karty">
+                        <i class="ph ph-arrows-out-line-vertical"></i>
+                    </button>
+                    <button class="icon-btn" id="refresh-btn" title="Odśwież dane (R)" aria-label="Odśwież dane">
                         <i class="ph ph-arrows-clockwise"></i>
                     </button>
                 </div>
@@ -101,6 +115,26 @@
                         <canvas id="pcaChart"></canvas>
                     </div>
                 </div>
+
+                    <!-- Watchlist signal filter chips -->
+                    <div class="filter-toolbar" id="wl-filter-toolbar" hidden>
+                        <div class="filter-group">
+                            <span class="filter-group-label">Sygnał</span>
+                            <button type="button" class="filter-chip active" data-filter-signal="all">Wszystkie</button>
+                            <button type="button" class="filter-chip" data-filter-signal="strong buy" data-signal="strong-buy"><span class="chip-dot"></span>Strong Buy</button>
+                            <button type="button" class="filter-chip" data-filter-signal="buy" data-signal="buy"><span class="chip-dot"></span>Buy</button>
+                            <button type="button" class="filter-chip" data-filter-signal="neutral" data-signal="neutral"><span class="chip-dot"></span>Neutral</button>
+                            <button type="button" class="filter-chip" data-filter-signal="sell" data-signal="sell"><span class="chip-dot"></span>Sell</button>
+                            <button type="button" class="filter-chip" data-filter-signal="strong sell" data-signal="strong-sell"><span class="chip-dot"></span>Strong Sell</button>
+                        </div>
+                        <div class="filter-separator"></div>
+                        <div class="filter-group">
+                            <span class="filter-group-label">Interwał sygnału</span>
+                            <button type="button" class="filter-chip active" data-filter-interval="D">D</button>
+                            <button type="button" class="filter-chip" data-filter-interval="W">W</button>
+                            <button type="button" class="filter-chip" data-filter-interval="M">M</button>
+                        </div>
+                    </div>
 
                     <!-- Grid for Ticker Cards -->
                     <div class="grid-container" id="results-grid">
@@ -144,11 +178,11 @@
                                 <label class="checkbox-container schedule-enable-row">
                                     <input type="checkbox" id="auto-schedule-enabled">
                                     <span class="checkmark"></span>
-                                    Codziennie o
-                                    <input type="number" id="auto-schedule-hour" min="0" max="23" value="7" class="schedule-time-input">
-                                    :
-                                    <input type="number" id="auto-schedule-minute" min="0" max="59" value="30" class="schedule-time-input">
-                                    pobierz wszystkie tickery z konfiguracji
+                                    <span>Codziennie o</span>
+                                    <input type="number" id="auto-schedule-hour" min="0" max="23" value="7" class="schedule-time-input" aria-label="Godzina">
+                                    <span class="schedule-time-sep">:</span>
+                                    <input type="number" id="auto-schedule-minute" min="0" max="59" value="30" class="schedule-time-input" aria-label="Minuta">
+                                    <span>— pobierz wszystkie tickery z konfiguracji</span>
                                 </label>
                                 <label class="checkbox-container schedule-enable-row mt-2">
                                     <input type="checkbox" id="auto-schedule-run-on-startup">
@@ -244,6 +278,15 @@
                 <div class="card-header-right">
                     <div class="watchlist-badges"></div>
                     <div class="card-summary"></div>
+                    <button type="button" class="card-action-btn card-rename-btn" title="Zmień symbol tickera w konfiguracji" aria-label="Zmień nazwę tickera">
+                        <i class="ph ph-pencil-simple"></i>
+                    </button>
+                    <button type="button" class="card-action-btn card-rescrape-btn" title="Pobierz ponownie dane tego tickera" aria-label="Pobierz ponownie">
+                        <i class="ph ph-arrow-clockwise"></i>
+                    </button>
+                    <button type="button" class="card-action-btn card-history-btn" title="Historia PCA" aria-label="Historia PCA">
+                        <i class="ph ph-chart-line"></i>
+                    </button>
                     <i class="ph ph-caret-down card-chevron"></i>
                 </div>
             </div>
@@ -260,6 +303,7 @@
     <template id="interval-column-template">
         <div class="interval-column">
             <h3 class="interval-title"><span class="interval-badge">1D</span></h3>
+            <div class="interval-missing hidden" data-role="interval-missing"></div>
             
             <!-- HTS Section -->
             <div class="indicator-section">
@@ -331,6 +375,66 @@
         </div>
     </template>
 
-    <script src="app.js?v=7"></script>
+    <!-- Modal: Historical PCA chart -->
+    <div id="ticker-history-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div>
+                    <h3 id="ticker-history-title">Historia PCA</h3>
+                    <div class="modal-subtitle" id="ticker-history-subtitle">—</div>
+                </div>
+                <button type="button" class="modal-close" id="ticker-history-close" aria-label="Zamknij">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="chart-interval-toggle" id="ticker-history-interval-toggle" style="margin-bottom: 14px;">
+                    <button type="button" class="interval-toggle-btn active" data-interval="1D">1D</button>
+                    <button type="button" class="interval-toggle-btn" data-interval="1W">1W</button>
+                    <button type="button" class="interval-toggle-btn" data-interval="1M">1M</button>
+                </div>
+                <div class="modal-chart-container">
+                    <canvas id="ticker-history-chart"></canvas>
+                </div>
+                <div class="modal-empty hidden" id="ticker-history-empty">
+                    <i class="ph ph-chart-line-down"></i>
+                    <div>Brak danych historycznych dla tego tickera.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Rename ticker -->
+    <div id="ticker-rename-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-sm">
+            <div class="modal-header">
+                <div>
+                    <h3>Zmień symbol tickera</h3>
+                    <div class="modal-subtitle" id="ticker-rename-subtitle">Nowa nazwa zastąpi tickera w konfiguracji (np. PAS1 → PAS1.WA).</div>
+                </div>
+                <button type="button" class="modal-close" id="ticker-rename-close" aria-label="Zamknij">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="ticker-rename-form" class="rename-form">
+                    <label class="rename-field">
+                        <span class="rename-label">Obecna nazwa</span>
+                        <input type="text" id="ticker-rename-old" readonly>
+                    </label>
+                    <label class="rename-field">
+                        <span class="rename-label">Nowa nazwa</span>
+                        <input type="text" id="ticker-rename-new" autocomplete="off"
+                               maxlength="20" placeholder="np. PAS1.WA"
+                               pattern="[A-Za-z0-9._\-]{1,20}">
+                        <span class="rename-hint">Dozwolone: A-Z, 0-9, kropka, podkreślnik, myślnik (max 20 znaków).</span>
+                    </label>
+                    <div class="rename-error hidden" id="ticker-rename-error"></div>
+                    <div class="rename-actions">
+                        <button type="button" class="btn btn-secondary" id="ticker-rename-cancel">Anuluj</button>
+                        <button type="submit" class="btn btn-primary" id="ticker-rename-submit">Zmień nazwę</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js?v=15"></script>
 </body>
 </html>

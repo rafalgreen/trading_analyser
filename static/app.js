@@ -8,20 +8,96 @@ document.addEventListener('DOMContentLoaded', () => {
     const errorText = document.getElementById('error-text');
     const currentDateTitle = document.getElementById('current-date-title');
     const recordCount = document.getElementById('record-count');
+    const freshnessEl = document.getElementById('data-freshness');
     const refreshBtn = document.getElementById('refresh-btn');
+    const expandAllBtn = document.getElementById('expand-all-btn');
     const searchInput = document.getElementById('search-input');
     const sortSelect = document.getElementById('sort-select');
     const chartPanel = document.getElementById('chart-panel');
     const pcaChartCanvas = document.getElementById('pcaChart');
     const chartTitle = document.getElementById('chart-title');
     const chartIntervalToggle = document.getElementById('chart-interval-toggle');
+    const wlFilterToolbar = document.getElementById('wl-filter-toolbar');
+    const globalBanner = document.getElementById('global-scrape-banner');
+    const globalBannerText = document.getElementById('global-scrape-banner-text');
+    const globalBannerFill = document.getElementById('global-scrape-banner-fill');
+    const toastContainer = document.getElementById('toast-container');
+
+    // ----- UI prefs (localStorage) -----
+    const UI_KEYS = {
+        sortMode: 'ta_sort_mode',
+        chartInterval: 'ta_chart_interval',
+        activeView: 'ta_active_view',
+        collapsedCards: 'ta_collapsed_cards',
+        wlFilterSignals: 'ta_wl_filter_signals',
+        wlFilterInterval: 'ta_wl_filter_interval',
+        renamedHidden: 'ta_renamed_hidden',
+    };
+
+    function loadPref(key, fallback) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (raw == null) return fallback;
+            return JSON.parse(raw);
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    function savePref(key, value) {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* quota */ }
+    }
 
     let currentDates = [];
     let activeDateId = null;
     let currentData = []; // Store raw rows for filtering
     let pcaChartInstance = null;
-    let currentSortMode = 'default';
-    let currentChartInterval = '1D'; // Current chart interval
+    let historyChartInstance = null;
+
+    const ALLOWED_SORT = new Set(['default', 'pca-desc', 'pca-asc', 'ticker-asc', 'ticker-desc']);
+    const ALLOWED_INTERVAL = new Set(['1D', '1W', '1M']);
+    const ALLOWED_WL_SIGNALS = new Set(['strong buy', 'buy', 'neutral', 'sell', 'strong sell']);
+    const ALLOWED_WL_INTERVALS = new Set(['D', 'W', 'M']);
+
+    let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'default'))
+        ? loadPref(UI_KEYS.sortMode, 'default') : 'default';
+    let currentChartInterval = ALLOWED_INTERVAL.has(loadPref(UI_KEYS.chartInterval, '1D'))
+        ? loadPref(UI_KEYS.chartInterval, '1D') : '1D';
+
+    const storedCollapsed = loadPref(UI_KEYS.collapsedCards, []);
+    const collapsedCards = new Set(Array.isArray(storedCollapsed) ? storedCollapsed : []);
+
+    const storedWlSignals = loadPref(UI_KEYS.wlFilterSignals, []);
+    const wlFilterSignals = new Set(Array.isArray(storedWlSignals)
+        ? storedWlSignals.filter(s => ALLOWED_WL_SIGNALS.has(s)) : []);
+    let wlFilterInterval = ALLOWED_WL_INTERVALS.has(loadPref(UI_KEYS.wlFilterInterval, 'D'))
+        ? loadPref(UI_KEYS.wlFilterInterval, 'D') : 'D';
+
+    function persistCollapsed() {
+        savePref(UI_KEYS.collapsedCards, Array.from(collapsedCards));
+    }
+
+    // Tickery ukryte po rename (stare nazwy). Persist w localStorage jako mapa
+    // old → new, żeby reload nie przywracał starej karty.
+    const storedRenamed = loadPref(UI_KEYS.renamedHidden, {});
+    const renamedHidden = (storedRenamed && typeof storedRenamed === 'object' && !Array.isArray(storedRenamed))
+        ? { ...storedRenamed } : {};
+    function persistRenamedHidden() {
+        savePref(UI_KEYS.renamedHidden, renamedHidden);
+    }
+    function markTickerRenamed(oldTicker, newTicker) {
+        if (!oldTicker) return;
+        renamedHidden[String(oldTicker).toUpperCase()] = String(newTicker || '').toUpperCase();
+        persistRenamedHidden();
+    }
+    function isTickerHidden(ticker) {
+        return Object.prototype.hasOwnProperty.call(renamedHidden, String(ticker || '').toUpperCase());
+    }
+
+    // Track tickers currently being re-scraped via the per-card button
+    const rerunningTickers = new Set();
+    let currentHistoryTicker = null;
+    let currentHistoryInterval = '1D';
 
     function escapeHtml(str) {
         if (str == null || str === '') return '';
@@ -43,15 +119,147 @@ document.addEventListener('DOMContentLoaded', () => {
         return '#555';
     }
 
+    // ----- Toast / Banner helpers -----
+    function showToast({ type = 'info', title = '', message = '', duration = 5000 } = {}) {
+        if (!toastContainer) return;
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        const icon = type === 'success' ? 'ph-check-circle'
+            : type === 'error' ? 'ph-warning-circle'
+            : 'ph-info';
+        toast.innerHTML = `
+            <i class="ph ${icon}"></i>
+            <div class="toast-body">
+                ${title ? `<div class="toast-title">${escapeHtml(title)}</div>` : ''}
+                ${message ? `<div class="toast-msg">${escapeHtml(message)}</div>` : ''}
+            </div>
+        `;
+        const dismiss = () => {
+            if (!toast.isConnected) return;
+            toast.classList.add('leaving');
+            setTimeout(() => toast.remove(), 220);
+        };
+        toast.addEventListener('click', dismiss);
+        toastContainer.appendChild(toast);
+        if (duration > 0) setTimeout(dismiss, duration);
+    }
+
+    /**
+     * In-app modal potwierdzenia. Zwraca Promise<boolean>. Nie używa natywnego
+     * `confirm()` — dzięki temu nie blokuje go ustawienie „nie pokazuj więcej
+     * okien dialogowych" w przeglądarce.
+     */
+    function confirmDialog({
+        title = 'Potwierdź',
+        message = '',
+        confirmLabel = 'OK',
+        cancelLabel = 'Anuluj',
+        danger = false,
+    } = {}) {
+        return new Promise((resolve) => {
+            let overlay = document.getElementById('app-confirm-dialog');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'app-confirm-dialog';
+                overlay.className = 'modal-overlay';
+                overlay.setAttribute('role', 'dialog');
+                overlay.setAttribute('aria-modal', 'true');
+                overlay.innerHTML = `
+                    <div class="modal-dialog modal-dialog-sm">
+                        <div class="modal-header">
+                            <div><h3 data-role="title"></h3>
+                            <div class="modal-subtitle" data-role="msg"></div></div>
+                            <button type="button" class="modal-close" data-role="close" aria-label="Zamknij">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="rename-actions">
+                                <button type="button" class="btn btn-secondary" data-role="cancel">Anuluj</button>
+                                <button type="button" class="btn btn-primary" data-role="ok">OK</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+            }
+            overlay.querySelector('[data-role="title"]').textContent = title;
+            const msgEl = overlay.querySelector('[data-role="msg"]');
+            msgEl.textContent = message;
+            msgEl.style.display = message ? '' : 'none';
+            const okBtn = overlay.querySelector('[data-role="ok"]');
+            const cancelBtn = overlay.querySelector('[data-role="cancel"]');
+            const closeBtn = overlay.querySelector('[data-role="close"]');
+            okBtn.textContent = confirmLabel;
+            cancelBtn.textContent = cancelLabel;
+            okBtn.className = danger ? 'btn btn-danger' : 'btn btn-primary';
+
+            const close = (value) => {
+                overlay.classList.remove('visible');
+                overlay.setAttribute('aria-hidden', 'true');
+                okBtn.onclick = null;
+                cancelBtn.onclick = null;
+                closeBtn.onclick = null;
+                overlay.onclick = null;
+                document.removeEventListener('keydown', onKey);
+                resolve(value);
+            };
+            const onKey = (e) => {
+                if (e.key === 'Escape') { e.preventDefault(); close(false); }
+                else if (e.key === 'Enter') { e.preventDefault(); close(true); }
+            };
+            okBtn.onclick = () => close(true);
+            cancelBtn.onclick = () => close(false);
+            closeBtn.onclick = () => close(false);
+            overlay.onclick = (e) => { if (e.target === overlay) close(false); };
+            document.addEventListener('keydown', onKey);
+            overlay.classList.add('visible');
+            overlay.setAttribute('aria-hidden', 'false');
+            setTimeout(() => okBtn.focus(), 50);
+        });
+    }
+
+    function setGlobalBanner(visible, { text = 'Scraper w toku…', progressPct = null } = {}) {
+        if (!globalBanner) return;
+        if (visible) {
+            globalBanner.classList.add('visible');
+            if (globalBannerText) globalBannerText.textContent = text;
+            if (globalBannerFill) {
+                if (progressPct != null && Number.isFinite(progressPct)) {
+                    globalBannerFill.style.width = Math.min(100, Math.max(0, progressPct)) + '%';
+                } else {
+                    globalBannerFill.style.width = '0%';
+                }
+            }
+        } else {
+            globalBanner.classList.remove('visible');
+        }
+    }
+
     // Initialize App
     async function init() {
+        // Apply persisted sort + chart interval to controls before first render
+        if (sortSelect) sortSelect.value = currentSortMode;
+        if (chartIntervalToggle) {
+            chartIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.interval === currentChartInterval);
+            });
+        }
+        if (chartTitle) chartTitle.textContent = `Wartość PCA (${currentChartInterval}) dla tickerów`;
+        syncWlFilterChipsUI();
+
         await fetchHistory();
+        const persistedView = loadPref(UI_KEYS.activeView, 'dashboard-view');
+        if (persistedView === 'config-view') {
+            switchView('config-view');
+        }
+
         if (currentDates.length > 0) {
             selectDate(currentDates[0].id, currentDates[0].label);
         } else {
             showError("Brak dostępnych plików z danymi.");
             hideLoading();
         }
+
+        startGlobalScraperPolling();
     }
 
     refreshBtn.addEventListener('click', () => {
@@ -71,40 +279,96 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     sortSelect.addEventListener('change', (e) => {
-        currentSortMode = e.target.value;
+        const val = e.target.value;
+        currentSortMode = ALLOWED_SORT.has(val) ? val : 'default';
+        savePref(UI_KEYS.sortMode, currentSortMode);
         const term = searchInput.value.toLowerCase().trim();
         filterAndRenderCards(term);
     });
+
+    expandAllBtn?.addEventListener('click', () => toggleExpandAll());
+
+    function toggleExpandAll(forceCollapse) {
+        const cards = resultsGrid.querySelectorAll('.ticker-card');
+        if (cards.length === 0) return;
+        const shouldCollapse = (typeof forceCollapse === 'boolean')
+            ? forceCollapse
+            : Array.from(cards).some(c => !c.classList.contains('collapsed'));
+        cards.forEach(card => {
+            const ticker = card.dataset.ticker || '';
+            card.classList.toggle('collapsed', shouldCollapse);
+            if (ticker) {
+                if (shouldCollapse) collapsedCards.add(ticker);
+                else collapsedCards.delete(ticker);
+            }
+        });
+        persistCollapsed();
+    }
 
     // Chart interval toggle
     chartIntervalToggle.addEventListener('click', (e) => {
         const btn = e.target.closest('.interval-toggle-btn');
         if (!btn) return;
-        
         const interval = btn.dataset.interval;
-        if (interval === currentChartInterval) return;
-        
+        if (!ALLOWED_INTERVAL.has(interval) || interval === currentChartInterval) return;
+
         currentChartInterval = interval;
-        
-        // Update active button
+        savePref(UI_KEYS.chartInterval, currentChartInterval);
+
         chartIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        
-        // Update chart title
+
         chartTitle.textContent = `Wartość PCA (${interval}) dla tickerów`;
-        
-        // Re-render chart with filtered data
+
         const term = searchInput.value.toLowerCase().trim();
-        let filteredData = currentData;
-        if (term) {
-            filteredData = currentData.filter(row => {
-                const ticker = (row['Ticker'] || '').toLowerCase();
-                const company = (row['Company_Name'] || '').toLowerCase();
-                return ticker.includes(term) || company.includes(term);
-            });
-        }
-        renderChart(filteredData);
+        filterAndRenderCards(term);
     });
+
+    // Watchlist filter chips
+    wlFilterToolbar?.addEventListener('click', (e) => {
+        const chip = e.target.closest('.filter-chip');
+        if (!chip) return;
+        if (chip.hasAttribute('data-filter-signal')) {
+            const key = chip.dataset.filterSignal;
+            if (key === 'all') {
+                wlFilterSignals.clear();
+            } else if (ALLOWED_WL_SIGNALS.has(key)) {
+                if (wlFilterSignals.has(key)) wlFilterSignals.delete(key);
+                else wlFilterSignals.add(key);
+            }
+            savePref(UI_KEYS.wlFilterSignals, Array.from(wlFilterSignals));
+        } else if (chip.hasAttribute('data-filter-interval')) {
+            const iv = chip.dataset.filterInterval;
+            if (ALLOWED_WL_INTERVALS.has(iv)) {
+                wlFilterInterval = iv;
+                savePref(UI_KEYS.wlFilterInterval, wlFilterInterval);
+            }
+        }
+        syncWlFilterChipsUI();
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+
+    function syncWlFilterChipsUI() {
+        if (!wlFilterToolbar) return;
+        wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-signal]').forEach(chip => {
+            const key = chip.dataset.filterSignal;
+            if (key === 'all') {
+                chip.classList.toggle('active', wlFilterSignals.size === 0);
+            } else {
+                chip.classList.toggle('active', wlFilterSignals.has(key));
+            }
+        });
+        wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-interval]').forEach(chip => {
+            chip.classList.toggle('active', chip.dataset.filterInterval === wlFilterInterval);
+        });
+    }
+
+    function wlFilterSignalKeyForRow(row) {
+        const col = wlFilterInterval === 'W' ? 'WL_Weekly_Signal'
+            : wlFilterInterval === 'M' ? 'WL_Monthly_Signal'
+            : 'WL_Daily_Signal';
+        return (row?.[col] || '').toLowerCase().trim();
+    }
 
     // Fetch History Dates
     async function fetchHistory() {
@@ -158,9 +422,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
             
             currentData = data.data; // Store for filtering
-            
+
+            updateFreshnessIndicator(dateId);
+            if (wlFilterToolbar) wlFilterToolbar.hidden = currentData.length === 0;
+
             // clear search text on new load
-            searchInput.value = ''; 
+            searchInput.value = '';
             filterAndRenderCards('');
             
             hideLoading();
@@ -172,18 +439,74 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function filterAndRenderCards(searchTerm) {
-        let filteredData = currentData;
+        // Odfiltruj tickery ukryte po rename (zachowujemy wiersze w CSV, ale
+        // w UI nie chcemy widzieć już starej nazwy).
+        let filteredData = currentData.filter(row => !isTickerHidden(row['Ticker']));
+        const hiddenCount = currentData.length - filteredData.length;
         if (searchTerm) {
-            filteredData = currentData.filter(row => {
+            filteredData = filteredData.filter(row => {
                 const ticker = (row['Ticker'] || '').toLowerCase();
                 const company = (row['Company_Name'] || '').toLowerCase();
                 return ticker.includes(searchTerm) || company.includes(searchTerm);
             });
         }
-        
-        recordCount.textContent = `${filteredData.length} rekordów (z ${currentData.length})`;
+
+        if (wlFilterSignals.size > 0) {
+            const byTicker = new Map();
+            filteredData.forEach(row => {
+                const t = row['Ticker'] || '';
+                if (!byTicker.has(t)) byTicker.set(t, []);
+                byTicker.get(t).push(row);
+            });
+            const allowedTickers = new Set();
+            byTicker.forEach((rows, ticker) => {
+                const hasMatch = rows.some(r => {
+                    const key = wlFilterSignalKeyForRow(r);
+                    return key && wlFilterSignals.has(key);
+                });
+                if (hasMatch) allowedTickers.add(ticker);
+            });
+            filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
+        }
+
+        recordCount.textContent = '';
+        recordCount.appendChild(document.createTextNode(
+            `${filteredData.length} rekordów (z ${currentData.length})`
+        ));
+        if (hiddenCount > 0) {
+            recordCount.appendChild(document.createTextNode(
+                ` · ${hiddenCount} ukrytych po zmianie nazwy `
+            ));
+            const link = document.createElement('a');
+            link.href = '#';
+            link.textContent = '(pokaż)';
+            link.className = 'record-count-action';
+            link.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                Object.keys(renamedHidden).forEach(k => delete renamedHidden[k]);
+                persistRenamedHidden();
+                filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
+            });
+            recordCount.appendChild(link);
+        }
         renderCards(filteredData);
         renderChart(filteredData);
+    }
+
+    function updateFreshnessIndicator(dateId) {
+        if (!freshnessEl) return;
+        if (!dateId) { freshnessEl.hidden = true; return; }
+        const datePart = String(dateId).slice(0, 10);
+        const parsed = Date.parse(datePart + 'T00:00:00Z');
+        if (!Number.isFinite(parsed)) { freshnessEl.hidden = true; return; }
+        const deltaH = (Date.now() - parsed) / 3_600_000;
+        let cls = 'fresh', label = 'Aktualne', icon = 'ph-check-circle';
+        if (deltaH > 24) { cls = 'outdated'; label = 'Przeterminowane'; icon = 'ph-warning-circle'; }
+        else if (deltaH > 6) { cls = 'stale'; label = 'Wczorajsze'; icon = 'ph-clock'; }
+        freshnessEl.className = `data-freshness ${cls}`;
+        freshnessEl.hidden = false;
+        freshnessEl.title = `Dane z ${datePart}`;
+        freshnessEl.textContent = label;
     }
     
     // Process and Render Chart — now uses currentChartInterval
@@ -354,15 +677,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 trendClass = 'down';
             }
             
-            // Cross indicator
-            let crossIcon = '';
-            if (htsCross.toLowerCase().includes('bull')) crossIcon = '🟢';
-            else if (htsCross.toLowerCase().includes('bear')) crossIcon = '🔴';
-            
+            // Cross indicator: colored dot (bull/bear), avoids emoji rendering issues
+            let crossDotClass = '';
+            if (htsCross.toLowerCase().includes('bull')) crossDotClass = 'pill-bull';
+            else if (htsCross.toLowerCase().includes('bear')) crossDotClass = 'pill-bear';
+
             // PCA color dot
             const dotColor = colorHex || '#555';
             const pcaDisplay = valText !== '--' ? valText : '';
-            
+
             const safeDotColor = sanitizeCssColor(dotColor);
             let pillHTML = `<span class="summary-pill">`;
             pillHTML += `<span class="pill-label">${escapeHtml(interval)}</span>`;
@@ -373,7 +696,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (trendDir) {
                 pillHTML += `<span class="pill-trend ${trendClass}">${escapeHtml(trendDir)}</span>`;
             }
-            if (crossIcon) pillHTML += ` ${escapeHtml(crossIcon)}`;
+            if (crossDotClass) {
+                const crossLabel = crossDotClass === 'pill-bull' ? 'Bull cross' : 'Bear cross';
+                pillHTML += `<span class="${crossDotClass}" title="${crossLabel}" aria-label="${crossLabel}"></span>`;
+            }
             pillHTML += `</span>`;
             
             pills.push(pillHTML);
@@ -386,10 +712,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderCards(dataRows) {
         resultsGrid.innerHTML = '';
         if (dataRows.length === 0) {
+            const hint = currentData.length === 0
+                ? 'Brak danych dla wybranej daty.'
+                : 'Dostosuj filtr lub wyszukiwanie, aby zobaczyć wyniki.';
             resultsGrid.innerHTML = `
                 <div class="empty-state" style="grid-column: 1 / -1;">
                     <i class="ph ph-magnifying-glass"></i>
-                    <p>Brak wyników dla tego wyszukiwania.</p>
+                    <div class="empty-title">Brak wyników</div>
+                    <div class="empty-hint">${escapeHtml(hint)}</div>
                 </div>
             `;
             return;
@@ -439,9 +769,41 @@ document.addEventListener('DOMContentLoaded', () => {
             // Clone Ticker Card template
             const cardClone = cardTemplate.content.cloneNode(true);
             const cardEl = cardClone.querySelector('.ticker-card');
-            
+            cardEl.dataset.ticker = ticker;
+
             cardClone.querySelector('.ticker-name').textContent = ticker;
             cardClone.querySelector('.company-name').textContent = companyName;
+
+            // Restore collapsed state from prefs (default = collapsed from template)
+            if (!collapsedCards.has(ticker) && collapsedCards.size > 0) {
+                cardEl.classList.remove('collapsed');
+            }
+
+            const rescrapeBtn = cardClone.querySelector('.card-rescrape-btn');
+            const historyBtn = cardClone.querySelector('.card-history-btn');
+            const renameBtn = cardClone.querySelector('.card-rename-btn');
+            if (rescrapeBtn) {
+                if (rerunningTickers.has(ticker)) {
+                    rescrapeBtn.classList.add('spinning');
+                    rescrapeBtn.disabled = true;
+                }
+                rescrapeBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    requestRescrapeTicker(ticker, rescrapeBtn);
+                });
+            }
+            if (historyBtn) {
+                historyBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openHistoryModal(ticker);
+                });
+            }
+            if (renameBtn) {
+                renameBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openRenameModal(ticker);
+                });
+            }
             
             // Build summary pills for collapsed view
             const summaryContainer = cardClone.querySelector('.card-summary');
@@ -451,13 +813,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 summaryContainer.innerHTML = `<span class="skip-error-banner">⚠ Pominięty ticker</span>`;
                 cardClone.querySelector('.company-name').textContent = '—';
             } else {
-                const noDataRow = rows.find(r => (r['Scrape_Status'] || '').toUpperCase() === 'NO_DATA');
+                // Traktuj jako "no data" gdy Scrape_Status=NO_DATA LUB backend wykrył brak
+                // wszystkich wskaźników we wszystkich wierszach (legacy OK z poprzednich runów).
+                const noDataByStatus = rows.find(r => (r['Scrape_Status'] || '').toUpperCase() === 'NO_DATA');
+                const everyRowAllMissing = rows.every(r => r['All_Indicators_Missing'] === true);
+                const noDataRow = noDataByStatus
+                    || (everyRowAllMissing ? rows[0] : null);
+
                 let summaryHtml = buildSummaryPills(rows);
                 if (noDataRow) {
                     cardEl.classList.add('ticker-no-data');
-                    const hint = noDataRow['Scrape_Error'] || 'Brak danych wskaźników na wykresie';
+                    const baseHint = noDataRow['Scrape_Error'] || 'Brak danych wskaźników na wykresie';
+                    const actionHint = 'Sprawdź symbol na TradingView — możesz zmienić nazwę (ołówek) lub pobrać ponownie.';
                     summaryHtml =
-                        `<span class="no-data-banner" title="${escapeHtml(hint)}">⚠ Brak danych</span> ` +
+                        `<span class="no-data-banner" title="${escapeHtml(baseHint + ' · ' + actionHint)}">` +
+                        `⚠ Brak danych` +
+                        `<span class="no-data-hint">${escapeHtml(actionHint)}</span>` +
+                        `</span> ` +
                         summaryHtml;
                 }
                 summaryContainer.innerHTML = summaryHtml;
@@ -476,10 +848,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 addSignalBadge(badgesContainer, 'M', firstRow['WL_Monthly_Signal']);
             }
 
-            // Click header to toggle collapse
+            // Click header to toggle collapse (persist state)
             const header = cardClone.querySelector('.card-header');
-            header.addEventListener('click', () => {
+            header.addEventListener('click', (e) => {
+                if (e.target.closest('.card-action-btn')) return;
                 cardEl.classList.toggle('collapsed');
+                if (cardEl.classList.contains('collapsed')) {
+                    collapsedCards.add(ticker);
+                } else {
+                    collapsedCards.delete(ticker);
+                }
+                persistCollapsed();
             });
 
             const intervalsContainer = cardClone.querySelector('.intervals-container');
@@ -500,6 +879,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 const colClone = columnTemplate.content.cloneNode(true);
                 
                 colClone.querySelector('.interval-badge').textContent = row['Interval'] || '1D';
+
+                // Per-interval brakujące wskaźniki — adnotacja z backendu.
+                const missing = Array.isArray(row['Missing_Indicators'])
+                    ? row['Missing_Indicators'] : [];
+                const missingEl = colClone.querySelector('[data-role="interval-missing"]');
+                if (missingEl && missing.length > 0) {
+                    missingEl.classList.remove('hidden');
+                    missingEl.innerHTML =
+                        `<span><span class="missing-label">Brak danych:</span>` +
+                        ` ${escapeHtml(missing.join(', '))}</span>`;
+                }
+                // Wyszarz sekcje wskaźników bez danych (po nazwie w .section-title).
+                const missingSet = new Set(missing.map(s => String(s).toLowerCase()));
+                colClone.querySelectorAll('.indicator-section').forEach(sec => {
+                    const title = sec.querySelector('.section-title');
+                    const name = (title?.textContent || '').trim().toLowerCase();
+                    if (missingSet.has(name)) {
+                        sec.classList.add('no-data');
+                    }
+                });
 
                 // -- HTS Panel --
                 const htsTrendNode = colClone.querySelector('.hts-trend');
@@ -740,36 +1139,33 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnRunSelected = document.getElementById('btn-run-scraper-selected');
     const btnStopScraper = document.getElementById('btn-stop-scraper');
 
+    function switchView(targetId) {
+        navLinks.forEach(l => {
+            l.classList.toggle('active', l.getAttribute('data-target') === targetId);
+        });
+        viewPanels.forEach(panel => {
+            panel.classList.toggle('active', panel.id === targetId);
+        });
+        savePref(UI_KEYS.activeView, targetId);
+
+        if (targetId === 'config-view') {
+            loadConfig();
+            pollScraperStatus();
+        } else if (targetId === 'dashboard-view') {
+            if (statusInterval) {
+                clearInterval(statusInterval);
+                statusInterval = null;
+            }
+            fetchHistory();
+        }
+    }
+
     // Tab Navigation
     navLinks.forEach(link => {
         link.addEventListener('click', (e) => {
             e.preventDefault();
             const targetId = link.getAttribute('data-target');
-            
-            // Switch active link
-            navLinks.forEach(l => l.classList.remove('active'));
-            link.classList.add('active');
-            
-            // Switch view
-            viewPanels.forEach(panel => {
-                if (panel.id === targetId) {
-                    panel.classList.add('active');
-                } else {
-                    panel.classList.remove('active');
-                }
-            });
-
-            // Special actions on tab open
-            if (targetId === 'config-view') {
-                loadConfig();
-                pollScraperStatus(); // Start polling if we check config tab
-            } else if (targetId === 'dashboard-view') {
-                if (statusInterval) {
-                    clearInterval(statusInterval);
-                    statusInterval = null;
-                }
-                fetchHistory();
-            }
+            if (targetId) switchView(targetId);
         });
     });
 
@@ -1018,10 +1414,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    btnRunAll.addEventListener('click', () => {
-        if(confirm("Czy na pewno chcesz pobrać dane dla wszystkich tickerów? Może to potrwać długo.")) {
-            startScraper([]); // empty array = read from config by backend
-        }
+    btnRunAll.addEventListener('click', async () => {
+        const ok = await confirmDialog({
+            title: 'Pobrać dane dla wszystkich tickerów?',
+            message: 'Operacja może potrwać kilka minut. Zostanie uruchomione pełne pobieranie.',
+            confirmLabel: 'Uruchom',
+            cancelLabel: 'Anuluj',
+        });
+        if (ok) startScraper([]);
     });
 
     btnRunSelected.addEventListener('click', () => {
@@ -1035,14 +1435,547 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     btnStopScraper.addEventListener('click', async () => {
-        if(confirm("Zatrzymać aktualnie działający scraper?")) {
-            try {
-                await fetch('/api/scraper/stop', { method: 'POST' });
-                // Do one final poll right away
-                setTimeout(pollScraperStatus, 1000);
-            } catch(e) {
-                console.error(e);
+        const ok = await confirmDialog({
+            title: 'Zatrzymać scraper?',
+            message: 'Aktualny odczyt zostanie przerwany. Częściowe wyniki pozostaną zapisane.',
+            confirmLabel: 'Zatrzymaj',
+            cancelLabel: 'Anuluj',
+            danger: true,
+        });
+        if (!ok) return;
+        btnStopScraper.disabled = true;
+        const originalLabel = btnStopScraper.innerHTML;
+        btnStopScraper.innerHTML = '<i class="ph ph-spinner"></i> Zatrzymywanie…';
+        try {
+            const res = await fetch('/api/scraper/stop', { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (data.status === 'stopped') {
+                const pids = Array.isArray(data.pids_found) ? data.pids_found : [];
+                const extra = data.orphan_killed && pids.length
+                    ? ` (PID: ${pids.join(', ')})`
+                    : '';
+                showToast({
+                    type: 'info',
+                    title: 'Scraper zatrzymany',
+                    message: `Proces został zakończony${extra}.`,
+                    duration: 7000,
+                });
+            } else if (data.status === 'not_running') {
+                showToast({
+                    type: 'info',
+                    title: 'Scraper nie działa',
+                    message: 'Nie znaleziono aktywnego procesu. Jeżeli nadal widzisz postęp — zrestartuj uvicorn.',
+                    duration: 9000,
+                });
+            } else {
+                showToast({ type: 'error', title: 'Problem ze zatrzymaniem', message: data.message || 'Nieznany błąd' });
             }
+        } catch (e) {
+            console.error(e);
+            showToast({ type: 'error', title: 'Błąd połączenia', message: String(e.message || e) });
+        } finally {
+            btnStopScraper.innerHTML = originalLabel;
+            btnStopScraper.disabled = false;
+            // Szybki re-poll (kilka razy) aby UI błyskawicznie wrócił do "Gotowy".
+            setTimeout(pollScraperStatus, 300);
+            setTimeout(pollScraperStatus, 1500);
+        }
+    });
+
+    // ==========================================
+    // PER-TICKER RE-SCRAPE
+    // ==========================================
+    async function requestRescrapeTicker(ticker, btnEl) {
+        if (!ticker || rerunningTickers.has(ticker)) return;
+        rerunningTickers.add(ticker);
+        if (btnEl) {
+            btnEl.classList.add('spinning');
+            btnEl.disabled = true;
+        }
+        try {
+            const res = await fetch('/api/scraper/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tickers: [ticker] }),
+            });
+            const data = await res.json();
+            if (data.status === 'started') {
+                showToast({ type: 'info', title: 'Pobieranie', message: `${ticker}: zlecono ponowne pobranie.` });
+            } else if (data.status === 'already_running') {
+                // Scraper już coś robi — najprawdopodobniej pełny run. Pokaż
+                // użytkownikowi co leci i zaproponuj zatrzymanie.
+                let running = '';
+                try {
+                    const st = await fetch('/api/scraper/status').then(r => r.json());
+                    if (st && st.current_ticker) {
+                        running = ` (aktualnie: ${st.current_ticker}${st.progress ? ', ' + st.progress : ''})`;
+                    }
+                } catch (_) { /* ignore */ }
+                showToast({
+                    type: 'warning',
+                    title: 'Scraper zajęty',
+                    message:
+                        `Trwa inny pobór danych${running}. ` +
+                        `Aby uruchomić tylko dla ${ticker}, kliknij najpierw „Zatrzymaj" w Konfiguracji.`,
+                });
+            } else {
+                showToast({ type: 'error', title: 'Błąd', message: data.message || 'Nie udało się uruchomić pobierania.' });
+            }
+        } catch (e) {
+            showToast({ type: 'error', title: 'Błąd połączenia', message: String(e.message || e) });
+        } finally {
+            // Spinner gaśnie po zakończeniu scrapera (globalny polling) lub po 60s jako bezpiecznik
+            setTimeout(() => {
+                rerunningTickers.delete(ticker);
+                const stillBtn = document.querySelector(`.ticker-card[data-ticker="${cssEscape(ticker)}"] .card-rescrape-btn`);
+                if (stillBtn) { stillBtn.classList.remove('spinning'); stillBtn.disabled = false; }
+            }, 60_000);
+        }
+    }
+
+    function cssEscape(value) {
+        if (window.CSS && typeof CSS.escape === 'function') return CSS.escape(value);
+        return String(value).replace(/["\\]/g, '\\$&');
+    }
+
+    function clearRescrapeSpinner(ticker) {
+        rerunningTickers.delete(ticker);
+        const btn = document.querySelector(`.ticker-card[data-ticker="${cssEscape(ticker)}"] .card-rescrape-btn`);
+        if (btn) { btn.classList.remove('spinning'); btn.disabled = false; }
+    }
+
+    // ==========================================
+    // HISTORICAL PCA CHART MODAL
+    // ==========================================
+    const historyModal = document.getElementById('ticker-history-modal');
+    const historyModalTitle = document.getElementById('ticker-history-title');
+    const historyModalSubtitle = document.getElementById('ticker-history-subtitle');
+    const historyModalClose = document.getElementById('ticker-history-close');
+    const historyIntervalToggle = document.getElementById('ticker-history-interval-toggle');
+    const historyCanvas = document.getElementById('ticker-history-chart');
+    const historyEmptyEl = document.getElementById('ticker-history-empty');
+
+    function openHistoryModal(ticker) {
+        if (!historyModal || !ticker) return;
+        currentHistoryTicker = ticker;
+        currentHistoryInterval = ALLOWED_INTERVAL.has(currentChartInterval) ? currentChartInterval : '1D';
+        historyModalTitle.textContent = `Historia PCA — ${ticker}`;
+        historyModalSubtitle.textContent = 'Ładowanie…';
+        if (historyIntervalToggle) {
+            historyIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.interval === currentHistoryInterval);
+            });
+        }
+        historyModal.classList.add('visible');
+        historyModal.setAttribute('aria-hidden', 'false');
+        fetchTickerHistory();
+    }
+
+    function closeHistoryModal() {
+        if (!historyModal) return;
+        historyModal.classList.remove('visible');
+        historyModal.setAttribute('aria-hidden', 'true');
+        currentHistoryTicker = null;
+        if (historyChartInstance) {
+            historyChartInstance.destroy();
+            historyChartInstance = null;
+        }
+    }
+
+    historyModalClose?.addEventListener('click', closeHistoryModal);
+    historyModal?.addEventListener('click', (e) => {
+        if (e.target === historyModal) closeHistoryModal();
+    });
+
+    historyIntervalToggle?.addEventListener('click', (e) => {
+        const btn = e.target.closest('.interval-toggle-btn');
+        if (!btn) return;
+        const iv = btn.dataset.interval;
+        if (!ALLOWED_INTERVAL.has(iv) || iv === currentHistoryInterval) return;
+        currentHistoryInterval = iv;
+        historyIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        fetchTickerHistory();
+    });
+
+    async function fetchTickerHistory() {
+        if (!currentHistoryTicker) return;
+        historyEmptyEl?.classList.add('hidden');
+        try {
+            const res = await fetch(`/api/ticker/${encodeURIComponent(currentHistoryTicker)}/history?interval=${encodeURIComponent(currentHistoryInterval)}`);
+            if (!res.ok) throw new Error('Błąd pobierania historii');
+            const data = await res.json();
+            renderHistoryChart(data.history || []);
+        } catch (e) {
+            console.error(e);
+            if (historyModalSubtitle) historyModalSubtitle.textContent = 'Błąd pobierania historii';
+            renderHistoryChart([]);
+        }
+    }
+
+    function renderHistoryChart(points) {
+        if (historyChartInstance) {
+            historyChartInstance.destroy();
+            historyChartInstance = null;
+        }
+        const clean = points.filter(p => Number.isFinite(p.value));
+        if (historyModalSubtitle) {
+            historyModalSubtitle.textContent = clean.length === 0
+                ? 'Brak punktów danych'
+                : `${clean.length} punktów — interwał ${currentHistoryInterval}`;
+        }
+        if (clean.length === 0) {
+            historyEmptyEl?.classList.remove('hidden');
+            return;
+        }
+        historyEmptyEl?.classList.add('hidden');
+
+        const labels = clean.map(p => p.date);
+        const values = clean.map(p => p.value);
+        const dotColors = clean.map(p => sanitizeCssColor(p.color || '#60a5fa'));
+
+        Chart.defaults.color = '#94a3b8';
+        Chart.defaults.font.family = 'Inter';
+        const ctx = historyCanvas.getContext('2d');
+        historyChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label: `PCA (${currentHistoryInterval})`,
+                    data: values,
+                    borderColor: 'rgba(59, 130, 246, 0.8)',
+                    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+                    pointBackgroundColor: dotColors,
+                    pointBorderColor: dotColors,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    tension: 0.3,
+                    fill: true,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 17, 21, 0.9)',
+                        titleColor: '#fff',
+                        bodyColor: '#fff',
+                        borderColor: 'rgba(255, 255, 255, 0.1)',
+                        borderWidth: 1,
+                        padding: 10,
+                        callbacks: {
+                            label: (c) => `PCA: ${c.parsed.y}`,
+                        },
+                    },
+                },
+                scales: {
+                    y: {
+                        grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                        border: { display: false },
+                    },
+                    x: {
+                        grid: { display: false },
+                        border: { display: false },
+                        ticks: { maxTicksLimit: 10, maxRotation: 0 },
+                    },
+                },
+            },
+        });
+    }
+
+    // ==========================================
+    // GLOBAL SCRAPER POLLING + TOASTS
+    // ==========================================
+    let globalPollInterval = null;
+    let lastGlobalStatus = 'idle';
+
+    function todayDateId() {
+        const d = new Date();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${d.getFullYear()}-${mm}-${dd}`;
+    }
+
+    function startGlobalScraperPolling() {
+        if (globalPollInterval) return;
+        const tick = async () => {
+            try {
+                const res = await fetch('/api/scraper/status');
+                if (!res.ok) return;
+                const data = await res.json();
+                handleGlobalStatus(data);
+            } catch (e) { /* ignore */ }
+        };
+        tick();
+        globalPollInterval = setInterval(tick, 5000);
+    }
+
+    function handleGlobalStatus(data) {
+        const status = data?.status || 'idle';
+        if (status === 'running') {
+            const pct = parseScraperProgress(data.progress);
+            const cur = data.current_ticker ? ` — ${data.current_ticker}` : '';
+            setGlobalBanner(true, {
+                text: `Scraper w toku${cur} ${data.progress ? '(' + data.progress + ')' : ''}`.trim(),
+                progressPct: pct,
+            });
+        } else {
+            setGlobalBanner(false);
+        }
+
+        // Transitions
+        if (lastGlobalStatus === 'running' && status === 'done') {
+            showToast({ type: 'success', title: 'Scraper zakończony', message: 'Dane zostały odświeżone.' });
+            rerunningTickers.clear();
+            document.querySelectorAll('.card-rescrape-btn.spinning').forEach(btn => {
+                btn.classList.remove('spinning');
+                btn.disabled = false;
+            });
+            autoReloadAfterScrape();
+        } else if (lastGlobalStatus === 'running' && status === 'error') {
+            showToast({ type: 'error', title: 'Błąd scrapera', message: data.error || 'Nieznany błąd', duration: 10000 });
+            rerunningTickers.clear();
+            document.querySelectorAll('.card-rescrape-btn.spinning').forEach(btn => {
+                btn.classList.remove('spinning');
+                btn.disabled = false;
+            });
+            autoReloadAfterScrape();
+        } else if (lastGlobalStatus === 'running' && status === 'stopped') {
+            showToast({ type: 'info', title: 'Scraper zatrzymany' });
+        }
+
+        // Highlight currently processed card (if any)
+        document.querySelectorAll('.card-rescraping-badge').forEach(el => el.remove());
+        if (status === 'running' && data.current_ticker) {
+            const card = document.querySelector(`.ticker-card[data-ticker="${cssEscape(data.current_ticker)}"]`);
+            if (card) {
+                const right = card.querySelector('.card-header-right');
+                if (right && !right.querySelector('.card-rescraping-badge')) {
+                    const badge = document.createElement('span');
+                    badge.className = 'card-rescraping-badge';
+                    badge.textContent = 'pobieram…';
+                    right.insertBefore(badge, right.firstChild);
+                }
+            }
+        }
+
+        lastGlobalStatus = status;
+    }
+
+    function autoReloadAfterScrape() {
+        fetchHistory().then(() => {
+            if (!activeDateId) return;
+            if (activeDateId.slice(0, 10) === todayDateId()) {
+                const obj = currentDates.find(d => d.id === activeDateId);
+                if (obj) selectDate(activeDateId, obj.label);
+            }
+        });
+    }
+
+    // ==========================================
+    // KEYBOARD SHORTCUTS
+    // ==========================================
+    let focusedCardIndex = -1;
+
+    function visibleCards() {
+        return Array.from(resultsGrid.querySelectorAll('.ticker-card'));
+    }
+
+    function focusCardByIndex(idx) {
+        const cards = visibleCards();
+        if (cards.length === 0) return;
+        focusedCardIndex = Math.max(0, Math.min(cards.length - 1, idx));
+        cards.forEach((c, i) => c.classList.toggle('focused-card', i === focusedCardIndex));
+        cards[focusedCardIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setTimeout(() => {
+            cards[focusedCardIndex]?.classList.remove('focused-card');
+        }, 1500);
+    }
+
+    document.addEventListener('keydown', (e) => {
+        const tgt = e.target;
+        const inInput = tgt && (
+            tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable
+        );
+
+        if (e.key === 'Escape') {
+            const renameOpen = document.getElementById('ticker-rename-modal')?.classList.contains('visible');
+            if (renameOpen) {
+                document.getElementById('ticker-rename-modal')?.classList.remove('visible');
+                document.getElementById('ticker-rename-modal')?.setAttribute('aria-hidden', 'true');
+                e.preventDefault();
+                return;
+            }
+            if (historyModal?.classList.contains('visible')) {
+                closeHistoryModal();
+                e.preventDefault();
+                return;
+            }
+            if (document.activeElement === searchInput) {
+                searchInput.value = '';
+                searchInput.blur();
+                filterAndRenderCards('');
+                e.preventDefault();
+            }
+            return;
+        }
+
+        if (inInput) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+        // Only active when dashboard view is visible
+        const dashActive = document.getElementById('dashboard-view')?.classList.contains('active');
+        if (!dashActive) return;
+
+        switch (e.key) {
+            case '/':
+                e.preventDefault();
+                searchInput.focus();
+                searchInput.select();
+                break;
+            case 'j':
+                e.preventDefault();
+                focusCardByIndex(focusedCardIndex + 1);
+                break;
+            case 'k':
+                e.preventDefault();
+                focusCardByIndex(focusedCardIndex - 1);
+                break;
+            case 'e':
+                e.preventDefault();
+                toggleExpandAll();
+                break;
+            case 'r':
+                e.preventDefault();
+                refreshBtn?.click();
+                break;
+        }
+    });
+
+    // ==========================================
+    // RENAME TICKER MODAL
+    // ==========================================
+    const renameModal = document.getElementById('ticker-rename-modal');
+    const renameModalClose = document.getElementById('ticker-rename-close');
+    const renameCancelBtn = document.getElementById('ticker-rename-cancel');
+    const renameForm = document.getElementById('ticker-rename-form');
+    const renameOldInput = document.getElementById('ticker-rename-old');
+    const renameNewInput = document.getElementById('ticker-rename-new');
+    const renameErrorEl = document.getElementById('ticker-rename-error');
+    const renameSubmitBtn = document.getElementById('ticker-rename-submit');
+    const TICKER_RE_CLIENT = /^[A-Z0-9._-]{1,20}$/;
+
+    function openRenameModal(ticker) {
+        if (!renameModal || !ticker) return;
+        if (renameOldInput) renameOldInput.value = ticker;
+        if (renameNewInput) {
+            renameNewInput.value = '';
+            renameNewInput.disabled = false;
+        }
+        setRenameError('');
+        if (renameSubmitBtn) renameSubmitBtn.disabled = false;
+        renameModal.classList.add('visible');
+        renameModal.setAttribute('aria-hidden', 'false');
+        setTimeout(() => renameNewInput?.focus(), 50);
+    }
+
+    function closeRenameModal() {
+        if (!renameModal) return;
+        renameModal.classList.remove('visible');
+        renameModal.setAttribute('aria-hidden', 'true');
+    }
+
+    function setRenameError(msg) {
+        if (!renameErrorEl) return;
+        if (!msg) {
+            renameErrorEl.textContent = '';
+            renameErrorEl.classList.add('hidden');
+        } else {
+            renameErrorEl.textContent = msg;
+            renameErrorEl.classList.remove('hidden');
+        }
+    }
+
+    renameModalClose?.addEventListener('click', closeRenameModal);
+    renameCancelBtn?.addEventListener('click', closeRenameModal);
+    renameModal?.addEventListener('click', (e) => {
+        if (e.target === renameModal) closeRenameModal();
+    });
+
+    renameForm?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const oldTicker = (renameOldInput?.value || '').trim().toUpperCase();
+        const newTicker = (renameNewInput?.value || '').trim().toUpperCase();
+        setRenameError('');
+
+        if (!oldTicker || !newTicker) {
+            setRenameError('Podaj nową nazwę tickera.');
+            return;
+        }
+        if (oldTicker === newTicker) {
+            setRenameError('Nowa nazwa jest identyczna ze starą.');
+            return;
+        }
+        if (!TICKER_RE_CLIENT.test(newTicker)) {
+            setRenameError('Dozwolone: A–Z, 0–9, kropka, podkreślnik, myślnik (max 20 znaków).');
+            return;
+        }
+
+        if (renameSubmitBtn) renameSubmitBtn.disabled = true;
+        try {
+            const res = await fetch('/api/tickers/rename', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ old: oldTicker, new: newTicker }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                const detail = (data && (data.detail || data.message)) || `Błąd ${res.status}`;
+                setRenameError(typeof detail === 'string' ? detail : 'Nie udało się zmienić nazwy.');
+                if (renameSubmitBtn) renameSubmitBtn.disabled = false;
+                return;
+            }
+            // Ukryj starą kartę w bieżącym widoku (CSV zostaje nietknięty,
+            // ale użytkownik nie chce już widzieć starego symbolu). Ukrywamy
+            // zarówno to, co wpisał użytkownik, jak i realnie zmatchowany
+            // symbol z configu (np. LULU.O → LULU), żeby nic nie zostało.
+            const matchedOld = (data && typeof data.old === 'string' && data.old) || oldTicker;
+            markTickerRenamed(oldTicker, newTicker);
+            if (matchedOld && matchedOld.toUpperCase() !== oldTicker) {
+                markTickerRenamed(matchedOld, newTicker);
+            }
+            // Dodatkowo ukryj wszystkie wiersze z tą samą bazą (prefiks przed
+            // pierwszą kropką) — spójnie z logiką fuzzy-match w backendzie.
+            const baseOld = oldTicker.split('.', 1)[0];
+            if (baseOld) {
+                (currentData || []).forEach(row => {
+                    const t = String(row['Ticker'] || '').toUpperCase();
+                    if (t && t.split('.', 1)[0] === baseOld) {
+                        markTickerRenamed(t, newTicker);
+                    }
+                });
+            }
+
+            showToast({
+                type: 'success',
+                title: 'Nazwa zmieniona',
+                message: `${matchedOld} → ${newTicker}. Pobieram dane dla nowej nazwy…`,
+            });
+            closeRenameModal();
+
+            // Odśwież widok kart natychmiast, żeby stara karta zniknęła
+            // jeszcze przed pojawieniem się nowych danych.
+            filterAndRenderCards(searchInput?.value || '');
+
+            // Automatycznie zleć pobranie nowego tickera, aby użytkownik od razu
+            // zobaczył, czy nowy symbol działa.
+            requestRescrapeTicker(newTicker, null);
+        } catch (err) {
+            setRenameError(String(err?.message || err || 'Błąd połączenia'));
+            if (renameSubmitBtn) renameSubmitBtn.disabled = false;
         }
     });
 

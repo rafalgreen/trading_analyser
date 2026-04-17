@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Iterable, List, Optional
+import re
+from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -240,6 +241,68 @@ def save_results_row(current_run_file: str, row_data: dict) -> None:
             header=header,
             encoding="utf-8",
         )
+
+
+_PCA_COLOR_NAMES = {
+    "czerwon": "rgb(239, 68, 68)",
+    "niebiesk": "rgb(59, 130, 246)",
+    "zielon": "rgb(16, 185, 129)",
+    "pomara": "rgb(245, 158, 11)",
+    "\u017c\u00f3\u0142": "rgb(245, 158, 11)",
+    "zolt": "rgb(245, 158, 11)",
+}
+
+
+def parse_pca_number(raw: object) -> Tuple[Optional[float], Optional[str]]:
+    """Wyci\u0105ga (warto\u015b\u0107, kolor) z surowego pola PCA_Values.
+
+    Warto\u015b\u0107 parsowana po polsku: ``61,33``, ``1 234,56`` (z NBSP), ``-2.5``.
+    Zwraca ``(None, None)`` gdy warto\u015b\u0107 nie jest liczb\u0105 (np. ``OK`` / pusto).
+    Kolor zwracany jako CSS (``rgb(...)``/``rgba(...)``) albo ``None``.
+    """
+    if raw is None:
+        return None, None
+    try:
+        if pd.isna(raw):
+            return None, None
+    except Exception:
+        pass
+    s = str(raw).strip()
+    if not s or s.lower() in ("ok", "--", "\u2014", "-") or "brak danych" in s.lower():
+        color_match = re.search(r"rgba?\([^)]+\)", s, re.IGNORECASE)
+        return None, color_match.group(0) if color_match else None
+
+    color: Optional[str] = None
+    rgb_match = re.search(r"rgba?\([^)]+\)", s, re.IGNORECASE)
+    if rgb_match:
+        color = rgb_match.group(0)
+
+    value_part = s
+    paren_match = re.match(r"^(.*?)\s*\(", s)
+    if paren_match:
+        value_part = paren_match.group(1)
+
+    if color is None:
+        paren_inner = re.search(r"\(([^)]+)\)", s)
+        if paren_inner:
+            inner_low = paren_inner.group(1).lower()
+            for needle, css in _PCA_COLOR_NAMES.items():
+                if needle in inner_low:
+                    color = css
+                    break
+
+    vp = value_part.strip().replace("\u00a0", " ").replace("\u2212", "-")
+    vp = vp.replace(" ", "")
+    if not vp:
+        return None, color
+    if "," in vp and "." in vp:
+        vp = vp.replace(".", "").replace(",", ".")
+    elif "," in vp:
+        vp = vp.replace(",", ".")
+    try:
+        return float(vp), color
+    except (TypeError, ValueError):
+        return None, color
 
 
 def record_skipped_ticker(current_run_file: str, ticker: str, reason: str) -> None:

@@ -5,7 +5,7 @@
     "PAS1",
     "NWGP",
     "ZIM",
-    "LULU.O",
+    "LULU",
     "S",
     "ODD.O",
     "VST",
@@ -47,7 +47,7 @@
     "XTB.WA",
     "ILU.AX",
     "KORE.SI",
-    "OCDO.L",
+    "OCDO",
     "ARGT.K",
     "BABA.K",
     "FROP.WA",
@@ -188,6 +188,6 @@
     "enabled": true,
     "hour": 8,
     "minute": 0,
-    "run_on_startup": true
+    "run_on_startup": false
   }
 }

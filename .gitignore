@@ -13,6 +13,8 @@ __pycache__/
 
 # Runtime logs & scraper state
 app.log
+scraper.log
+scraper.log.*
 scraper_state.json
 scraper_status.json
 
