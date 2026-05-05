@@ -23,7 +23,12 @@ import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from results_store import parse_pca_number, row_has_indicator_data
+from results_store import (
+    load_results_dataframe,
+    parse_pca_number,
+    row_has_indicator_data,
+    tickers_with_no_data,
+)
 
 logger = logging.getLogger("trading_analyser.app")
 if not logger.handlers:
@@ -114,6 +119,8 @@ class ConfigUpdateRequest(BaseModel):
 
 class ScraperRunRequest(BaseModel):
     tickers: List[str] = Field(default_factory=list)
+    no_data_only: bool = False
+    date_id: Optional[str] = None
 
 
 class TickerRenameRequest(BaseModel):
@@ -388,27 +395,57 @@ def is_dirty_company_name(ticker: str, company_name: str) -> bool:
     """Check if company_name looks like it contains raw TradingView title garbage."""
     if not company_name or company_name == "Nieznana":
         return True
-    if company_name.startswith(ticker):
+    cu = company_name.strip()
+    tu = (ticker or "").strip()
+    if not tu:
         return True
+    if cu.upper() == tu.upper():
+        return True
+    # Ticker + sama cena/liczba (np. ``MSFT 123``) — nie mylić z ``MSFT Corp``.
+    if cu.upper().startswith(tu.upper()) and len(cu) > len(tu):
+        suffix = cu[len(tu) :].lstrip()
+        if suffix and re.match(r"^[\d\s\.,+%▼▲N/A]+$", suffix, re.IGNORECASE):
+            return True
     if "▼" in company_name or "▲" in company_name or "%" in company_name:
         return True
     return False
 
 
 def clean_company_name(ticker: str, raw_name: str, watchlist: Dict) -> str:
-    """Try to get a clean company name from watchlist, fallback to cleaned raw name."""
-    if ticker in watchlist:
-        return watchlist[ticker].get("Name", raw_name)
+    """Watchlista (niepusta kolumna Name) ma pierwszeństwo; potem oczyszczanie surowej nazwy z CSV."""
+    t = (ticker or "").strip()
+    raw = raw_name or ""
 
-    for wl_symbol, wl_data in watchlist.items():
-        base_symbol = wl_symbol.split(".")[0]
-        if base_symbol == ticker:
-            return wl_data.get("Name", raw_name)
+    def _watchlist_display_name(sym: str) -> str:
+        if not sym or not watchlist:
+            return ""
+        row = watchlist.get(sym)
+        if row:
+            n = (row.get("Name") or "").strip()
+            if n:
+                return n
+        su = sym.upper()
+        for wl_sym, wl_data in watchlist.items():
+            ws = str(wl_sym).strip()
+            if ws.upper() == su:
+                n = (wl_data.get("Name") or "").strip()
+                if n:
+                    return n
+            base = ws.split(".")[0].upper()
+            if base == su or base == sym.split(".")[0].strip().upper():
+                n = (wl_data.get("Name") or "").strip()
+                if n:
+                    return n
+        return ""
 
-    if is_dirty_company_name(ticker, raw_name):
-        return ticker
+    wl = _watchlist_display_name(t)
+    if wl:
+        return wl
 
-    return raw_name
+    if is_dirty_company_name(t, raw):
+        return t or ""
+
+    return raw.strip() if raw.strip() else (t or "")
 
 
 def row_allows_watchlist_signals(row: Dict[str, Any], indicators: List[str]) -> bool:
@@ -467,6 +504,37 @@ def get_csv_files():
     files = glob.glob(pattern)
     files.sort(reverse=True)
     return files
+
+
+def _resolve_results_file_for_refresh(date_id: Optional[str]) -> Optional[str]:
+    """Date-scoped plik wynikowy; bez date_id bierze najnowszy."""
+    if date_id:
+        validate_results_date_id(date_id)
+        filename = f"{CSV_PREFIX}{date_id}.csv"
+        path = os.path.normpath(os.path.join(RESULTS_DIR, filename))
+        if os.path.commonpath(
+            [os.path.abspath(path), os.path.abspath(RESULTS_DIR)]
+        ) != os.path.abspath(RESULTS_DIR):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return path if os.path.exists(path) else None
+    files = get_csv_files()
+    return files[0] if files else None
+
+
+def _resolve_no_data_tickers(
+    date_id: Optional[str], requested_tickers: Optional[List[str]] = None
+) -> List[str]:
+    """Tickery kwalifikujące się do trybu „Odśwież Brak Danych”."""
+    path = _resolve_results_file_for_refresh(date_id)
+    if not path:
+        return []
+    df = load_results_dataframe(path)
+    indicators = load_config().get("indicators") or ["PCA", "HTS Panel", "MacD"]
+    candidates = tickers_with_no_data(df, indicators)
+    if requested_tickers:
+        wanted = {str(t).strip().upper() for t in requested_tickers if str(t).strip()}
+        candidates = [t for t in candidates if str(t).strip().upper() in wanted]
+    return candidates
 
 
 @app.get("/api/history", response_model=HistoryResponse)
@@ -611,6 +679,21 @@ def update_config(body: ConfigUpdateRequest):
 @app.post("/api/scraper/run")
 def run_scraper(body: ScraperRunRequest):
     tickers = [t.strip() for t in body.tickers if t and t.strip()]
+    if body.no_data_only:
+        target_tickers = _resolve_no_data_tickers(body.date_id, tickers or None)
+        if not target_tickers:
+            return {
+                "status": "no_data_empty",
+                "count": 0,
+                "scope": "no_data_only",
+                "message": "Brak tickerów oznaczonych jako Brak Danych.",
+            }
+        started = start_scraper_subprocess(target_tickers)
+        if isinstance(started, dict):
+            started.setdefault("scope", "no_data_only")
+            started["count"] = len(target_tickers)
+            started["tickers"] = target_tickers
+        return started
     return start_scraper_subprocess(tickers if tickers else None)
 
 

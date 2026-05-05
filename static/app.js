@@ -708,6 +708,24 @@ document.addEventListener('DOMContentLoaded', () => {
         return pills.join('');
     }
 
+    function pickBestCompanyName(rows, ticker) {
+        const tickerU = String(ticker || '').trim().toUpperCase();
+        const candidates = (rows || [])
+            .map(r => String(r['Company_Name'] || '').trim())
+            .filter(v => v && v !== 'Nieznana' && v !== '—');
+
+        let best = '';
+        for (const c of candidates) {
+            if (c.toUpperCase() === tickerU) continue;
+            if (!best || c.length > best.length) best = c;
+        }
+        if (best) return best;
+
+        const any = candidates[0] || '';
+        if (!any || any.toUpperCase() === tickerU) return '—';
+        return any;
+    }
+
     // Process and Render Cards
     function renderCards(dataRows) {
         resultsGrid.innerHTML = '';
@@ -764,7 +782,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sortedKeys.forEach(ticker => {
             const rows = groupedData[ticker];
             const skipRow = rows.find(r => (r['Scrape_Status'] || '').toUpperCase() === 'SKIPPED');
-            const companyName = rows[0]['Company_Name'] || 'Nieznana';
+            const companyName = pickBestCompanyName(rows, ticker);
             
             // Clone Ticker Card template
             const cardClone = cardTemplate.content.cloneNode(true);
@@ -1136,6 +1154,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentTickerLabel = document.getElementById('scraper-current-ticker');
     const progressFill = document.getElementById('scraper-progress-fill');
     const btnRunAll = document.getElementById('btn-run-scraper-all');
+    const btnRunNoData = document.getElementById('btn-run-scraper-no-data');
     const btnRunSelected = document.getElementById('btn-run-scraper-selected');
     const btnStopScraper = document.getElementById('btn-stop-scraper');
 
@@ -1360,6 +1379,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         statusText.textContent = 'Pracuje';
                         progressContainer.classList.remove('hidden');
                         btnRunAll.disabled = true;
+                        if (btnRunNoData) btnRunNoData.disabled = true;
                         btnRunSelected.disabled = true;
                         btnStopScraper.classList.remove('hidden');
                         
@@ -1371,15 +1391,19 @@ document.addEventListener('DOMContentLoaded', () => {
                     } else {
                         progressContainer.classList.add('hidden');
                         btnRunAll.disabled = false;
+                        if (btnRunNoData) btnRunNoData.disabled = false;
                         btnRunSelected.disabled = false;
                         btnStopScraper.classList.add('hidden');
                         
                         if (data.status === 'done') {
-                            statusText.textContent = 'Zakończono';
+                            statusText.textContent = data.duration_human
+                                ? `Zakończono (${data.duration_human})`
+                                : 'Zakończono';
                             errorMsgContainer.classList.add('hidden');
                         } else if (data.status === 'error') {
                             statusText.textContent = 'Błąd';
-                            errorMsgContainer.textContent = data.error || "Wystąpił nieznany błąd podczas działania.";
+                            const durErr = data.duration_human ? ` [${data.duration_human}]` : '';
+                            errorMsgContainer.textContent = (data.error || "Wystąpił nieznany błąd podczas działania.") + durErr;
                             errorMsgContainer.classList.remove('hidden');
                         } else {
                             statusText.textContent = 'Gotowy';
@@ -1396,16 +1420,24 @@ document.addEventListener('DOMContentLoaded', () => {
         statusInterval = setInterval(fetchStatus, 3000); // Check every 3 seconds
     }
 
-    async function startScraper(tickersOverride = []) {
+    async function startScraper(tickersOverride = [], options = {}) {
         try {
+            const payload = { tickers: tickersOverride };
+            if (options?.noDataOnly) payload.no_data_only = true;
             const res = await fetch('/api/scraper/run', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tickers: tickersOverride })
+                body: JSON.stringify(payload)
             });
             const data = await res.json();
             if (data.status === 'started' || data.status === 'already_running') {
                 pollScraperStatus();
+            } else if (data.status === 'no_data_empty') {
+                showToast({
+                    type: 'info',
+                    title: 'Brak tickerów',
+                    message: data.message || 'Nie znaleziono tickerów z Brak Danych do odświeżenia.',
+                });
             } else {
                 alert("Błąd: " + data.message);
             }
@@ -1422,6 +1454,16 @@ document.addEventListener('DOMContentLoaded', () => {
             cancelLabel: 'Anuluj',
         });
         if (ok) startScraper([]);
+    });
+
+    btnRunNoData?.addEventListener('click', async () => {
+        const ok = await confirmDialog({
+            title: 'Odświeżyć tylko tickery z „Brak Danych”?',
+            message: 'Uruchomione zostaną tylko tickery oznaczone jako Brak Danych / NO_DATA w najnowszym pliku wynikowym.',
+            confirmLabel: 'Odśwież',
+            cancelLabel: 'Anuluj',
+        });
+        if (ok) startScraper([], { noDataOnly: true });
     });
 
     btnRunSelected.addEventListener('click', () => {
@@ -1728,7 +1770,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Transitions
         if (lastGlobalStatus === 'running' && status === 'done') {
-            showToast({ type: 'success', title: 'Scraper zakończony', message: 'Dane zostały odświeżone.' });
+            const durMsg = data.duration_human ? ` Czas: ${data.duration_human}.` : '';
+            showToast({ type: 'success', title: 'Scraper zakończony', message: `Dane zostały odświeżone.${durMsg}` });
             rerunningTickers.clear();
             document.querySelectorAll('.card-rescrape-btn.spinning').forEach(btn => {
                 btn.classList.remove('spinning');
@@ -1736,7 +1779,8 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             autoReloadAfterScrape();
         } else if (lastGlobalStatus === 'running' && status === 'error') {
-            showToast({ type: 'error', title: 'Błąd scrapera', message: data.error || 'Nieznany błąd', duration: 10000 });
+            const durErr = data.duration_human ? ` (po ${data.duration_human})` : '';
+            showToast({ type: 'error', title: 'Błąd scrapera', message: (data.error || 'Nieznany błąd') + durErr, duration: 10000 });
             rerunningTickers.clear();
             document.querySelectorAll('.card-rescrape-btn.spinning').forEach(btn => {
                 btn.classList.remove('spinning');

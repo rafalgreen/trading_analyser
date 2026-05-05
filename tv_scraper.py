@@ -5,7 +5,7 @@ import json
 import argparse
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 from playwright.sync_api import sync_playwright
@@ -29,6 +29,34 @@ from results_store import (
 
 STATUS_FILE = "scraper_status.json"
 CONFIG_FILE = "scraper_config.json"
+
+
+def resolve_cdp_port(
+    config: Optional[Dict[str, Any]] = None, cli_port: Optional[int] = None
+) -> int:
+    """Kolejność: --cdp-port (CLI), potem TV_CDP_PORT, potem scraper_config.json → cdp_port, domyślnie 9222."""
+    if cli_port is not None:
+        if not (1 <= cli_port <= 65535):
+            raise ValueError(f"cdp_port poza zakresem 1–65535: {cli_port}")
+        return cli_port
+    env = (os.environ.get("TV_CDP_PORT") or "").strip()
+    if env:
+        try:
+            p = int(env)
+            if 1 <= p <= 65535:
+                return p
+        except ValueError:
+            pass
+        logger.warning("TV_CDP_PORT=%r — ignoruję, używam domyślnego portu z configu.", env)
+    if config:
+        raw = config.get("cdp_port", 9222)
+        if isinstance(raw, int) and 1 <= raw <= 65535:
+            return raw
+        if isinstance(raw, str) and raw.isdigit():
+            p = int(raw)
+            if 1 <= p <= 65535:
+                return p
+    return 9222
 
 SLEEP_AFTER_INDICATOR_MODAL_S = 2
 SLEEP_AFTER_INDICATOR_QUERY_S = 3
@@ -56,7 +84,27 @@ def _configure_logging() -> None:
     logger.propagate = False
 
 
-def write_scraper_status(status, progress="", current_ticker="", error=""):
+def _format_duration(seconds: float) -> str:
+    """Czytelny czas trwania (np. ``45.2s``, ``12m 3s``)."""
+    if seconds < 0:
+        seconds = 0.0
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m {s}s"
+
+
+def write_scraper_status(
+    status,
+    progress="",
+    current_ticker="",
+    error="",
+    duration_seconds=None,
+    duration_human=None,
+):
     """Write scraper status to JSON file for web UI polling."""
     data = {
         "status": status,
@@ -65,6 +113,10 @@ def write_scraper_status(status, progress="", current_ticker="", error=""):
         "error": error,
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if duration_seconds is not None:
+        data["duration_seconds"] = round(float(duration_seconds), 2)
+    if duration_human:
+        data["duration_human"] = duration_human
     try:
         with open(STATUS_FILE, "w") as f:
             json.dump(data, f)
@@ -102,10 +154,260 @@ def _to_float(text) -> Optional[float]:
         return None
 
 
+def _company_name_from_title(title_text: str, ticker: str = "") -> str:
+    """Wyciąga nazwę instrumentu z tytułu karty TradingView (przed ``—`` / ``-``)."""
+    core = (
+        (title_text or "")
+        .split(" Wskaźnik")[0]
+        .split(" Wykres")[0]
+        .split(" —")[0]
+        .split(" -")[0]
+        .strip()
+    )
+    if not core:
+        return ""
+    tk = (ticker or "").strip().upper()
+    first_seg = core.split("·")[0].strip() if "·" in core else core.strip()
+    if tk and first_seg:
+        m = re.match(rf"^(.+?)\s*\(\s*{re.escape(tk)}\s*\)\s*$", first_seg, re.IGNORECASE)
+        if m and len(m.group(1).strip()) >= 2:
+            return m.group(1).strip()
+    if "·" in core:
+        return first_seg
+    match = re.search(r"^(.+?)\s+(\d+[\.,]\d+|\d+)\s*$", core)
+    if match:
+        return match.group(1).strip()
+    return core.split()[0] if core.split() else ""
+
+
+def _pick_company_line_from_header_blob(blob: str, ticker_u: str) -> str:
+    """Z tekstu toolbaru wybiera nazwę spółki (linia obok tickera, ``Nazwa (TICKER)`` lub fragment przed ``(TICKER)``)."""
+    if not blob or not ticker_u:
+        return ""
+    flat = re.sub(r"\s+", " ", blob.replace("\r", "\n")).strip()
+    high = flat.upper()
+    needle = f"({ticker_u.upper()})"
+    idx = high.rfind(needle)
+    if idx > 0:
+        left = flat[:idx].strip()
+        for sep in (" · ", " | ", " — ", " - ", " / "):
+            if sep in left:
+                left = left.split(sep)[-1].strip()
+        parts = re.split(r"\s{2,}", left)
+        left = parts[-1].strip() if parts else left
+        left = re.sub(r"^[\W\d_]+", "", left).strip()
+        left = re.sub(
+            r"^(?:charts|screeners|news|watchlist|symbol|ideas|trade|community)\s+",
+            "",
+            left,
+            flags=re.IGNORECASE,
+        ).strip()
+        if len(left) >= 3 and left.upper().replace(" ", "") != ticker_u:
+            return left
+    mflat = re.search(
+        rf"([\w\s,'\.\-]{{3,120}})\s*\(\s*{re.escape(ticker_u)}\s*\)",
+        flat,
+        re.IGNORECASE,
+    )
+    if mflat:
+        name = mflat.group(1).strip()
+        if len(name) >= 2 and name.upper().replace(" ", "") != ticker_u:
+            return name
+    lines = [
+        re.sub(r"\s+", " ", x.strip())
+        for x in re.split(r"[\n\r]+", blob)
+        if x.strip()
+    ]
+    for line in lines:
+        m = re.match(
+            rf"^(.+?)\s*\(\s*{re.escape(ticker_u)}\s*\)\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if m and len(m.group(1).strip()) >= 2:
+            return m.group(1).strip()
+    best = ""
+    for line in lines:
+        if line.upper().replace(" ", "") == ticker_u:
+            continue
+        if len(line) > len(best):
+            best = line
+    return best.strip()
+
+
+def read_chart_symbol_header_blob(target_page, ticker: str = "") -> str:
+    """Zbiera tekst z przycisku symbolu i z całego ``header-toolbar`` (TV bywa niespójne w DOM)."""
+    selectors = [
+        'button[data-name="header-toolbar-symbol-search"]',
+        '[data-name="header-toolbar-symbol-search"]',
+        "button#header-toolbar-symbol-search",
+        '[data-name="header-toolbar-symbol-details"]',
+    ]
+    chunks: list[str] = []
+    for sel in selectors:
+        try:
+            loc = target_page.locator(sel).first
+            if loc.count() > 0:
+                t = loc.inner_text(timeout=2500).strip()
+                if t:
+                    chunks.append(t)
+        except Exception:
+            continue
+    try:
+        extra = target_page.evaluate(
+            """selList => {
+                const parts = [];
+                const add = (t) => {
+                    const s = (t || '').trim();
+                    if (s) parts.push(s);
+                };
+                for (const sel of selList) {
+                    const el = document.querySelector(sel);
+                    if (el) add(el.innerText || el.textContent);
+                }
+                const bar = document.querySelector('[data-name="header-toolbar"]');
+                if (bar) add(bar.innerText || bar.textContent);
+                return [...new Set(parts)].join('\\n');
+            }""",
+            selectors,
+        )
+        if extra and str(extra).strip():
+            chunks.append(str(extra).strip())
+    except Exception:
+        pass
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in chunks:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return "\n".join(out)
+
+
+def resolve_company_name(
+    title_text: str,
+    legend_description: str,
+    ticker: str,
+    header_toolbar_text: str = "",
+) -> str:
+    """Kolejność: toolbar nagłówka, sensowny tytuł okna, opis legendy (bez zduplikowanego tickera)."""
+    ticker_u = (ticker or "").strip().upper()
+    leg = (legend_description or "").strip()
+    header_pick = _pick_company_line_from_header_blob(
+        (header_toolbar_text or "").strip(), ticker_u
+    )
+    from_title = _company_name_from_title(title_text or "", ticker)
+
+    def _looks_like_price_only(s: str) -> bool:
+        return bool(re.fullmatch(r"[\d\s\.,+%▼▲N/A]+", s, re.IGNORECASE))
+
+    def _sensible(s: str) -> bool:
+        if not s or len(s) < 2:
+            return False
+        if s.strip().upper() == ticker_u:
+            return False
+        if _looks_like_price_only(s):
+            return False
+        return True
+
+    for candidate in (header_pick, from_title, leg):
+        if _sensible(candidate):
+            return candidate.strip()
+    for candidate in (header_pick, from_title, leg):
+        if candidate and candidate.strip():
+            c = candidate.strip()
+            if c.upper() != ticker_u:
+                return c
+    if ticker_u:
+        return ticker_u
+    return "Nieznana"
+
+
+def indicator_title_matches(title_text: str, ind_name: str) -> bool:
+    """Zgodność tytułu bloku legendy z nazwą wskaźnika z konfiguracji (jak ``parse_indicators``)."""
+    tl = (title_text or "").lower()
+    raw = (ind_name or "").strip()
+    il = raw.lower()
+
+    if raw == "PCA" or il == "pca":
+        return "pca-ri" in tl or "pca risk" in tl or "pca" in tl
+    if il == "macd":
+        return "macd" in tl
+    if il == "hts panel" or il.replace(" ", "") == "htspanel":
+        return "hts" in tl and "panel" in tl
+    return il in tl
+
+
+def _ensure_legend_expanded(target_page) -> None:
+    """Rozwija legendę wykresu, jeśli TV pokazuje zwinięty stan (CDP)."""
+    for sel in (
+        '[data-name="legend-expand-action"]',
+        '[data-name="legend-toggle-action"]',
+    ):
+        try:
+            loc = target_page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible(timeout=300):
+                loc.click(force=True, timeout=1500)
+                time.sleep(SLEEP_AFTER_MICRO_ACTION_S)
+        except Exception:
+            pass
+
+
+def _page_legend_has_indicator(target_page, ind_name: str) -> bool:
+    """Czy w DOM jest widoczny blok legendy dla danego wskaźnika."""
+    try:
+        items = target_page.locator('[data-qa-id="legend-source-item"]')
+        n = items.count()
+        for i in range(min(n, 40)):
+            tw = items.nth(i).locator(
+                '[data-qa-id="title-wrapper legend-source-title"]'
+            )
+            if tw.count() == 0:
+                continue
+            title = tw.inner_text(timeout=800)
+            if indicator_title_matches(title, ind_name):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _wait_for_legend_indicator_ready(
+    target_page, ind_name: str, max_attempts: int = 5, delay_s: float = 1.0
+) -> None:
+    """Czeka na pojawienie się wskaźnika w legendzie; rozwija legendę między próbami."""
+    for attempt in range(max_attempts):
+        _ensure_legend_expanded(target_page)
+        if _page_legend_has_indicator(target_page, ind_name):
+            if attempt > 0:
+                logger.info(
+                    "Legenda: wskaźnik %s widoczny w DOM (próba %d/%d).",
+                    ind_name,
+                    attempt + 1,
+                    max_attempts,
+                )
+            return
+        time.sleep(delay_s)
+    logger.warning(
+        "Legenda: nie udało się potwierdzić obecności %s w DOM po %d próbach — kontynuuję odczyt.",
+        ind_name,
+        max_attempts,
+    )
+
+
 def parse_indicators(html_content, indicators_to_find):
     """Pobiera i parsuje wartości wskaźników z html dla podanej listy nazw."""
     soup = BeautifulSoup(html_content, "lxml")
     legend_items = soup.find_all("div", attrs={"data-qa-id": "legend-source-item"})
+    if logger.isEnabledFor(logging.DEBUG):
+        titles_dbg = []
+        for _it in legend_items:
+            _te = _it.find(
+                "div", attrs={"data-qa-id": "title-wrapper legend-source-title"}
+            )
+            if _te:
+                titles_dbg.append(_te.get_text(strip=True))
+        logger.debug("Legenda: %d bloków, tytuły: %s", len(legend_items), titles_dbg)
 
     results = {}
     for ind in indicators_to_find:
@@ -124,11 +426,7 @@ def parse_indicators(html_content, indicators_to_find):
         title_text = title_el.get_text(strip=True)
 
         for ind_name in indicators_to_find:
-            matches = ind_name.lower() in title_text.lower() or (
-                ind_name == "PCA"
-                and ("PCA-RI" in title_text or "PCA Risk" in title_text)
-            )
-            if not matches:
+            if not indicator_title_matches(title_text, ind_name):
                 continue
 
             try:
@@ -166,15 +464,20 @@ def _parse_pca_block(item, results, ind_name: str) -> None:
 
 def _parse_hts_like_block(item, results, ind_name: str) -> None:
     values = []
-    for div in item.find_all("div"):
-        classes = div.get("class", [])
-        if any("valueValue" in c for c in classes) or any(
-            "valueItem" in c for c in classes
-        ):
-            text = div.get_text(strip=True)
-            style = div.get("style", "")
-            if text and text not in ("\u2205", "0", "0.00", "0,00"):
-                values.append({"text": text, "color": get_color_name(style)})
+    values_root = item.find("div", attrs={"data-qa-id": "legend-source-values"})
+    search_roots = [values_root] if values_root else [item]
+    for root in search_roots:
+        if root is None:
+            continue
+        for div in root.find_all("div"):
+            classes = div.get("class", [])
+            if any("valueValue" in c for c in classes) or any(
+                "valueItem" in c for c in classes
+            ):
+                text = div.get_text(strip=True)
+                style = div.get("style", "")
+                if text and text not in ("\u2205", "0", "0.00", "0,00"):
+                    values.append({"text": text, "color": get_color_name(style)})
 
     dedup_values = []
     for v in values:
@@ -278,7 +581,10 @@ def remove_active_indicator(target_page, ind_name: str, ticker: str) -> None:
 
 def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
     _configure_logging()
-    logger.info("Łączenie z przeglądarką na porcie %s...", port)
+    # Use 127.0.0.1 (not "localhost"): on many systems localhost resolves to ::1 first,
+    # while Chromium's CDP often listens only on IPv4 — then connect_over_cdp fails with ECONNREFUSED ::1:9222.
+    cdp_url = f"http://127.0.0.1:{port}"
+    logger.info("Łączenie z przeglądarką przez CDP: %s", cdp_url)
 
     state_file = "scraper_state.json"
     processed_combos = set()
@@ -328,8 +634,20 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
             logger.warning("Nie udało się zapisać stanu sesji: %s", exc)
 
     with sync_playwright() as p:
+        run_t0 = None
         try:
-            browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
+            try:
+                browser = p.chromium.connect_over_cdp(cdp_url)
+            except Exception as conn_err:
+                err_s = str(conn_err)
+                if "ECONNREFUSED" in err_s or "ConnectError" in err_s:
+                    raise RuntimeError(
+                        f"Brak nasłuchu CDP pod {cdp_url}. Uruchom Brave lub Chrome "
+                        f"z flagą --remote-debugging-port={port} (osobna instancja z Terminala — "
+                        f"ikona z Docka zwykle NIE ma CDP), potem otwórz wykres TradingView w tej sesji. "
+                        f"Test: curl -sS http://127.0.0.1:{port}/json/version | head -c 200"
+                    ) from conn_err
+                raise
             default_context = browser.contexts[0]
 
             target_page = None
@@ -340,13 +658,14 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
 
             if not target_page:
                 raise RuntimeError(
-                    "Nie znaleziono otwartej karty TradingView w przeglądarce podpiętej pod port 9222."
+                    f"Nie znaleziono otwartej karty TradingView w przeglądarce podpiętej pod port {port}."
                 )
 
             target_page.on("dialog", lambda dialog: dialog.accept())
 
             logger.info("Podłączono do karty: %s", target_page.title())
             target_page.bring_to_front()
+            run_t0 = time.perf_counter()
 
             logger.info("Czyszczę wykres ze starych wskaźników przed pomiarem...")
             try:
@@ -376,6 +695,16 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
 
             if not indicators:
                 logger.warning("Lista wskaźników jest pusta — przerwano.")
+                elapsed = time.perf_counter() - run_t0
+                dh = _format_duration(elapsed)
+                write_scraper_status(
+                    "done",
+                    "0/0",
+                    "",
+                    "",
+                    duration_seconds=elapsed,
+                    duration_human=dh,
+                )
                 return
 
             n_inds = len(indicators)
@@ -467,25 +796,20 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                                 update_state(ticker, interval)
                             continue
 
+                        legend_desc = ""
                         try:
-                            company_name = target_page.locator(
+                            legend_desc = target_page.locator(
                                 'div[data-name="legend-source-description"]'
                             ).first.inner_text(timeout=2000)
                         except Exception:
-                            title_core = (
-                                title_text.split(" Wskaźnik")[0]
-                                .split(" Wykres")[0]
-                                .split(" —")[0]
-                                .split(" -")[0]
-                                .strip()
-                            )
-                            match = re.search(
-                                r"^(.+?)\s+(\d+[\.,]\d+|\d+)", title_core
-                            )
-                            if match:
-                                company_name = match.group(1).strip()
-                            else:
-                                company_name = title_core.split(" ")[0]
+                            pass
+
+                        header_blob = read_chart_symbol_header_blob(
+                            target_page, ticker
+                        )
+                        company_name = resolve_company_name(
+                            title_text, legend_desc, ticker, header_blob
+                        )
 
                         title_clean = (
                             title_text.split(" Wskaźnik")[0]
@@ -579,11 +903,18 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                             )
                         else:
                             logger.info(
-                                "Odczyt HTML dla wskaźnika: %s (czekam %ss)",
+                                "Odczyt HTML dla wskaźnika: %s (legenda + %ss)",
                                 ind_name,
                                 SLEEP_AFTER_INDICATOR_COMPUTE_S,
                             )
+                            _wait_for_legend_indicator_ready(
+                                target_page,
+                                ind_name,
+                                max_attempts=5,
+                                delay_s=1.0,
+                            )
                             time.sleep(SLEEP_AFTER_INDICATOR_COMPUTE_S)
+                            _ensure_legend_expanded(target_page)
                             html_content = target_page.content()
                             indicator_data = parse_indicators(
                                 html_content, [ind_name]
@@ -612,14 +943,38 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
 
                 remove_active_indicator(target_page, ind_name, "faza")
 
+            elapsed = time.perf_counter() - run_t0
+            dh = _format_duration(elapsed)
             logger.info(
-                "Zakończono pełny przebieg! Pobrane dane są w: %s", current_run_file
+                "Zakończono pełny przebieg w %s (%.2fs). Pobrane dane są w: %s",
+                dh,
+                elapsed,
+                current_run_file,
+            )
+            write_scraper_status(
+                "done",
+                f"{len(tickers)}/{len(tickers)} · wsk. {len(indicators)}/{len(indicators)}",
+                "",
+                "",
+                duration_seconds=elapsed,
+                duration_human=dh,
             )
             if not is_partial and os.path.exists(state_file):
                 os.remove(state_file)
 
         except Exception as e:
+            elapsed = None
+            if run_t0 is not None:
+                elapsed = time.perf_counter() - run_t0
             logger.error("Błąd podczas scrapowania: %s", e)
+            write_scraper_status(
+                "error",
+                "",
+                "",
+                str(e),
+                duration_seconds=elapsed,
+                duration_human=_format_duration(elapsed) if elapsed is not None else None,
+            )
             raise
 
 
@@ -641,6 +996,13 @@ if __name__ == "__main__":
         type=str,
         help="Specify a single indicator to run (e.g., PCA)",
     )
+    parser.add_argument(
+        "--cdp-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Port zdalnego debugowania przeglądarki (domyślnie: TV_CDP_PORT, potem cdp_port z JSON, 9222)",
+    )
     args = parser.parse_args()
 
     if os.path.exists(CONFIG_FILE):
@@ -651,9 +1013,12 @@ if __name__ == "__main__":
         INDICATORS = config.get("indicators", ["PCA", "HTS Panel", "MacD"])
     else:
         logger.warning("Config file %s not found, using defaults.", CONFIG_FILE)
+        config = {}
         TICKERS = ["FCX", "PLTR"]
         INTERVALS = ["1D", "1W", "1M"]
         INDICATORS = ["PCA", "HTS Panel", "MacD"]
+
+    cdp_port = resolve_cdp_port(config, cli_port=args.cdp_port)
 
     is_partial = False
     if args.ticker:
@@ -668,8 +1033,7 @@ if __name__ == "__main__":
 
     write_scraper_status("running", "0/" + str(len(TICKERS)), "")
     try:
-        run_scraper(TICKERS, INTERVALS, INDICATORS, is_partial=is_partial)
-        write_scraper_status("done", f"{len(TICKERS)}/{len(TICKERS)}", "")
-    except Exception as e:
-        write_scraper_status("error", "", "", str(e))
+        run_scraper(TICKERS, INTERVALS, INDICATORS, port=cdp_port, is_partial=is_partial)
+    except Exception:
+        # Błąd i ewentualny czas do `scraper_status.json` zapisuje już `run_scraper`.
         raise

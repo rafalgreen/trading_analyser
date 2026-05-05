@@ -101,3 +101,66 @@ def test_load_results_dataframe_tolerates_bad_lines(tmp_path: Path):
     df = load_results_dataframe(str(f))
     assert df is not None
     assert "Ticker" in df.columns
+
+
+def test_merge_existing_row_keeps_fresh_metadata():
+    from results_store import merge_existing_row_into_row_data
+
+    fresh = {
+        "Ticker": "NKE",
+        "Interval": "1D",
+        "Company_Name": "Nike, Inc.",
+        "Current_Price": "95.1",
+        "PCA_Values": "11 (Niebieski)",
+    }
+    old = pd.Series(
+        {
+            "Ticker": "NKE",
+            "Interval": "1D",
+            "Company_Name": "NKE",
+            "Current_Price": "90.0",
+            "PCA_Values": "7 (Czerwony)",
+            "MacD_Trend": "Spadkowy",
+        }
+    )
+    merge_existing_row_into_row_data(fresh, old)
+    assert fresh["Company_Name"] == "Nike, Inc."
+    assert fresh["Current_Price"] == "95.1"
+    assert fresh["MacD_Trend"] == "Spadkowy"
+
+
+def test_tickers_with_no_data_detects_no_data_and_all_missing():
+    from results_store import tickers_with_no_data
+
+    df = pd.DataFrame(
+        [
+            {
+                "Ticker": "AAA",
+                "Interval": "1D",
+                "Scrape_Status": "NO_DATA",
+                "PCA_Values": "Brak danych na wykresie",
+            },
+            {
+                "Ticker": "BBB",
+                "Interval": "1D",
+                "Scrape_Status": "OK",
+                "PCA_Values": "Brak danych na wykresie",
+                "HTS Panel_Values": "Brak poprawnych danych",
+                "MacD_Values": "Brak danych na wykresie",
+            },
+            {
+                "Ticker": "CCC",
+                "Interval": "1D",
+                "Scrape_Status": "OK",
+                "PCA_Values": "12.3 (Niebieski)",
+            },
+            {
+                "Ticker": "DDD",
+                "Interval": "-",
+                "Scrape_Status": "SKIPPED",
+                "PCA_Values": "",
+            },
+        ]
+    )
+    out = tickers_with_no_data(df, ["PCA", "HTS Panel", "MacD"])
+    assert out == ["AAA", "BBB"]

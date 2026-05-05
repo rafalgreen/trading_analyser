@@ -39,6 +39,55 @@ def test_scraper_run_passes_tickers(client, monkeypatch):
     assert seen["tickers"] == ["AAPL", "MSFT"]
 
 
+def test_scraper_run_no_data_only_starts_subset(client, app_env, monkeypatch):
+    import app as m
+
+    _m, res, _dat = app_env
+    f = res / "tradingview_results_2026-05-04.csv"
+    f.write_text(
+        textwrap.dedent(
+            """\
+            Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values,HTS Panel_Values,MacD_Values
+            AAA,AAA,,-,NO_DATA,,Brak danych na wykresie,Brak poprawnych danych,Brak danych na wykresie
+            BBB,BBB,,1D,OK,,Brak danych na wykresie,Brak poprawnych danych,Brak danych na wykresie
+            CCC,CCC,,1D,OK,,12.3 (Niebieski),ok,ok
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        m, "load_config", lambda: {"indicators": ["PCA", "HTS Panel", "MacD"]}
+    )
+
+    called = {}
+
+    def fake(tickers=None):
+        called["tickers"] = list(tickers or [])
+        return {"status": "started", "pid": 321, "count": len(tickers or []), "scope": "subset"}
+
+    monkeypatch.setattr(m, "start_scraper_subprocess", fake)
+    r = client.post("/api/scraper/run", json={"no_data_only": True})
+    assert r.status_code == 200
+    assert called["tickers"] == ["AAA", "BBB"]
+    body = r.json()
+    assert body["status"] == "started"
+    assert body["scope"] == "subset"
+    assert body["count"] == 2
+
+
+def test_scraper_run_no_data_only_empty_when_no_results(client, app_env, monkeypatch):
+    import app as m
+
+    monkeypatch.setattr(
+        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+    )
+    r = client.post("/api/scraper/run", json={"no_data_only": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "no_data_empty"
+    assert body["count"] == 0
+
+
 def test_config_put_rejects_bad_schedule(client):
     r = client.put(
         "/api/config",

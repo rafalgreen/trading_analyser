@@ -166,8 +166,18 @@ def ticker_fully_done_in_csv(df, ticker: str, intervals, indicators) -> bool:
 def merge_existing_row_into_row_data(row_data: dict, erow) -> None:
     if erow is None:
         return
+    # Świeżo odczytane metadane z bieżącego runu (np. nazwa spółki)
+    # nie mogą być nadpisane starym CSV.
+    preserve_cols = {
+        "Ticker",
+        "Interval",
+        "Company_Name",
+        "Current_Price",
+        "Scrape_Status",
+        "Scrape_Error",
+    }
     for col in erow.index:
-        if col in ("Ticker", "Interval"):
+        if str(col) in preserve_cols:
             continue
         try:
             v = erow[col]
@@ -175,6 +185,48 @@ def merge_existing_row_into_row_data(row_data: dict, erow) -> None:
                 row_data[str(col)] = v
         except Exception:
             pass
+
+
+def tickers_with_no_data(df, indicators: Iterable[str]) -> List[str]:
+    """Zwraca tickery wymagające odświeżenia trybem „Brak danych”.
+
+    Kryteria (zgodne z bannerem UI):
+    - przynajmniej jeden wiersz ma ``Scrape_Status=NO_DATA``; albo
+    - wszystkie wiersze tickera nie mają danych dla wszystkich wskaźników.
+    """
+    if df is None or df.empty or "Ticker" not in df.columns:
+        return []
+
+    inds = [str(i).strip() for i in indicators or [] if str(i).strip()]
+    out: List[str] = []
+    grouped = df.groupby(df["Ticker"].astype(str), sort=False)
+
+    for ticker, g in grouped:
+        t = str(ticker).strip()
+        if not t:
+            continue
+
+        if "Scrape_Status" in g.columns:
+            sts = g["Scrape_Status"].astype(str).str.upper()
+            if (sts == "SKIPPED").any():
+                # SKIPPED ma osobny status w UI (nie „Brak danych”).
+                continue
+            if (sts == "NO_DATA").any():
+                out.append(t)
+                continue
+
+        # Legacy fallback: „Brak danych” gdy każdy wiersz ma brak wszystkich wskaźników.
+        all_rows_missing = True
+        for _, row in g.iterrows():
+            ser = row if isinstance(row, pd.Series) else pd.Series(row)
+            row_has_any = any(row_has_indicator_data(ser, ind) for ind in inds)
+            if row_has_any:
+                all_rows_missing = False
+                break
+        if all_rows_missing:
+            out.append(t)
+
+    return out
 
 
 def apply_final_scrape_status(row_data: dict, indicators: Iterable[str]) -> None:

@@ -49,6 +49,22 @@ def test_clean_company_name_watchlist(tmp_path, monkeypatch):
     assert m.clean_company_name("FOO", "garbage", wl_map) == "Foo Incorporated"
 
 
+def test_clean_company_name_watchlist_symbol_case_insensitive(tmp_path, monkeypatch):
+    import app as m
+
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    wl = data / "Portfel_Watchlist_98.csv"
+    wl.write_text(
+        "Symbol,Name,Last\nnke,Nike From WL,100\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "DATA_DIR", str(data))
+    monkeypatch.setattr(m, "_watchlist_cache", None)
+    wl_map = m.load_watchlist()
+    assert m.clean_company_name("NKE", "NKE", wl_map) == "Nike From WL"
+
+
 def test_is_dirty_company_name():
     import app as m
 
