@@ -29,8 +29,8 @@ document.addEventListener('DOMContentLoaded', () => {
         chartInterval: 'ta_chart_interval',
         activeView: 'ta_active_view',
         collapsedCards: 'ta_collapsed_cards',
-        wlFilterSignals: 'ta_wl_filter_signals',
-        wlFilterInterval: 'ta_wl_filter_interval',
+        signalStrategy: 'ta_signal_strategy',
+        signalInterval: 'ta_signal_interval',
         renamedHidden: 'ta_renamed_hidden',
     };
 
@@ -56,8 +56,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const ALLOWED_SORT = new Set(['default', 'pca-desc', 'pca-asc', 'ticker-asc', 'ticker-desc']);
     const ALLOWED_INTERVAL = new Set(['1D', '1W', '1M']);
-    const ALLOWED_WL_SIGNALS = new Set(['strong buy', 'buy', 'neutral', 'sell', 'strong sell']);
-    const ALLOWED_WL_INTERVALS = new Set(['D', 'W', 'M']);
+    const ALLOWED_SIGNAL_INTERVALS = new Set(['D', 'W', 'M']);
+    const BUY_SIGNALS = new Set(['buy', 'strong buy']);
+    const ALL_STRATEGY_IDS = ['trend_only', 'cross_priority', 'pca_buckets', 'scoring'];
+    const ALLOWED_STRATEGIES = new Set([...ALL_STRATEGY_IDS, 'all']);
 
     let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'default'))
         ? loadPref(UI_KEYS.sortMode, 'default') : 'default';
@@ -67,11 +69,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const storedCollapsed = loadPref(UI_KEYS.collapsedCards, []);
     const collapsedCards = new Set(Array.isArray(storedCollapsed) ? storedCollapsed : []);
 
-    const storedWlSignals = loadPref(UI_KEYS.wlFilterSignals, []);
-    const wlFilterSignals = new Set(Array.isArray(storedWlSignals)
-        ? storedWlSignals.filter(s => ALLOWED_WL_SIGNALS.has(s)) : []);
-    let wlFilterInterval = ALLOWED_WL_INTERVALS.has(loadPref(UI_KEYS.wlFilterInterval, 'D'))
-        ? loadPref(UI_KEYS.wlFilterInterval, 'D') : 'D';
+    let signalStrategy = ALLOWED_STRATEGIES.has(loadPref(UI_KEYS.signalStrategy, 'all'))
+        ? loadPref(UI_KEYS.signalStrategy, 'all') : 'all';
+    let signalInterval = ALLOWED_SIGNAL_INTERVALS.has(loadPref(UI_KEYS.signalInterval, 'D'))
+        ? loadPref(UI_KEYS.signalInterval, 'D') : 'D';
+    let availableSignalStrategies = ALL_STRATEGY_IDS.map(id => ({ id, label: id }));
 
     function persistCollapsed() {
         savePref(UI_KEYS.collapsedCards, Array.from(collapsedCards));
@@ -324,24 +326,20 @@ document.addEventListener('DOMContentLoaded', () => {
         filterAndRenderCards(term);
     });
 
-    // Watchlist filter chips
     wlFilterToolbar?.addEventListener('click', (e) => {
         const chip = e.target.closest('.filter-chip');
         if (!chip) return;
-        if (chip.hasAttribute('data-filter-signal')) {
-            const key = chip.dataset.filterSignal;
-            if (key === 'all') {
-                wlFilterSignals.clear();
-            } else if (ALLOWED_WL_SIGNALS.has(key)) {
-                if (wlFilterSignals.has(key)) wlFilterSignals.delete(key);
-                else wlFilterSignals.add(key);
+        if (chip.hasAttribute('data-filter-strategy')) {
+            const key = chip.dataset.filterStrategy;
+            if (ALLOWED_STRATEGIES.has(key)) {
+                signalStrategy = key;
+                savePref(UI_KEYS.signalStrategy, signalStrategy);
             }
-            savePref(UI_KEYS.wlFilterSignals, Array.from(wlFilterSignals));
         } else if (chip.hasAttribute('data-filter-interval')) {
             const iv = chip.dataset.filterInterval;
-            if (ALLOWED_WL_INTERVALS.has(iv)) {
-                wlFilterInterval = iv;
-                savePref(UI_KEYS.wlFilterInterval, wlFilterInterval);
+            if (ALLOWED_SIGNAL_INTERVALS.has(iv)) {
+                signalInterval = iv;
+                savePref(UI_KEYS.signalInterval, signalInterval);
             }
         }
         syncWlFilterChipsUI();
@@ -350,24 +348,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function syncWlFilterChipsUI() {
         if (!wlFilterToolbar) return;
-        wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-signal]').forEach(chip => {
-            const key = chip.dataset.filterSignal;
-            if (key === 'all') {
-                chip.classList.toggle('active', wlFilterSignals.size === 0);
-            } else {
-                chip.classList.toggle('active', wlFilterSignals.has(key));
-            }
+        wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-strategy]').forEach(chip => {
+            chip.classList.toggle('active', chip.dataset.filterStrategy === signalStrategy);
         });
         wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-interval]').forEach(chip => {
-            chip.classList.toggle('active', chip.dataset.filterInterval === wlFilterInterval);
+            chip.classList.toggle('active', chip.dataset.filterInterval === signalInterval);
         });
     }
 
-    function wlFilterSignalKeyForRow(row) {
-        const col = wlFilterInterval === 'W' ? 'WL_Weekly_Signal'
-            : wlFilterInterval === 'M' ? 'WL_Monthly_Signal'
-            : 'WL_Daily_Signal';
-        return (row?.[col] || '').toLowerCase().trim();
+    function intervalCodeForSignal() {
+        return signalInterval === 'W' ? '1W' : signalInterval === 'M' ? '1M' : '1D';
+    }
+
+    function rowSignalForStrategy(row, strategyId) {
+        if (!row || !strategyId) return '';
+        return (row[`Computed_Signal_${strategyId}`] || '').toLowerCase().trim();
+    }
+
+    function tickerHasBuySignalForStrategy(rows, strategyId) {
+        const targetIv = intervalCodeForSignal();
+        return (rows || []).some(r => {
+            const iv = (r?.['Interval'] || '').trim().toUpperCase();
+            if (iv && iv !== targetIv) return false;
+            return BUY_SIGNALS.has(rowSignalForStrategy(r, strategyId));
+        });
     }
 
     // Fetch History Dates
@@ -421,12 +425,17 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!res.ok) throw new Error("Brak danych dla wybranej daty.");
             const data = await res.json();
             
-            currentData = data.data; // Store for filtering
+            currentData = data.data;
+            if (Array.isArray(data.signal_strategies) && data.signal_strategies.length) {
+                availableSignalStrategies = data.signal_strategies;
+            }
 
             updateFreshnessIndicator(dateId);
-            if (wlFilterToolbar) wlFilterToolbar.hidden = currentData.length === 0;
+            if (wlFilterToolbar) {
+                wlFilterToolbar.hidden = currentData.length === 0;
+            }
+            syncWlFilterChipsUI();
 
-            // clear search text on new load
             searchInput.value = '';
             filterAndRenderCards('');
             
@@ -451,7 +460,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
-        if (wlFilterSignals.size > 0) {
+        if (signalStrategy && signalStrategy !== 'all') {
             const byTicker = new Map();
             filteredData.forEach(row => {
                 const t = row['Ticker'] || '';
@@ -460,11 +469,9 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const allowedTickers = new Set();
             byTicker.forEach((rows, ticker) => {
-                const hasMatch = rows.some(r => {
-                    const key = wlFilterSignalKeyForRow(r);
-                    return key && wlFilterSignals.has(key);
-                });
-                if (hasMatch) allowedTickers.add(ticker);
+                if (tickerHasBuySignalForStrategy(rows, signalStrategy)) {
+                    allowedTickers.add(ticker);
+                }
             });
             filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
         }
@@ -853,18 +860,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 summaryContainer.innerHTML = summaryHtml;
             }
             
-            // Add watchlist signal badges if available
             const badgesContainer = cardClone.querySelector('.watchlist-badges');
-            const firstRow = rows[0];
-            if (firstRow['WL_Daily_Signal']) {
-                addSignalBadge(badgesContainer, 'D', firstRow['WL_Daily_Signal']);
-            }
-            if (firstRow['WL_Weekly_Signal']) {
-                addSignalBadge(badgesContainer, 'W', firstRow['WL_Weekly_Signal']);
-            }
-            if (firstRow['WL_Monthly_Signal']) {
-                addSignalBadge(badgesContainer, 'M', firstRow['WL_Monthly_Signal']);
-            }
+            const dRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1D') || rows[0];
+            const wRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1W');
+            const mRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1M');
+            const strategiesToShow = signalStrategy === 'all'
+                ? availableSignalStrategies.map(s => s.id)
+                : [signalStrategy];
+            strategiesToShow.forEach(sid => {
+                const col = `Computed_Signal_${sid}`;
+                const meta = availableSignalStrategies.find(s => s.id === sid);
+                const prefix = strategiesToShow.length > 1 && meta ? `${meta.label} · ` : '';
+                if (dRow && dRow[col]) addSignalBadge(badgesContainer, `${prefix}D`, dRow[col]);
+                if (wRow && wRow[col]) addSignalBadge(badgesContainer, `${prefix}W`, wRow[col]);
+                if (mRow && mRow[col]) addSignalBadge(badgesContainer, `${prefix}M`, mRow[col]);
+            });
 
             // Click header to toggle collapse (persist state)
             const header = cardClone.querySelector('.card-header');

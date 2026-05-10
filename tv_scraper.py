@@ -65,8 +65,153 @@ SLEEP_AFTER_TICKER_ENTER_S = 3
 SLEEP_AFTER_INTERVAL_CHANGE_S = 2
 SLEEP_AFTER_SMALL_ACTION_S = 1
 SLEEP_AFTER_MICRO_ACTION_S = 0.5
+SYMBOL_SEARCH_LIST_WAIT_MS = 4500
 
 logger = logging.getLogger("tv_scraper")
+
+_SYMBOL_SEARCH_NOISE_UPPER = frozenset(
+    {
+        "STOCK",
+        "STOCKS",
+        "ETF",
+        "ETFS",
+        "FUND",
+        "FUNDS",
+        "INDEX",
+        "INDICES",
+        "FOREX",
+        "FX",
+        "CRYPTO",
+        "CRYPTOCURRENCY",
+        "FUTURES",
+        "BOND",
+        "BONDS",
+        "OPTION",
+        "OPTIONS",
+        "PERPETUAL",
+        "DELAYED",
+        "DATA",
+        "REAL-TIME",
+        "AKCJE",
+        "AKCJA",
+        "FUNDUSZ",
+        "FUNDUSZE",
+        "INDEKS",
+        "WALUTY",
+        "WALUTA",
+    }
+)
+
+_SYMBOL_SEARCH_EXCH_UPPER = frozenset(
+    {
+        "NYSE",
+        "NASDAQ",
+        "AMEX",
+        "ARCA",
+        "OTC",
+        "OTCQX",
+        "OTCQB",
+        "PINK",
+        "LSE",
+        "FWB",
+        "XETR",
+        "GPW",
+        "WSE",
+        "TSX",
+        "TSXV",
+        "ASX",
+        "HKEX",
+        "SSE",
+        "SZSE",
+        "TSE",
+        "SGX",
+        "EURONEXT",
+        "BME",
+        "BIST",
+        "SIX",
+        "OMX",
+        "MIB",
+    }
+)
+
+
+def _symbol_search_line_is_noise(line: str) -> bool:
+    lu = line.upper().strip()
+    if lu in _SYMBOL_SEARCH_NOISE_UPPER or lu in _SYMBOL_SEARCH_EXCH_UPPER:
+        return True
+    if re.fullmatch(r"[\d\s\.,+%▼▲N/A$-]+", line, re.IGNORECASE):
+        return True
+    return False
+
+
+def _first_line_open_ticker(line: str) -> str:
+    m = re.match(r"^([A-Za-z0-9]+)", (line or "").strip())
+    return m.group(1).upper() if m else ""
+
+
+def _exchange_suffix_ticker(line: str) -> str:
+    if ":" not in line:
+        return ""
+    tail = line.rsplit(":", 1)[-1].strip()
+    m = re.match(r"^([A-Za-z0-9]+)", tail)
+    return m.group(1).upper() if m else ""
+
+
+def company_name_from_symbol_search_modal_text(blob: str, ticker: str) -> str:
+    """Wyciąga pełną nazwę firmy z tekstu pojedynczego wiersza listy Symbol Search (EN/PL UI)."""
+    ticker_u = (ticker or "").strip().upper()
+    if not ticker_u or not (blob or "").strip():
+        return ""
+    lines = [
+        re.sub(r"\s+", " ", x.strip()) for x in blob.splitlines() if x.strip()
+    ]
+    if not lines:
+        return ""
+    first = lines[0]
+    ticker_match = _first_line_open_ticker(first) == ticker_u or (
+        _exchange_suffix_ticker(first) == ticker_u
+    )
+    if not ticker_match:
+        return ""
+    best = ""
+    for line in lines[1:]:
+        if _symbol_search_line_is_noise(line):
+            continue
+        if line.upper().strip() == ticker_u:
+            continue
+        if len(line) < 3 or not re.search(r"[A-Za-zÀ-ÖØ-öø-ÿ]", line):
+            continue
+        if len(line) > len(best):
+            best = line.strip()
+    return best
+
+
+def read_symbol_search_modal_company_name(page: Any, ticker: str) -> str:
+    """Czyta pierwszy sensowny wiersz nazwy z otwartego Symbol Search zanim wybrano Enter."""
+    tu = (ticker or "").strip().upper()
+    if not tu:
+        return ""
+    try:
+        page.wait_for_selector(
+            'div[data-role="list-item"]:visible',
+            timeout=SYMBOL_SEARCH_LIST_WAIT_MS,
+        )
+    except Exception:
+        return ""
+    try:
+        items = page.locator('div[data-role="list-item"]:visible')
+        n = min(items.count(), 25)
+    except Exception:
+        return ""
+    for i in range(n):
+        try:
+            blob = items.nth(i).inner_text(timeout=1500)
+        except Exception:
+            continue
+        name = company_name_from_symbol_search_modal_text(blob, tu)
+        if name:
+            return name
+    return ""
 
 
 def _configure_logging() -> None:
@@ -289,10 +434,12 @@ def resolve_company_name(
     legend_description: str,
     ticker: str,
     header_toolbar_text: str = "",
+    symbol_search_text: str = "",
 ) -> str:
-    """Kolejność: toolbar nagłówka, sensowny tytuł okna, opis legendy (bez zduplikowanego tickera)."""
+    """Kolejność: lista Symbol Search, toolbar nagłówka, tytuł okna, opis legendy."""
     ticker_u = (ticker or "").strip().upper()
     leg = (legend_description or "").strip()
+    from_symbol_search = (symbol_search_text or "").strip()
     header_pick = _pick_company_line_from_header_blob(
         (header_toolbar_text or "").strip(), ticker_u
     )
@@ -310,10 +457,10 @@ def resolve_company_name(
             return False
         return True
 
-    for candidate in (header_pick, from_title, leg):
+    for candidate in (from_symbol_search, header_pick, from_title, leg):
         if _sensible(candidate):
             return candidate.strip()
-    for candidate in (header_pick, from_title, leg):
+    for candidate in (from_symbol_search, header_pick, from_title, leg):
         if candidate and candidate.strip():
             c = candidate.strip()
             if c.upper() != ticker_u:
@@ -650,16 +797,52 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                 raise
             default_context = browser.contexts[0]
 
-            target_page = None
-            for page in default_context.pages:
-                if "tradingview.com" in page.url or "TradingView" in page.title():
-                    target_page = page
-                    break
+            def _find_tv_page():
+                try:
+                    for page in default_context.pages:
+                        try:
+                            if "tradingview.com" in (page.url or ""):
+                                return page
+                            if "TradingView" in (page.title() or ""):
+                                return page
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                return None
 
-            if not target_page:
-                raise RuntimeError(
-                    f"Nie znaleziono otwartej karty TradingView w przeglądarce podpiętej pod port {port}."
+            target_page = _find_tv_page()
+            if target_page is None:
+                logger.info(
+                    "Karta TradingView jeszcze niewidoczna — czekam aż Brave/Chrome wstanie…"
                 )
+                deadline = time.time() + 12.0
+                while time.time() < deadline:
+                    target_page = _find_tv_page()
+                    if target_page is not None:
+                        break
+                    time.sleep(0.5)
+
+            if target_page is None:
+                logger.info(
+                    "Brak karty TV — otwieram ją sam (https://www.tradingview.com/chart/)…"
+                )
+                try:
+                    target_page = default_context.new_page()
+                    target_page.goto(
+                        "https://www.tradingview.com/chart/",
+                        wait_until="domcontentloaded",
+                        timeout=45000,
+                    )
+                    try:
+                        target_page.wait_for_load_state("load", timeout=20000)
+                    except Exception:
+                        pass
+                except Exception as open_err:
+                    raise RuntimeError(
+                        f"Nie znaleziono otwartej karty TradingView w przeglądarce podpiętej pod port {port}, "
+                        f"a próba otwarcia nowej karty zawiodła: {open_err}"
+                    )
 
             target_page.on("dialog", lambda dialog: dialog.accept())
 
@@ -754,6 +937,13 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                     time.sleep(SLEEP_AFTER_MICRO_ACTION_S)
                     target_page.keyboard.type(ticker, delay=100)
                     time.sleep(SLEEP_AFTER_SMALL_ACTION_S)
+                    symbol_search_name = read_symbol_search_modal_company_name(
+                        target_page, ticker
+                    )
+                    if symbol_search_name:
+                        logger.debug(
+                            "Symbol search: %s → %s", ticker, symbol_search_name
+                        )
                     target_page.keyboard.press("Enter")
                     time.sleep(SLEEP_AFTER_TICKER_ENTER_S)
 
@@ -808,7 +998,11 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                             target_page, ticker
                         )
                         company_name = resolve_company_name(
-                            title_text, legend_desc, ticker, header_blob
+                            title_text,
+                            legend_desc,
+                            ticker,
+                            header_blob,
+                            symbol_search_name,
                         )
 
                         title_clean = (

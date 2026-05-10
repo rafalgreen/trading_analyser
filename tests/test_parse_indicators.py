@@ -142,6 +142,29 @@ def test_resolve_company_name_uses_header_toolbar_second_line():
     assert resolve_company_name(title, "NKE", "NKE", header) == "Nike, Inc."
 
 
+def test_resolve_company_name_prefers_symbol_search_modal():
+    from tv_scraper import resolve_company_name
+
+    title = "NKE — TradingView"
+    assert (
+        resolve_company_name(
+            title,
+            "NKE",
+            "NKE",
+            "NKE",
+            "NIKE, Inc. Class B",
+        )
+        == "NIKE, Inc. Class B"
+    )
+
+
+def test_company_name_from_symbol_search_modal_text_nke():
+    from tv_scraper import company_name_from_symbol_search_modal_text
+
+    blob = "NKE\nNIKE, Inc. Class B\nstock\nNYSE"
+    assert company_name_from_symbol_search_modal_text(blob, "NKE") == "NIKE, Inc. Class B"
+
+
 def test_resolve_company_name_header_parenthetical():
     from tv_scraper import resolve_company_name
 

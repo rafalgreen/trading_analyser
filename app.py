@@ -9,6 +9,10 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+import platform
+import urllib.request
+import urllib.error
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
@@ -28,6 +32,11 @@ from results_store import (
     parse_pca_number,
     row_has_indicator_data,
     tickers_with_no_data,
+)
+from signal_strategies import (
+    STRATEGIES as SIGNAL_STRATEGIES,
+    STRATEGY_LABELS as SIGNAL_STRATEGY_LABELS,
+    compute_signals as compute_row_signals,
 )
 
 logger = logging.getLogger("trading_analyser.app")
@@ -138,6 +147,23 @@ def load_config() -> Dict[str, Any]:
             "intervals": ["1D", "1W", "1M"],
             "indicators": ["PCA", "HTS Panel", "MacD"],
         }
+    # CDP (remote debug) — domyślnie 9222 jak w README.
+    cfg.setdefault("cdp_port", 9222)
+    # Automatyczne uruchomienie przeglądarki z CDP (lokalny macOS).
+    cfg.setdefault("auto_start_cdp_browser", True)
+    cfg.setdefault("cdp_browser_preference", "brave")  # brave|chrome
+    # Czy używać Twojego istniejącego, zalogowanego profilu Brave/Chrome
+    # (zamiast czystego dedykowanego). Domyślnie tak — wtedy TV jest już
+    # zalogowany. Aplikacja w razie potrzeby uprzejmie zamknie Brave/Chrome
+    # przed startem CDP (sesja kart i tak zostanie odtworzona).
+    cfg.setdefault("cdp_use_system_profile", True)
+    cfg.setdefault("cdp_auto_quit_browser", True)
+    # Niezawodny override: jawna ścieżka --user-data-dir (np. własny profil).
+    cfg.setdefault("cdp_user_data_dir", "")
+    # Sub-profil w katalogu user-data-dir (Brave/Chrome: "Default", "Profile 1"…).
+    cfg.setdefault("cdp_profile_directory", "Default")
+    # URL otwierany przy auto-starcie przeglądarki (np. konkretny wykres TV).
+    cfg.setdefault("cdp_startup_url", "https://www.tradingview.com/chart/")
     sched = cfg.get("auto_schedule")
     if not isinstance(sched, dict):
         cfg["auto_schedule"] = DEFAULT_AUTO_SCHEDULE.copy()
@@ -193,6 +219,405 @@ def _write_status(status: str, **extra) -> None:
         pass
 
 
+def _cdp_is_listening(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=0.8
+        ) as r:
+            return 200 <= int(getattr(r, "status", 200)) < 300
+    except Exception:
+        return False
+
+
+def _running_cdp_user_data_dir(port: int) -> Optional[str]:
+    """Wyciąga ``--user-data-dir`` z aktualnie działającego procesu CDP.
+
+    macOS-owy ``pgrep -a`` nie zwraca command-line — używamy ``pgrep -f`` po
+    PID i ``ps -p <pid> -ww -o args=`` po pełnym argv.
+    """
+    try:
+        pgrep = subprocess.run(
+            ["pgrep", "-f", f"remote-debugging-port={port}"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    pids = [p.strip() for p in (pgrep.stdout or "").splitlines() if p.strip()]
+    for pid in pids:
+        try:
+            ps = subprocess.run(
+                ["ps", "-p", pid, "-ww", "-o", "args="],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            continue
+        argline = (ps.stdout or "").strip()
+        if not argline:
+            continue
+        if "MacOS/Brave Browser" not in argline and "MacOS/Google Chrome" not in argline:
+            continue
+        m = re.search(r"--user-data-dir=([^\s\"']+)", argline)
+        if m:
+            return os.path.abspath(os.path.expanduser(m.group(1)))
+    return None
+
+
+CDP_USER_DATA_DIR = os.path.join(DATA_DIR, ".cdp-profile")
+
+_BROWSER_BINARIES_MAC = {
+    "brave": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "chrome": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+}
+
+_BROWSER_APP_NAMES_MAC = {
+    "brave": "Brave Browser",
+    "chrome": "Google Chrome",
+}
+
+_BROWSER_DEFAULT_PROFILES_MAC = {
+    "brave": "~/Library/Application Support/BraveSoftware/Brave-Browser",
+    "chrome": "~/Library/Application Support/Google/Chrome",
+}
+
+
+def _system_profile_dir(preference: str) -> str:
+    """Zwraca ścieżkę do istniejącego profilu Brave/Chrome lub ``""``."""
+    pref = (preference or "brave").strip().lower()
+    order = ["brave", "chrome"] if pref != "chrome" else ["chrome", "brave"]
+    for key in order:
+        raw = _BROWSER_DEFAULT_PROFILES_MAC.get(key, "")
+        if not raw:
+            continue
+        path = os.path.expanduser(raw)
+        if os.path.isdir(path):
+            return path
+    return ""
+
+
+def _is_mac_app_running(app_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                f'tell application "System Events" to (name of processes) contains "{app_name}"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return result.stdout.strip().lower() == "true"
+    except Exception:
+        return False
+
+
+def _quit_mac_app(app_name: str, timeout_s: float = 8.0) -> bool:
+    """Politely quit a macOS app, force-kill remaining helpers if needed.
+
+    Sam ``osascript quit`` często zostawia procesy pomocnicze (Brave Helper,
+    Helper (Renderer), Helper (GPU)) — one trzymają singleton lock w katalogu
+    user-data-dir, przez co kolejna instancja startuje w trybie awaryjnym
+    bez dostępu do cookies / sesji.
+    """
+    if not _is_mac_app_running(app_name):
+        _force_kill_app_helpers(app_name)
+        return True
+
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'tell application "{app_name}" to quit'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+    deadline = time.time() + max(0.5, float(timeout_s))
+    while time.time() < deadline:
+        if not _is_mac_app_running(app_name):
+            break
+        time.sleep(0.25)
+
+    # Niezależnie od osascript — wyczyść osierocone procesy pomocnicze i wszelkie
+    # pozostałe instancje binarki.
+    _force_kill_app_helpers(app_name)
+
+    deadline = time.time() + 4.0
+    while time.time() < deadline:
+        if not _is_mac_app_running(app_name) and not _has_app_processes(app_name):
+            return True
+        time.sleep(0.25)
+    return not _is_mac_app_running(app_name) and not _has_app_processes(app_name)
+
+
+def _has_app_processes(app_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"/{app_name}.app/Contents/MacOS/"],
+            capture_output=True,
+            timeout=3,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _force_kill_app_helpers(app_name: str) -> None:
+    """Twardo (-9) zabija pozostałe procesy Brave/Chrome (main + helpery)."""
+    try:
+        subprocess.run(
+            ["pkill", "-9", "-f", f"/{app_name}.app/Contents/MacOS/"],
+            capture_output=True,
+            timeout=4,
+        )
+    except Exception:
+        pass
+
+
+def _purge_chromium_singletons(profile_dir: str) -> None:
+    """Usuwa singleton lock-files chromium, blokujące poprawny start."""
+    if not profile_dir or not os.path.isdir(profile_dir):
+        return
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        path = os.path.join(profile_dir, name)
+        try:
+            if os.path.lexists(path):
+                os.remove(path)
+        except Exception as e:
+            logger.debug("Nie udało się usunąć %s: %s", path, e)
+
+
+def _resolve_cdp_browser_mac(
+    preference: str,
+    explicit_user_data_dir: str,
+    use_system_profile: bool,
+) -> Dict[str, str]:
+    """Decyduje, którą binarkę uruchomić i jaki profil użyć.
+
+    Zwraca słownik z polami ``key`` (brave/chrome), ``binary``, ``app_name``,
+    ``profile_dir``, ``profile_kind`` (system/dedicated/custom).
+    """
+    pref = (preference or "brave").strip().lower()
+    order = ["brave", "chrome"] if pref != "chrome" else ["chrome", "brave"]
+
+    explicit = (explicit_user_data_dir or "").strip()
+    explicit_path = (
+        os.path.abspath(os.path.expanduser(explicit)) if explicit else ""
+    )
+
+    for key in order:
+        binary = _BROWSER_BINARIES_MAC.get(key, "")
+        if not binary or not os.path.exists(binary):
+            continue
+        if explicit_path:
+            return {
+                "key": key,
+                "binary": binary,
+                "app_name": _BROWSER_APP_NAMES_MAC.get(key, ""),
+                "profile_dir": explicit_path,
+                "profile_kind": "custom",
+            }
+        if use_system_profile:
+            sys_path = os.path.expanduser(
+                _BROWSER_DEFAULT_PROFILES_MAC.get(key, "")
+            )
+            if sys_path and os.path.isdir(sys_path):
+                return {
+                    "key": key,
+                    "binary": binary,
+                    "app_name": _BROWSER_APP_NAMES_MAC.get(key, ""),
+                    "profile_dir": sys_path,
+                    "profile_kind": "system",
+                }
+        return {
+            "key": key,
+            "binary": binary,
+            "app_name": _BROWSER_APP_NAMES_MAC.get(key, ""),
+            "profile_dir": os.path.abspath(CDP_USER_DATA_DIR),
+            "profile_kind": "dedicated",
+        }
+    raise RuntimeError(
+        "Nie znaleziono Brave ani Chrome w /Applications. "
+        "Zainstaluj jedno z nich albo uruchom ręcznie z --remote-debugging-port."
+    )
+
+
+def _start_cdp_browser_mac(
+    port: int,
+    preference: str = "brave",
+    user_data_dir: str = "",
+    startup_url: str = "https://www.tradingview.com/chart/",
+    use_system_profile: bool = True,
+    auto_quit_running: bool = True,
+    profile_directory: str = "Default",
+) -> Dict[str, str]:
+    """Startuje Brave/Chrome z CDP na macOS, używając wybranego profilu.
+
+    Zwraca info o wybranej przeglądarce/profilu (do logów / odpowiedzi API).
+    """
+    info = _resolve_cdp_browser_mac(preference, user_data_dir, use_system_profile)
+
+    profile_dir = info["profile_dir"]
+    if info["profile_kind"] == "dedicated":
+        try:
+            os.makedirs(profile_dir, exist_ok=True)
+        except Exception:
+            pass
+
+    if auto_quit_running and info["app_name"]:
+        running = _is_mac_app_running(info["app_name"]) or _has_app_processes(
+            info["app_name"]
+        )
+        if running:
+            logger.info(
+                "Zamykam %s, aby uruchomić ją ponownie z CDP (profil=%s, dir=%s)…",
+                info["app_name"],
+                info["profile_kind"],
+                profile_directory,
+            )
+            if not _quit_mac_app(info["app_name"], timeout_s=8.0):
+                raise RuntimeError(
+                    f"Nie udało się zamknąć {info['app_name']}. Zamknij ręcznie i spróbuj ponownie."
+                )
+
+    # Po killu pozostają singleton-locki — bez ich usunięcia Brave startuje w trybie
+    # odciętym od cookies/sesji (efekt: TV pokazuje reklamy "Join for free").
+    _purge_chromium_singletons(profile_dir)
+
+    args = [
+        info["binary"],
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir}",
+        f"--profile-directory={profile_directory or 'Default'}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--restore-last-session=false",
+    ]
+    if startup_url:
+        args.append(startup_url)
+
+    subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    info["profile_directory"] = profile_directory or "Default"
+    return info
+
+
+def ensure_cdp_ready() -> None:
+    """Jeśli CDP nie działa, spróbuj uruchomić przeglądarkę automatycznie (macOS).
+
+    Dodatkowo: jeśli CDP odpowiada, ale używa innego ``--user-data-dir`` niż
+    teraz wybrany (np. zombi-instancja z dedykowanym pustym profilem) — ubija
+    ją i startuje świeżo z prawidłowego profilu (zalogowanego TV).
+    """
+    cfg = load_config()
+    try:
+        port = int(cfg.get("cdp_port", 9222))
+    except Exception:
+        port = 9222
+
+    pref = str(cfg.get("cdp_browser_preference", "brave"))
+    user_data_dir = str(cfg.get("cdp_user_data_dir", "") or "")
+    use_system_profile = bool(cfg.get("cdp_use_system_profile", True))
+
+    if _cdp_is_listening(port):
+        if platform.system().lower() == "darwin":
+            try:
+                expected = _resolve_cdp_browser_mac(
+                    pref, user_data_dir, use_system_profile
+                )
+                actual = _running_cdp_user_data_dir(port)
+                if actual and os.path.abspath(actual) != os.path.abspath(
+                    expected["profile_dir"]
+                ):
+                    logger.warning(
+                        "CDP używa innego profilu (%s) niż chcemy (%s) — restart…",
+                        actual,
+                        expected["profile_dir"],
+                    )
+                    if expected.get("app_name"):
+                        _quit_mac_app(expected["app_name"], timeout_s=8.0)
+                    _purge_chromium_singletons(actual)
+                    _purge_chromium_singletons(expected["profile_dir"])
+                else:
+                    return
+            except Exception as e:
+                logger.debug("Nie udało się zweryfikować profilu CDP: %s", e)
+                return
+        else:
+            return
+
+    auto = cfg.get("auto_start_cdp_browser", True)
+    env_override = (os.environ.get("TV_AUTO_START_CDP") or "").strip().lower()
+    if env_override in {"0", "false", "no", "off"}:
+        auto = False
+    if env_override in {"1", "true", "yes", "on"}:
+        auto = True
+
+    if not auto:
+        raise RuntimeError(
+            f"Brak nasłuchu CDP pod http://127.0.0.1:{port}. "
+            f"Uruchom Brave/Chrome z --remote-debugging-port={port} i otwórz wykres TradingView."
+        )
+
+    if platform.system().lower() != "darwin":
+        raise RuntimeError(
+            f"Brak nasłuchu CDP pod http://127.0.0.1:{port}. "
+            "Auto-start CDP jest obsługiwany tylko na macOS (darwin)."
+        )
+
+    pref = cfg.get("cdp_browser_preference", "brave")
+    user_data_dir = cfg.get("cdp_user_data_dir", "") or ""
+    use_system_profile = bool(cfg.get("cdp_use_system_profile", True))
+    auto_quit_running = bool(cfg.get("cdp_auto_quit_browser", True))
+    profile_directory = str(cfg.get("cdp_profile_directory") or "Default")
+    startup_url = cfg.get("cdp_startup_url", "https://www.tradingview.com/chart/")
+    logger.info(
+        "CDP nie działa — uruchamiam przeglądarkę (%s) na porcie %s…", pref, port
+    )
+    try:
+        info = _start_cdp_browser_mac(
+            port,
+            str(pref),
+            str(user_data_dir),
+            str(startup_url),
+            use_system_profile=use_system_profile,
+            auto_quit_running=auto_quit_running,
+            profile_directory=profile_directory,
+        )
+        logger.info(
+            "Uruchamiam %s, profil=%s (%s, dir=%s)",
+            info.get("app_name") or info.get("binary"),
+            info.get("profile_kind"),
+            info.get("profile_dir"),
+            info.get("profile_directory"),
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Nie udało się uruchomić przeglądarki: {e}. "
+            f"Uruchom ręcznie ./scripts/start_browser_debug.sh"
+        )
+
+    for _ in range(120):
+        if _cdp_is_listening(port):
+            logger.info("CDP działa na http://127.0.0.1:%s", port)
+            return
+        time.sleep(0.25)
+
+    raise RuntimeError(
+        f"Nie udało się uruchomić CDP na http://127.0.0.1:{port}. "
+        f"Sprawdź ręcznie: curl -sS http://127.0.0.1:{port}/json/version | head -c 200"
+    )
+
+
 def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, Any]:
     """Uruchamia `tv_scraper.py` w tle. Pusta lista tickerów = pełna lista z konfiguracji."""
     global _scraper_process
@@ -202,6 +627,11 @@ def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, A
                 "status": "already_running",
                 "message": "Scraper jest już uruchomiony.",
             }
+        try:
+            ensure_cdp_ready()
+        except Exception as e:
+            _write_status("error", error=str(e))
+            return {"status": "error", "message": str(e)}
         cmd = [sys.executable, "-u", "tv_scraper.py"]
         if tickers:
             cmd.extend(["--ticker", ",".join(tickers)])
@@ -585,36 +1015,13 @@ def get_results(date_id: str):
                 if wl_data:
                     row["WL_Market_Cap"] = wl_data.get("Market_Cap", "")
                     row["WL_PE_Ratio"] = wl_data.get("PE_Ratio", "")
-                    row["WL_Daily_Signal"] = wl_data.get("Daily_Signal", "")
-                    row["WL_Weekly_Signal"] = wl_data.get("Weekly_Signal", "")
-                    row["WL_Monthly_Signal"] = wl_data.get("Monthly_Signal", "")
                     row["WL_Chg_Pct"] = wl_data.get("Chg_Pct", "")
                     row["WL_YTD"] = wl_data.get("YTD", "")
                     row["WL_1Y"] = wl_data.get("1Y", "")
 
                 results.append(row)
 
-        by_ticker: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for row in results:
-            by_ticker[row.get("Ticker", "") or ""].append(row)
-        wl_vis = {
-            t: wl_signal_visibility_for_ticker(rs, indicators)
-            for t, rs in by_ticker.items()
-        }
-        for row in results:
-            t = row.get("Ticker", "") or ""
-            vis = wl_vis.get(t) or {
-                "daily": False,
-                "weekly": False,
-                "monthly": False,
-            }
-            if not vis["daily"]:
-                row["WL_Daily_Signal"] = ""
-            if not vis["weekly"]:
-                row["WL_Weekly_Signal"] = ""
-            if not vis["monthly"]:
-                row["WL_Monthly_Signal"] = ""
-
             # Per-row diagnostyka brakujących wskaźników (niezależnie od Scrape_Status w CSV)
             try:
                 ser = pd.Series(row)
@@ -627,6 +1034,13 @@ def get_results(date_id: str):
             row["All_Indicators_Missing"] = bool(
                 indicators and len(missing) == len(indicators)
             )
+
+            try:
+                sig_map = compute_row_signals(row)
+            except Exception:
+                sig_map = {}
+            for strat_id in SIGNAL_STRATEGIES.keys():
+                row[f"Computed_Signal_{strat_id}"] = sig_map.get(strat_id, "")
     except HTTPException:
         raise
     except Exception as e:
@@ -635,7 +1049,13 @@ def get_results(date_id: str):
             status_code=500, detail="Nie udało się wczytać danych dla tej daty."
         )
 
-    return {"data": results}
+    return {
+        "data": results,
+        "signal_strategies": [
+            {"id": k, "label": SIGNAL_STRATEGY_LABELS[k]}
+            for k in SIGNAL_STRATEGIES.keys()
+        ],
+    }
 
 
 @app.get("/api/watchlist")

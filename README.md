@@ -19,7 +19,53 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### Przeglądarka (macOS, przykład Brave)
+### Uruchom aplikację (panel + API)
+
+Najprościej:
+
+```bash
+./scripts/start_app.sh
+```
+
+Otwórz panel w przeglądarce: `http://127.0.0.1:8000`
+
+### Scraper i przeglądarka (CDP / remote debug)
+
+Scraper łączy się do Brave/Chrome przez CDP na porcie **9222**.
+
+Gdy uruchamiasz scraper z panelu (`/api/scraper/run`), aplikacja **automatycznie odpala Brave/Chrome** z CDP na macOS jeśli port 9222 nie odpowiada — domyślnie **z Twoim systemowym profilem Brave/Chrome**, czyli z już zalogowanym TradingView, zapisanymi zakładkami itp.
+
+Jak to działa krok po kroku (na macOS):
+
+1. Klikasz w panelu „Uruchom” / „Odśwież brak danych”.
+2. Aplikacja sprawdza `http://127.0.0.1:9222`.
+3. Jeśli CDP nie działa — uprzejmie zamyka Brave (Cmd+Q przez AppleScript). Sesja kart zostaje zapisana — Brave ją odtworzy.
+4. Aplikacja uruchamia Brave ponownie z `--remote-debugging-port=9222 --user-data-dir=<Twój profil>` i otwiera `https://www.tradingview.com/chart/`.
+5. Scraper łączy się przez CDP — TV jest już zalogowany, brak reklam dla niezalogowanych.
+
+#### Konfiguracja w `scraper_config.json`
+
+```json
+"cdp_port": 9222,
+"auto_start_cdp_browser": true,
+"cdp_browser_preference": "brave",         
+"cdp_use_system_profile": true,            
+"cdp_auto_quit_browser": true,             
+"cdp_user_data_dir": "",                    
+"cdp_startup_url": "https://www.tradingview.com/chart/"
+```
+
+Najczęściej zmieniane:
+
+- `cdp_use_system_profile: false` → użyj **dedykowanego** profilu (`data/.cdp-profile/`). Wymaga jednorazowego logowania do TV.
+- `cdp_auto_quit_browser: false` → nie zamykaj automatycznie Brave; sam dbasz o to, żeby Brave nie działał, gdy włączasz scraper.
+- `cdp_user_data_dir: "/ścieżka/do/profilu"` → ręczny override.
+
+Możesz też wymusić ENV: `TV_AUTO_START_CDP=0` (wyłącz auto-start) / `TV_AUTO_START_CDP=1` (włącz).
+
+Jeśli chcesz uruchomić przeglądarkę ręcznie, użyj jednej z opcji poniżej.
+
+### Brave (macOS)
 
 ```bash
 /Applications/Brave\ Browser.app/Contents/MacOS/Brave\ Browser --remote-debugging-port=9222
@@ -27,14 +73,25 @@ playwright install chromium
 
 Otwórz w tej sesji kartę z wykresem TradingView. Bez tego scraper zgłosi brak połączenia lub brak karty TV.
 
-### Serwer WWW (panel + API)
+### Google Chrome (macOS)
 
 ```bash
-source venv/bin/activate
-uvicorn app:app --host 0.0.0.0 --port 8000
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
 ```
 
-W przeglądarce: `http://127.0.0.1:8000` — historia plików CSV z katalogu `results/`, karty per ticker, wykres PCA, zakładka konfiguracji (tickery, interwały, wskaźniki, harmonogram).
+### Skróty (macOS) — uruchomienie jednym poleceniem
+
+CDP (Brave/Chrome) na porcie 9222:
+
+```bash
+./scripts/start_browser_debug.sh
+```
+
+Start aplikacji (uvicorn):
+
+```bash
+./scripts/start_app.sh
+```
 
 ## Panel web — funkcjonalność
 
@@ -74,6 +131,17 @@ Na górze widoku:
 ### Watchlista (zakładka „Watchlist")
 
 Jeśli w `data/` jest plik `Portfel_Watchlist_*.csv`, panel dołącza do tickerów pola: `Name`, `Last`, `Market_Cap`, `P/E`, `EPS`, `Beta`, `Revenue`, `Daily_Signal` / `Weekly_Signal` / `Monthly_Signal`, `Chg. %`, `YTD`, `1Y`. W widoku watchlisty można filtrować po sygnale (Strong Buy / Buy / Neutral / Sell / Strong Sell) i interwale — filtry pamiętają się w `localStorage`.
+
+### Sygnał kup/sprzedaj (filtr po strategii)
+
+Toolbar nad listą tickerów ma chipy ze strategiami liczenia sygnału z 3 wskaźników (PCA / HTS Panel / MacD). Wybór jednej strategii filtruje listę: pokazuje tylko tickery, które pod tą strategią dają sygnał **„buy" lub „strong buy"** dla wybranego interwału (D / W / M). Domyślnie **„Wszystkie"** = brak filtra.
+
+- **Trendy + PCA** — 2× Wzrostowy + PCA ≥ 60 → Strong Buy; 2× Wzrostowy → Buy; 2× Spadkowy + PCA ≤ 40 → Strong Sell; 2× Spadkowy → Sell; reszta → Neutral.
+- **Crossy (priorytet)** — BULL/BEAR CROSS z HTS/MacD przeważają nad trendem; PCA jako tie-breaker (≥60 buy, ≤40 sell). Fallback na trend jeśli brak crossów.
+- **PCA (kosze)** — tylko PCA: ≤20 Strong Buy, 20–40 Buy, 40–60 Neutral, 60–80 Sell, ≥80 Strong Sell.
+- **Punktowy** — HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma w [−3..+3] mapowana na 5 koszyków.
+
+Strategie liczone są w backendzie z surowych pól wskaźników i wystawiane jako kolumny `Computed_Signal_<id>` w odpowiedzi `/api/results/{date_id}`. UI używa ich do filtrowania i pokazywania bad-ży D/W/M na karcie tickera (gdy wybrana jest jedna strategia — pokazany jest jej sygnał; gdy „Wszystkie" — sygnały wszystkich 4). Wybór strategii i interwału pamięta się w `localStorage`.
 
 ### Powiadomienia i skróty
 
@@ -133,7 +201,16 @@ W **`scraper_config.json`** (lub w panelu **Konfiguracja**) pole **`auto_schedul
 - **`enabled` + `hour` / `minute`** — codziennie o tej **godzinie lokalnej** uruchamiany jest pełny przebieg (jak „Uruchom wszystkie").
 - **`run_on_startup`** — **domyślnie `false`**. Włącz (`true`), jeśli chcesz żeby `uvicorn` po każdym starcie automatycznie odpalał pełny scrape po ~15 s. W trakcie developmentu (częste restarty) to zaskakuje i preemptuje ręczne „rescrape" pojedynczych tickerów — dlatego domyślnie jest wyłączone.
 
-**Musisz mieć uruchomiony `uvicorn`** oraz możliwość działania scrapera (Brave z CDP + karta TradingView). Harmonogram ani start nie otwierają samej przeglądarki.
+**Uwaga o przeglądarce/CDP**: aplikacja może automatycznie uruchomić Brave/Chrome z CDP na macOS, jeśli CDP nie nasłuchuje (domyślnie włączone). Sterowanie w `scraper_config.json`:
+
+- `cdp_port` (domyślnie `9222`)
+- `auto_start_cdp_browser` (domyślnie `true`)
+- `cdp_browser_preference` (`"brave"` lub `"chrome"`)
+
+Możesz też wymusić ENV:
+
+- `TV_AUTO_START_CDP=0` — wyłącza auto-start CDP
+- `TV_AUTO_START_CDP=1` — włącza auto-start CDP
 
 ## Dane pomocnicze
 

@@ -25,6 +25,9 @@ data/*.csv
 # TradingView DOM dumps (may contain session / account identifiers)
 data/tv_dom_dump.html
 
+# Auto-launched Brave/Chrome profile for CDP (cookies/state)
+data/.cdp-profile/
+
 # OS / IDE
 .DS_Store
 .idea/

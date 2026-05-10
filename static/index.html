@@ -116,20 +116,19 @@
                     </div>
                 </div>
 
-                    <!-- Watchlist signal filter chips -->
+                    <!-- Signal strategy filter -->
                     <div class="filter-toolbar" id="wl-filter-toolbar" hidden>
                         <div class="filter-group">
-                            <span class="filter-group-label">Sygnał</span>
-                            <button type="button" class="filter-chip active" data-filter-signal="all">Wszystkie</button>
-                            <button type="button" class="filter-chip" data-filter-signal="strong buy" data-signal="strong-buy"><span class="chip-dot"></span>Strong Buy</button>
-                            <button type="button" class="filter-chip" data-filter-signal="buy" data-signal="buy"><span class="chip-dot"></span>Buy</button>
-                            <button type="button" class="filter-chip" data-filter-signal="neutral" data-signal="neutral"><span class="chip-dot"></span>Neutral</button>
-                            <button type="button" class="filter-chip" data-filter-signal="sell" data-signal="sell"><span class="chip-dot"></span>Sell</button>
-                            <button type="button" class="filter-chip" data-filter-signal="strong sell" data-signal="strong-sell"><span class="chip-dot"></span>Strong Sell</button>
+                            <span class="filter-group-label">Strategia</span>
+                            <button type="button" class="filter-chip active" data-filter-strategy="all">Wszystkie</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="trend_only">Trendy + PCA</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="cross_priority">Crossy (priorytet)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="pca_buckets">PCA (kosze)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="scoring">Punktowy</button>
                         </div>
                         <div class="filter-separator"></div>
                         <div class="filter-group">
-                            <span class="filter-group-label">Interwał sygnału</span>
+                            <span class="filter-group-label">Interwał</span>
                             <button type="button" class="filter-chip active" data-filter-interval="D">D</button>
                             <button type="button" class="filter-chip" data-filter-interval="W">W</button>
                             <button type="button" class="filter-chip" data-filter-interval="M">M</button>

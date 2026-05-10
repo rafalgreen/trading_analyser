@@ -1567,6 +1567,7 @@ input[type="text"]:focus {
     background: var(--border-color);
 }
 
+
 /* Record count + freshness */
 .record-count-wrap {
     display: inline-flex;
