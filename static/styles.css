@@ -1662,11 +1662,14 @@ input[type="text"]:focus {
 
 /* Global scrape banner */
 .global-scrape-banner {
+    --scrape-banner-h: 40px;
     position: fixed;
     top: 0;
     left: var(--sidebar-width);
     right: 0;
-    z-index: 50;
+    z-index: 60;
+    height: var(--scrape-banner-h);
+    box-sizing: border-box;
     background: linear-gradient(90deg, rgba(59, 130, 246, 0.2), rgba(59, 130, 246, 0.08));
     border-bottom: 1px solid rgba(59, 130, 246, 0.35);
     color: var(--text-primary);
@@ -1681,6 +1684,16 @@ input[type="text"]:focus {
 
 .global-scrape-banner.visible {
     display: flex;
+}
+
+/* Gdy banner jest widoczny, zsuwamy sticky top-nav i całą zawartość o
+   wysokość banera, żeby nie zasłaniał wyszukiwarki / sortowania. */
+.global-scrape-banner.visible ~ .app-container .top-nav {
+    top: 40px;
+}
+
+.global-scrape-banner.visible ~ .app-container .main-content {
+    padding-top: 40px;
 }
 
 .global-scrape-banner .banner-text {
@@ -2113,5 +2126,141 @@ input[type="text"]:focus {
     font-size: 0.72rem;
     font-weight: 500;
     margin-top: 2px;
+}
+
+/* ---------- Repair symbols modal ---------- */
+.repair-loading,
+.repair-empty {
+    padding: 14px 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.repair-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 50vh;
+    overflow-y: auto;
+    padding-right: 4px;
+    margin-bottom: 12px;
+}
+
+.repair-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.repair-row.has-match:hover {
+    border-color: var(--border-light);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.repair-row.no-match {
+    opacity: 0.55;
+}
+
+.repair-row input[type="checkbox"] {
+    margin-top: 4px;
+    accent-color: var(--accent-primary);
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+.repair-row.no-match input[type="checkbox"] {
+    cursor: not-allowed;
+}
+
+.repair-row-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.repair-row-title {
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    font-weight: 600;
+    word-break: break-word;
+}
+
+.repair-row-title .repair-arrow {
+    color: var(--text-muted);
+    margin: 0 6px;
+    font-weight: 400;
+}
+
+.repair-row-title .repair-new {
+    color: var(--accent-primary);
+}
+
+.repair-row-meta {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.repair-row-meta .repair-exchange {
+    display: inline-block;
+    padding: 1px 6px;
+    margin-right: 6px;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
+    font-weight: 600;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+}
+
+.repair-row-candidates {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.repair-candidate {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid transparent;
+    cursor: pointer;
+}
+
+.repair-candidate:hover {
+    border-color: var(--border-light);
+}
+
+.repair-candidate input[type="radio"] {
+    accent-color: var(--accent-primary);
+}
+
+.repair-rerun-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 14px 0;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.repair-rerun-toggle input[type="checkbox"] {
+    accent-color: var(--accent-primary);
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
 }
 

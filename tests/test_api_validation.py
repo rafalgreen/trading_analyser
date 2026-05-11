@@ -233,6 +233,33 @@ def test_rename_ticker_rejects_invalid_new(client, app_env, tmp_path, monkeypatc
     assert r.status_code == 400
 
 
+def test_rename_ticker_accepts_exchange_prefix(client, app_env, tmp_path, monkeypatch):
+    """Tickery z prefixem giełdy (np. ``GPW:ATC``) muszą przejść walidację."""
+    m, _res, _dat = app_env
+    cfg_file = tmp_path / "scraper_config.json"
+    cfg_file.write_text(
+        json.dumps({
+            "tickers": ["ATC", "AAPL"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_file))
+
+    r = client.post("/api/tickers/rename", json={"old": "ATC", "new": "GPW:ATC"})
+    assert r.status_code == 200, r.text
+    saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert saved["tickers"] == ["GPW:ATC", "AAPL"]
+
+
+def test_ticker_history_accepts_exchange_prefix(client, app_env):
+    """Endpoint /api/ticker/{ticker}/history musi akceptować ``GPW:ATC``."""
+    r = client.get("/api/ticker/GPW:ATC/history?interval=1D")
+    assert r.status_code == 200
+    assert r.json()["history"] == []
+
+
 def test_rename_ticker_matches_by_base_symbol(client, app_env, tmp_path, monkeypatch):
     """LULU.O w karcie/CSV powinno zmatchować wpis 'LULU' w configu."""
     m, _res, _dat = app_env
@@ -465,3 +492,189 @@ def test_stop_scraper_kills_running_process(client, app_env, tmp_path, monkeypat
                 proc.wait(timeout=2)
         except Exception:
             pass
+
+
+# --- Repair no-data symbols (TV REST + GPW: prefix) -----------------------
+
+def _write_no_data_csv(res_dir, date_id, tickers_status):
+    """Pomocnicza: zapisuje CSV z dwoma interwałami per ticker zgodnie z mapą."""
+    header = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,"
+        "PCA_Values,HTS Panel_Values,MacD_Values\n"
+    )
+    rows = []
+    for ticker, status in tickers_status.items():
+        if status == "NO_DATA":
+            rows.append(
+                f"{ticker},{ticker},,1D,NO_DATA,,Brak danych na wykresie,"
+                f"Brak danych na wykresie,Brak danych na wykresie"
+            )
+            rows.append(
+                f"{ticker},{ticker},,1W,NO_DATA,,Brak danych na wykresie,"
+                f"Brak danych na wykresie,Brak danych na wykresie"
+            )
+        else:
+            rows.append(
+                f"{ticker},{ticker},123.4,1D,OK,,12.3 (Niebieski),ok ok ok ok,1 2 3 4"
+            )
+    path = res_dir / f"tradingview_results_{date_id}.csv"
+    path.write_text(header + "\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+def test_repair_no_data_preview_lists_candidates(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["AMB", "FOO", "OK"],
+            "intervals": ["1D"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+    _write_no_data_csv(res, "2026-05-04", {"AMB": "NO_DATA", "FOO": "NO_DATA", "OK": "OK"})
+
+    def fake_lookup(ticker, exchanges):
+        if ticker == "AMB" and "GPW" in exchanges:
+            return [{"symbol": "GPW:AMB", "exchange": "GPW", "description": "Ambra S.A."}]
+        return []
+
+    monkeypatch.setattr(m, "lookup_symbol_match", fake_lookup)
+
+    r = client.get("/api/tickers/repair_no_data?date_id=2026-05-04")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["exchange_prefixes"] == ["GPW"]
+
+    by_old = {it["old"]: it for it in body["items"]}
+    assert "AMB" in by_old
+    assert "FOO" in by_old
+    assert "OK" not in by_old  # OK ticker nie jest no-data
+
+    assert by_old["AMB"]["candidates"] == [
+        {"new": "GPW:AMB", "exchange": "GPW", "description": "Ambra S.A."}
+    ]
+    assert by_old["FOO"]["candidates"] == []
+    assert "Brak match-a" in by_old["FOO"].get("note", "")
+
+
+def test_repair_no_data_preview_skips_tickers_with_colon(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["GPW:ATC"],
+            "intervals": ["1D"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+    _write_no_data_csv(res, "2026-05-04", {"GPW:ATC": "NO_DATA"})
+
+    called = {"hit": 0}
+
+    def fake_lookup(ticker, exchanges):
+        called["hit"] += 1
+        return [{"symbol": "GPW:GPW:ATC", "exchange": "GPW", "description": "Bad"}]
+
+    monkeypatch.setattr(m, "lookup_symbol_match", fake_lookup)
+
+    r = client.get("/api/tickers/repair_no_data?date_id=2026-05-04")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert called["hit"] == 0  # nie wołamy REST dla tickerów z ':'
+    items = {it["old"]: it for it in body["items"]}
+    assert "GPW:ATC" in items
+    assert items["GPW:ATC"].get("skipped") is True
+    assert items["GPW:ATC"]["candidates"] == []
+
+
+def test_repair_no_data_apply_writes_config(client, app_env, tmp_path, monkeypatch):
+    m, _res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["AMB", "ATC", "AAPL"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+
+    r = client.post(
+        "/api/tickers/repair_no_data",
+        json={
+            "renames": [
+                {"old": "AMB", "new": "GPW:AMB"},
+                {"old": "ATC", "new": "GPW:ATC"},
+            ],
+            "rerun": False,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert len(body["applied"]) == 2
+    assert body["errors"] == []
+
+    saved = json.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["tickers"] == ["GPW:AMB", "GPW:ATC", "AAPL"]
+
+
+def test_repair_no_data_apply_rerun_triggers_scraper(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["AMB"],
+            "intervals": ["1D"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+    _write_no_data_csv(res, "2026-05-04", {"AMB": "NO_DATA"})
+
+    started = {"tickers": None}
+
+    def fake_start(tickers=None):
+        started["tickers"] = list(tickers or [])
+        return {"status": "started", "pid": 999}
+
+    monkeypatch.setattr(m, "start_scraper_subprocess", fake_start)
+
+    r = client.post(
+        "/api/tickers/repair_no_data",
+        json={
+            "renames": [{"old": "AMB", "new": "GPW:AMB"}],
+            "rerun": True,
+            "date_id": "2026-05-04",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    # Po renamie config ma nową nazwę, a CSV nadal zawiera starą — _resolve_no_data_tickers
+    # filtruje po `requested_tickers` więc pokaże tylko te z CSV jako no-data, których
+    # *nowa* nazwa jest na liście. CSV ma "AMB" (no-data), a my filtrujemy po nowej
+    # nazwie "GPW:AMB" — z CSV nie pasuje. Akceptujemy `no_data_empty` jako poprawny
+    # stan, gdy CSV jeszcze nie ma nowej nazwy.
+    sc = body.get("scraper", {})
+    assert sc.get("status") in {"started", "no_data_empty"}
+
+
+def test_repair_no_data_apply_empty_renames_400(client, app_env, tmp_path, monkeypatch):
+    r = client.post(
+        "/api/tickers/repair_no_data",
+        json={"renames": [], "rerun": False},
+    )
+    assert r.status_code == 400

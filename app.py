@@ -38,7 +38,7 @@ from signal_strategies import (
     STRATEGY_LABELS as SIGNAL_STRATEGY_LABELS,
     compute_signals as compute_row_signals,
 )
-from company_names import lookup_company_name
+from company_names import lookup_company_name, lookup_symbol_match
 
 logger = logging.getLogger("trading_analyser.app")
 if not logger.handlers:
@@ -100,7 +100,7 @@ SCRAPER_LOG_FILE = "scraper.log"
 SCRAPER_LOG_MAX_BYTES = 2_000_000
 
 RESULTS_DATE_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}(_\d{2}-\d{2}-\d{2})?$")
-TICKER_PATTERN = re.compile(r"^[A-Z0-9._-]{1,20}$")
+TICKER_PATTERN = re.compile(r"^[A-Z0-9._:\-]{1,24}$")
 ALLOWED_HISTORY_INTERVALS = {"1D", "1W", "1M"}
 
 
@@ -134,8 +134,19 @@ class ScraperRunRequest(BaseModel):
 
 
 class TickerRenameRequest(BaseModel):
-    old: str = Field(..., min_length=1, max_length=20)
-    new: str = Field(..., min_length=1, max_length=20)
+    old: str = Field(..., min_length=1, max_length=24)
+    new: str = Field(..., min_length=1, max_length=24)
+
+
+class RepairRenamePair(BaseModel):
+    old: str = Field(..., min_length=1, max_length=24)
+    new: str = Field(..., min_length=1, max_length=24)
+
+
+class RepairNoDataRequest(BaseModel):
+    renames: List[RepairRenamePair] = Field(default_factory=list, max_length=200)
+    rerun: bool = True
+    date_id: Optional[str] = None
 
 
 def load_config() -> Dict[str, Any]:
@@ -165,6 +176,10 @@ def load_config() -> Dict[str, Any]:
     cfg.setdefault("cdp_profile_directory", "Default")
     # URL otwierany przy auto-starcie przeglądarki (np. konkretny wykres TV).
     cfg.setdefault("cdp_startup_url", "https://www.tradingview.com/chart/")
+    # Lista prefixów giełd używana przy "Napraw symbole": gdy ticker jest no-data,
+    # próbujemy znaleźć go na jednej z tych giełd przez TV symbol-search REST.
+    if not isinstance(cfg.get("exchange_prefixes"), list):
+        cfg["exchange_prefixes"] = ["GPW"]
     sched = cfg.get("auto_schedule")
     if not isinstance(sched, dict):
         cfg["auto_schedule"] = DEFAULT_AUTO_SCHEDULE.copy()
@@ -1349,6 +1364,71 @@ async def stop_scraper():
     return {"status": "stopped"}
 
 
+class TickerRenameError(Exception):
+    """Błąd logiki rename — z kodem HTTP do zmapowania w warstwie endpointu."""
+
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _apply_ticker_rename(config: Dict[str, Any], old: str, new: str) -> Dict[str, Any]:
+    """In-place rename w ``config['tickers']``. Modyfikuje przekazany dict.
+
+    Zwraca słownik z metadanymi (``matched_old``, ``new``, ``requested_old``,
+    ``tickers``). Rzuca ``TickerRenameError`` przy walidacji / konfliktach.
+    """
+    old_u = (old or "").strip().upper()
+    new_u = (new or "").strip().upper()
+    if not TICKER_PATTERN.match(old_u):
+        raise TickerRenameError(400, "Invalid old ticker")
+    if not TICKER_PATTERN.match(new_u):
+        raise TickerRenameError(400, "Invalid new ticker")
+    if old_u == new_u:
+        raise TickerRenameError(400, "Old and new ticker are identical")
+
+    tickers = list(config.get("tickers") or [])
+    upper_list = [str(t).strip().upper() for t in tickers]
+
+    def _base(sym: str) -> str:
+        return (sym or "").split(".", 1)[0]
+
+    if old_u in upper_list:
+        idx = upper_list.index(old_u)
+    else:
+        old_base = _base(old_u)
+        candidates = [
+            i for i, t in enumerate(upper_list) if _base(t) == old_base and old_base
+        ]
+        if len(candidates) == 0:
+            raise TickerRenameError(404, f"Ticker {old_u} not found in config")
+        if len(candidates) > 1:
+            matched = [tickers[i] for i in candidates]
+            raise TickerRenameError(
+                409,
+                (
+                    f"Niejednoznaczne dopasowanie dla {old_u}: {matched}. "
+                    "Usuń duplikaty w konfiguracji."
+                ),
+            )
+        idx = candidates[0]
+
+    if new_u in upper_list and upper_list.index(new_u) != idx:
+        raise TickerRenameError(409, f"Ticker {new_u} already exists in config")
+
+    matched_old = tickers[idx]
+    tickers[idx] = new_u
+    config["tickers"] = tickers
+    return {
+        "status": "renamed",
+        "old": matched_old,
+        "requested_old": old_u,
+        "new": new_u,
+        "tickers": tickers,
+    }
+
+
 @app.post("/api/tickers/rename")
 def rename_ticker(body: TickerRenameRequest):
     """Zmienia nazwę tickera w konfiguracji (zachowuje pozycję na liście).
@@ -1360,60 +1440,136 @@ def rename_ticker(body: TickerRenameRequest):
 
     Nie dotyka historycznych plików CSV — pozostają pod starą nazwą.
     """
-    old = (body.old or "").strip().upper()
-    new = (body.new or "").strip().upper()
-    if not TICKER_PATTERN.match(old):
-        raise HTTPException(status_code=400, detail="Invalid old ticker")
-    if not TICKER_PATTERN.match(new):
-        raise HTTPException(status_code=400, detail="Invalid new ticker")
-    if old == new:
-        raise HTTPException(status_code=400, detail="Old and new ticker are identical")
+    config = load_config()
+    try:
+        result = _apply_ticker_rename(config, body.old or "", body.new or "")
+    except TickerRenameError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    save_config(config)
+    return result
+
+
+def _exchange_prefixes() -> List[str]:
+    cfg = load_config()
+    raw = cfg.get("exchange_prefixes") or []
+    out: List[str] = []
+    for p in raw:
+        s = str(p or "").strip().upper()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+@app.get("/api/tickers/repair_no_data")
+def repair_no_data_preview(date_id: Optional[str] = None):
+    """Lista propozycji renamów dla no-data tickerów.
+
+    Dla każdego no-data tickera bez ``:`` (czyli surowego) próbujemy znaleźć
+    dopasowanie na giełdach z ``config['exchange_prefixes']`` przez TV REST.
+    Tickery które już mają prefix giełdy są pomijane.
+    """
+    if date_id is not None:
+        validate_results_date_id(date_id)
+    prefixes = _exchange_prefixes()
+    no_data = _resolve_no_data_tickers(date_id, None)
+
+    items: List[Dict[str, Any]] = []
+    for ticker in no_data:
+        t = str(ticker or "").strip()
+        if not t:
+            continue
+        if ":" in t:
+            items.append(
+                {
+                    "old": t,
+                    "candidates": [],
+                    "skipped": True,
+                    "note": "Ticker już ma prefix giełdy",
+                }
+            )
+            continue
+        try:
+            matches = lookup_symbol_match(t, prefixes)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("repair preview: lookup failed for %s: %s", t, exc)
+            matches = []
+        candidates = [
+            {
+                "new": m.get("symbol") or "",
+                "exchange": m.get("exchange") or "",
+                "description": m.get("description") or "",
+            }
+            for m in matches
+            if m.get("symbol")
+        ]
+        entry: Dict[str, Any] = {"old": t, "candidates": candidates}
+        if not candidates:
+            entry["note"] = f"Brak match-a na {prefixes or '[]'}"
+        items.append(entry)
+
+    return {
+        "exchange_prefixes": prefixes,
+        "items": items,
+    }
+
+
+@app.post("/api/tickers/repair_no_data")
+def repair_no_data_apply(body: RepairNoDataRequest):
+    """Hurtowy rename + opcjonalny rerun scrapera (no_data_only) na nowych nazwach."""
+    if not body.renames:
+        raise HTTPException(status_code=400, detail="Empty renames list")
 
     config = load_config()
-    tickers = list(config.get("tickers") or [])
-    upper_list = [str(t).strip().upper() for t in tickers]
-
-    def _base(sym: str) -> str:
-        return (sym or "").split(".", 1)[0]
-
-    if old in upper_list:
-        idx = upper_list.index(old)
-    else:
-        old_base = _base(old)
-        candidates = [
-            i for i, t in enumerate(upper_list) if _base(t) == old_base and old_base
-        ]
-        if len(candidates) == 0:
-            raise HTTPException(
-                status_code=404, detail=f"Ticker {old} not found in config"
+    applied: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for pair in body.renames:
+        try:
+            res = _apply_ticker_rename(config, pair.old, pair.new)
+        except TickerRenameError as exc:
+            errors.append(
+                {
+                    "old": pair.old,
+                    "new": pair.new,
+                    "status_code": exc.status_code,
+                    "detail": exc.detail,
+                }
             )
-        if len(candidates) > 1:
-            matched = [tickers[i] for i in candidates]
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Niejednoznaczne dopasowanie dla {old}: {matched}. "
-                    "Usuń duplikaty w konfiguracji."
-                ),
-            )
-        idx = candidates[0]
-
-    if new in upper_list and upper_list.index(new) != idx:
-        raise HTTPException(
-            status_code=409, detail=f"Ticker {new} already exists in config"
+            continue
+        applied.append(
+            {
+                "old": res["old"],
+                "requested_old": res["requested_old"],
+                "new": res["new"],
+            }
         )
 
-    matched_old = tickers[idx]
-    tickers[idx] = new
-    config["tickers"] = tickers
-    save_config(config)
-    return {
-        "status": "renamed",
-        "old": matched_old,
-        "requested_old": old,
-        "new": new,
-        "tickers": tickers,
+    if applied:
+        save_config(config)
+
+    response: Dict[str, Any] = {
+        "status": "ok" if not errors else ("partial" if applied else "failed"),
+        "applied": applied,
+        "errors": errors,
+        "tickers": list(config.get("tickers") or []),
     }
+
+    if body.rerun and applied:
+        new_names = [a["new"] for a in applied]
+        target_tickers = _resolve_no_data_tickers(body.date_id, new_names)
+        if target_tickers:
+            started = start_scraper_subprocess(target_tickers)
+            if isinstance(started, dict):
+                started.setdefault("scope", "no_data_only")
+                started["count"] = len(target_tickers)
+                started["tickers"] = target_tickers
+            response["scraper"] = started
+        else:
+            response["scraper"] = {
+                "status": "no_data_empty",
+                "message": "Brak no-data tickerów do uruchomienia po renamie.",
+            }
+
+    return response
 
 
 @app.get("/api/ticker/{ticker}/history")

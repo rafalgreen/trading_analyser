@@ -98,7 +98,8 @@ def _normalize_symbol(sym: str) -> str:
     return s
 
 
-def _fetch_from_api(ticker: str) -> str:
+def _fetch_raw_items(ticker: str) -> list:
+    """Wykonuje request do TV symbol-search i zwraca listę dictów (lub [] przy błędzie)."""
     text = urllib.parse.quote_plus(ticker)
     url = _TV_SEARCH_URL.format(text=text)
     req = urllib.request.Request(
@@ -115,15 +116,15 @@ def _fetch_from_api(ticker: str) -> str:
             raw = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001
         logger.debug("TV symbol-search request failed for %s: %s", ticker, exc)
-        return ""
+        return []
 
     try:
         data = json.loads(raw)
     except Exception as exc:  # noqa: BLE001
         logger.debug("TV symbol-search JSON parse failed for %s: %s", ticker, exc)
-        return ""
+        return []
 
-    items = []
+    items: list = []
     if isinstance(data, dict):
         for key in ("symbols", "symbols_remote", "items"):
             val = data.get(key)
@@ -131,7 +132,11 @@ def _fetch_from_api(ticker: str) -> str:
                 items.extend(val)
     elif isinstance(data, list):
         items = data
+    return [it for it in items if isinstance(it, dict)]
 
+
+def _fetch_from_api(ticker: str) -> str:
+    items = _fetch_raw_items(ticker)
     if not items:
         return ""
 
@@ -139,8 +144,6 @@ def _fetch_from_api(ticker: str) -> str:
     best_exact = ""
     best_any = ""
     for it in items:
-        if not isinstance(it, dict):
-            continue
         sym_raw = it.get("symbol") or it.get("ticker") or ""
         sym = _normalize_symbol(_strip_html(str(sym_raw)))
         descr = _strip_html(str(it.get("description") or ""))
@@ -154,6 +157,86 @@ def _fetch_from_api(ticker: str) -> str:
             break
 
     return best_exact or best_any or ""
+
+
+def _matches_cache_key(ticker: str) -> str:
+    return f"@matches:{_ticker_key(ticker)}"
+
+
+def _fetch_matches(ticker: str) -> list:
+    """Pobiera surowe matche z TV REST i normalizuje do {symbol, exchange, description}."""
+    items = _fetch_raw_items(ticker)
+    target = _ticker_key(ticker)
+    out: list = []
+    for it in items:
+        sym_raw = it.get("symbol") or it.get("ticker") or ""
+        sym = _normalize_symbol(_strip_html(str(sym_raw)))
+        if sym != target:
+            continue
+        exch_raw = it.get("exchange") or it.get("exchange-traded") or ""
+        exch = _strip_html(str(exch_raw)).strip().upper()
+        descr = _strip_html(str(it.get("description") or ""))
+        if not exch:
+            continue
+        out.append(
+            {
+                "symbol": f"{exch}:{sym}",
+                "exchange": exch,
+                "description": descr,
+            }
+        )
+    return out
+
+
+def lookup_symbol_match(ticker: str, exchanges) -> list:
+    """Zwraca listę dopasowań dla ``ticker`` ograniczoną do giełd z ``exchanges``.
+
+    Każdy element: ``{"symbol": "GPW:SHO", "exchange": "GPW", "description": "Shoper SA"}``.
+    Wynik jest cache'owany w ``data/.company_names_cache.json`` pod kluczem
+    ``@matches:<TICKER>`` (osobno od cache nazw firm). Cicho zwraca ``[]`` przy
+    każdym błędzie sieci/parsowania.
+    """
+    key = _ticker_key(ticker)
+    if not key:
+        return []
+    allowed = {str(e).strip().upper() for e in (exchanges or []) if str(e).strip()}
+    if not allowed:
+        return []
+
+    cache_key = _matches_cache_key(key)
+    with _lock:
+        cache = _load_cache()
+        entry = cache.get(cache_key)
+        now = time.time()
+        cached_matches = None
+        if isinstance(entry, dict):
+            ts = float(entry.get("ts") or 0.0)
+            cm = entry.get("matches")
+            if isinstance(cm, list):
+                if cm or (now - ts) < _NEGATIVE_RETRY_AFTER_S:
+                    cached_matches = cm
+
+    if cached_matches is None:
+        matches = _fetch_matches(key)
+        with _lock:
+            cache = _load_cache()
+            cache[cache_key] = {"matches": matches, "ts": time.time()}
+            _save_cache()
+    else:
+        matches = cached_matches
+
+    filtered = [
+        m for m in matches
+        if isinstance(m, dict) and str(m.get("exchange") or "").upper() in allowed
+    ]
+    if filtered:
+        logger.debug(
+            "lookup_symbol_match(%s, %s) -> %d match(es)",
+            key,
+            sorted(allowed),
+            len(filtered),
+        )
+    return filtered
 
 
 def lookup_company_name(ticker: str) -> str:

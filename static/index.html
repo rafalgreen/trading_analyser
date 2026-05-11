@@ -81,6 +81,9 @@
                     <button class="icon-btn" id="expand-all-btn" title="Rozwiń / zwiń wszystko (E)" aria-label="Rozwiń lub zwiń wszystkie karty">
                         <i class="ph ph-arrows-out-line-vertical"></i>
                     </button>
+                    <button class="icon-btn" id="repair-symbols-btn" title="Napraw symbole bez prefixu giełdy (np. GPW:)" aria-label="Napraw symbole" hidden>
+                        <i class="ph ph-magnifying-glass-plus"></i>
+                    </button>
                     <button class="icon-btn" id="refresh-btn" title="Odśwież dane (R)" aria-label="Odśwież dane">
                         <i class="ph ph-arrows-clockwise"></i>
                     </button>
@@ -425,9 +428,9 @@
                     <label class="rename-field">
                         <span class="rename-label">Nowa nazwa</span>
                         <input type="text" id="ticker-rename-new" autocomplete="off"
-                               maxlength="20" placeholder="np. PAS1.WA"
-                               pattern="[A-Za-z0-9._\-]{1,20}">
-                        <span class="rename-hint">Dozwolone: A-Z, 0-9, kropka, podkreślnik, myślnik (max 20 znaków).</span>
+                               maxlength="24" placeholder="np. PAS1.WA, GPW:ATC"
+                               pattern="[A-Za-z0-9._:\-]{1,24}">
+                        <span class="rename-hint">Dozwolone: A–Z, 0–9, kropka, podkreślnik, myślnik, dwukropek (np. GPW:ATC; max 24 znaki).</span>
                     </label>
                     <div class="rename-error hidden" id="ticker-rename-error"></div>
                     <div class="rename-actions">
@@ -439,6 +442,35 @@
         </div>
     </div>
 
-    <script src="app.js?v=15"></script>
+    <!-- Modal: Napraw symbole giełdowe -->
+    <div id="repair-symbols-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div>
+                    <h3>Napraw symbole giełdowe</h3>
+                    <div class="modal-subtitle">Dla tickerów oznaczonych „Brak danych” sprawdzimy w TradingView, czy istnieją na konfigurowanych giełdach (np. GPW). Zaznacz propozycje, które chcesz zastosować.</div>
+                </div>
+                <button type="button" class="modal-close" id="repair-symbols-close" aria-label="Zamknij">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="repair-symbols-loading" class="repair-loading">Ładuję propozycje…</div>
+                <div id="repair-symbols-error" class="rename-error hidden"></div>
+                <div id="repair-symbols-empty" class="repair-empty" hidden>
+                    Brak tickerów do naprawy lub TradingView nie znalazło dopasowań na konfigurowanych giełdach.
+                </div>
+                <div id="repair-symbols-list" class="repair-list" hidden></div>
+                <label class="repair-rerun-toggle">
+                    <input type="checkbox" id="repair-symbols-rerun" checked>
+                    <span>Po naprawie uruchom scraper dla zmienionych tickerów (no_data_only)</span>
+                </label>
+                <div class="rename-actions">
+                    <button type="button" class="btn btn-secondary" id="repair-symbols-cancel">Anuluj</button>
+                    <button type="button" class="btn btn-primary" id="repair-symbols-submit" disabled>Zatwierdź zaznaczone</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js?v=16"></script>
 </body>
 </html>

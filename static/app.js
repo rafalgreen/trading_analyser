@@ -557,6 +557,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         renderCards(filteredData);
         renderChart(filteredData);
+        if (typeof syncRepairBtnVisibility === 'function') {
+            try { syncRepairBtnVisibility(); } catch (e) { /* repair UI may not be wired yet */ }
+        }
     }
 
     function updateFreshnessIndicator(dateId) {
@@ -1992,7 +1995,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const renameNewInput = document.getElementById('ticker-rename-new');
     const renameErrorEl = document.getElementById('ticker-rename-error');
     const renameSubmitBtn = document.getElementById('ticker-rename-submit');
-    const TICKER_RE_CLIENT = /^[A-Z0-9._-]{1,20}$/;
+    const TICKER_RE_CLIENT = /^[A-Z0-9._:-]{1,24}$/;
 
     function openRenameModal(ticker) {
         if (!renameModal || !ticker) return;
@@ -2046,7 +2049,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         if (!TICKER_RE_CLIENT.test(newTicker)) {
-            setRenameError('Dozwolone: A–Z, 0–9, kropka, podkreślnik, myślnik (max 20 znaków).');
+            setRenameError('Dozwolone: A–Z, 0–9, kropka, podkreślnik, myślnik, dwukropek (np. GPW:ATC; max 24 znaki).');
             return;
         }
 
@@ -2102,6 +2105,279 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (err) {
             setRenameError(String(err?.message || err || 'Błąd połączenia'));
             if (renameSubmitBtn) renameSubmitBtn.disabled = false;
+        }
+    });
+
+    // ========================================================================
+    // REPAIR SYMBOLS (no-data tickery → prefix giełdy z TV REST)
+    // ========================================================================
+    const repairBtn = document.getElementById('repair-symbols-btn');
+    const repairModal = document.getElementById('repair-symbols-modal');
+    const repairClose = document.getElementById('repair-symbols-close');
+    const repairCancel = document.getElementById('repair-symbols-cancel');
+    const repairSubmit = document.getElementById('repair-symbols-submit');
+    const repairListEl = document.getElementById('repair-symbols-list');
+    const repairLoading = document.getElementById('repair-symbols-loading');
+    const repairEmpty = document.getElementById('repair-symbols-empty');
+    const repairError = document.getElementById('repair-symbols-error');
+    const repairRerun = document.getElementById('repair-symbols-rerun');
+
+    function rowIsNoData(row) {
+        if (!row) return false;
+        const sts = (row['Scrape_Status'] || '').toUpperCase();
+        if (sts === 'NO_DATA') return true;
+        return row['All_Indicators_Missing'] === true;
+    }
+
+    function noDataTickersWithoutPrefix() {
+        const byTicker = new Map();
+        (currentData || []).forEach(row => {
+            const t = (row['Ticker'] || '').trim();
+            if (!t) return;
+            if (!byTicker.has(t)) byTicker.set(t, []);
+            byTicker.get(t).push(row);
+        });
+        const out = [];
+        byTicker.forEach((rows, ticker) => {
+            if (ticker.includes(':')) return;
+            const allNoData = rows.every(rowIsNoData);
+            if (allNoData) out.push(ticker);
+        });
+        return out;
+    }
+
+    function syncRepairBtnVisibility() {
+        if (!repairBtn) return;
+        const candidates = noDataTickersWithoutPrefix();
+        repairBtn.hidden = candidates.length === 0;
+        if (!repairBtn.hidden) {
+            repairBtn.title = `Napraw symbole bez prefixu giełdy (kandydatów: ${candidates.length})`;
+        }
+    }
+
+    function setRepairError(msg) {
+        if (!repairError) return;
+        if (!msg) {
+            repairError.textContent = '';
+            repairError.classList.add('hidden');
+        } else {
+            repairError.textContent = msg;
+            repairError.classList.remove('hidden');
+        }
+    }
+
+    function closeRepairModal() {
+        if (!repairModal) return;
+        repairModal.classList.remove('visible');
+        repairModal.setAttribute('aria-hidden', 'true');
+    }
+
+    function openRepairModal() {
+        if (!repairModal) return;
+        repairModal.classList.add('visible');
+        repairModal.setAttribute('aria-hidden', 'false');
+        setRepairError('');
+        if (repairListEl) {
+            repairListEl.hidden = true;
+            repairListEl.innerHTML = '';
+        }
+        if (repairEmpty) repairEmpty.hidden = true;
+        if (repairLoading) repairLoading.hidden = false;
+        if (repairSubmit) repairSubmit.disabled = true;
+        loadRepairPreview();
+    }
+
+    function renderRepairList(items) {
+        if (!repairListEl) return;
+        repairListEl.innerHTML = '';
+        const usable = (items || []).filter(i => Array.isArray(i.candidates) && i.candidates.length > 0);
+        const skipped = (items || []).filter(i => !Array.isArray(i.candidates) || i.candidates.length === 0);
+
+        usable.forEach((item, idx) => {
+            const row = document.createElement('div');
+            row.className = 'repair-row has-match';
+            row.dataset.old = item.old;
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = true;
+            cb.id = `repair-cb-${idx}`;
+            cb.setAttribute('aria-label', `Zastosuj rename dla ${item.old}`);
+            row.appendChild(cb);
+
+            const body = document.createElement('div');
+            body.className = 'repair-row-body';
+
+            const title = document.createElement('div');
+            title.className = 'repair-row-title';
+            const oldEl = document.createElement('span');
+            oldEl.className = 'repair-old';
+            oldEl.textContent = item.old;
+            title.appendChild(oldEl);
+            const arrow = document.createElement('span');
+            arrow.className = 'repair-arrow';
+            arrow.textContent = '→';
+            title.appendChild(arrow);
+            const newEl = document.createElement('span');
+            newEl.className = 'repair-new';
+            newEl.textContent = item.candidates[0].new;
+            title.appendChild(newEl);
+            body.appendChild(title);
+
+            if (item.candidates.length === 1) {
+                const meta = document.createElement('div');
+                meta.className = 'repair-row-meta';
+                const exch = document.createElement('span');
+                exch.className = 'repair-exchange';
+                exch.textContent = item.candidates[0].exchange || '';
+                meta.appendChild(exch);
+                meta.appendChild(document.createTextNode(item.candidates[0].description || '—'));
+                body.appendChild(meta);
+            } else {
+                const candList = document.createElement('div');
+                candList.className = 'repair-row-candidates';
+                item.candidates.forEach((c, ci) => {
+                    const lbl = document.createElement('label');
+                    lbl.className = 'repair-candidate';
+                    const radio = document.createElement('input');
+                    radio.type = 'radio';
+                    radio.name = `repair-cand-${idx}`;
+                    radio.value = c.new;
+                    if (ci === 0) radio.checked = true;
+                    radio.addEventListener('change', () => {
+                        newEl.textContent = c.new;
+                    });
+                    lbl.appendChild(radio);
+                    const exch = document.createElement('span');
+                    exch.className = 'repair-exchange';
+                    exch.textContent = c.exchange || '';
+                    lbl.appendChild(exch);
+                    lbl.appendChild(document.createTextNode(`${c.new} · ${c.description || '—'}`));
+                    candList.appendChild(lbl);
+                });
+                body.appendChild(candList);
+            }
+
+            row.appendChild(body);
+            repairListEl.appendChild(row);
+        });
+
+        skipped.forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'repair-row no-match';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.disabled = true;
+            row.appendChild(cb);
+
+            const body = document.createElement('div');
+            body.className = 'repair-row-body';
+            const title = document.createElement('div');
+            title.className = 'repair-row-title';
+            title.textContent = item.old;
+            body.appendChild(title);
+            const meta = document.createElement('div');
+            meta.className = 'repair-row-meta';
+            meta.textContent = item.note || 'Brak match-a';
+            body.appendChild(meta);
+
+            row.appendChild(body);
+            repairListEl.appendChild(row);
+        });
+
+        if (repairListEl.children.length > 0) {
+            repairListEl.hidden = false;
+        }
+        if (repairEmpty) {
+            repairEmpty.hidden = usable.length > 0 || skipped.length > 0;
+        }
+        if (repairSubmit) repairSubmit.disabled = usable.length === 0;
+    }
+
+    async function loadRepairPreview() {
+        try {
+            const url = activeDateId
+                ? `/api/tickers/repair_no_data?date_id=${encodeURIComponent(activeDateId)}`
+                : '/api/tickers/repair_no_data';
+            const res = await fetch(url);
+            if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(`HTTP ${res.status}: ${txt}`);
+            }
+            const data = await res.json();
+            if (repairLoading) repairLoading.hidden = true;
+            renderRepairList(data.items || []);
+        } catch (err) {
+            if (repairLoading) repairLoading.hidden = true;
+            setRepairError(`Nie udało się wczytać propozycji: ${err?.message || err}`);
+        }
+    }
+
+    repairBtn?.addEventListener('click', () => {
+        openRepairModal();
+    });
+    repairClose?.addEventListener('click', closeRepairModal);
+    repairCancel?.addEventListener('click', closeRepairModal);
+    repairModal?.addEventListener('click', (e) => {
+        if (e.target === repairModal) closeRepairModal();
+    });
+
+    repairSubmit?.addEventListener('click', async () => {
+        if (!repairListEl) return;
+        const renames = [];
+        repairListEl.querySelectorAll('.repair-row.has-match').forEach(row => {
+            const cb = row.querySelector('input[type="checkbox"]');
+            if (!cb || !cb.checked) return;
+            const oldT = row.dataset.old;
+            const radio = row.querySelector('input[type="radio"]:checked');
+            const newT = radio ? radio.value : (row.querySelector('.repair-new')?.textContent || '');
+            if (oldT && newT) renames.push({ old: oldT, new: newT });
+        });
+        if (renames.length === 0) {
+            setRepairError('Zaznacz co najmniej jedną propozycję.');
+            return;
+        }
+        setRepairError('');
+        repairSubmit.disabled = true;
+        try {
+            const body = {
+                renames,
+                rerun: !!repairRerun?.checked,
+                date_id: activeDateId || null,
+            };
+            const res = await fetch('/api/tickers/repair_no_data', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                const detail = data?.detail || `HTTP ${res.status}`;
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+
+            const appliedCount = (data.applied || []).length;
+            const errorCount = (data.errors || []).length;
+            renames.forEach(({ old, new: newT }) => {
+                markTickerRenamed(old, newT);
+            });
+            if (appliedCount > 0) {
+                showToast(`Naprawiono ${appliedCount} symbol(i).`, 'success');
+            }
+            if (errorCount > 0) {
+                showToast(`Nie udało się naprawić ${errorCount} symbol(i).`, 'error');
+            }
+            if (data.scraper && data.scraper.status && data.scraper.status !== 'no_data_empty') {
+                showToast('Scraper uruchomiony dla naprawionych tickerów.', 'info');
+            }
+            closeRepairModal();
+            await fetchHistory();
+            const obj = currentDates.find(d => d.id === activeDateId);
+            if (obj) selectDate(activeDateId, obj.label);
+        } catch (err) {
+            setRepairError(String(err?.message || err || 'Błąd zapisu'));
+            repairSubmit.disabled = false;
         }
     });
 

@@ -155,6 +155,25 @@ Karta tickera w UI ma format `TICKER · Nazwa firmy` (np. `GDXJ · VanEck Junior
 
 Dzięki temu, nawet jeśli scraper nie złapał nazwy z DOM-u (np. zmiany w TV), API może ją uzupełnić bez ponownego skrapowania. Cache leży poza repozytorium (gitignore).
 
+### Naprawa symboli z prefixem giełdy
+
+Niektóre tickery (np. polskie spółki z GPW) wymagają w TradingView prefixu giełdy — wpisanie samego `AMB` weźmie domyślnie pierwszy wynik (np. `MIL:AMB` z Mediolanu) zamiast `GPW:AMB`. W efekcie scraper widzi nie ten symbol co trzeba i wszystkie 3 interwały lądują jako **„Brak danych”**.
+
+Aby to naprawić, w toolbarze nad listą tickerów jest przycisk **„Napraw symbole”** (ikona lupy z plusem). Pojawia się tylko gdy w aktualnym pliku CSV są tickery bez `:` w nazwie z `Scrape_Status=NO_DATA` (lub wszystkie 3 interwały bez wskaźników). Po kliknięciu:
+
+1. Backend (`GET /api/tickers/repair_no_data`) bierze listę no-data tickerów.
+2. Dla każdego z nich odpytuje **TV REST symbol-search** i filtruje wyniki po polu `exchange` zgodnie z `exchange_prefixes` z `scraper_config.json` (default `["GPW"]`).
+3. UI pokazuje propozycje `OLD → NEW (opis spółki)` z checkboxami (i radio gdy giełd jest więcej).
+4. Po zatwierdzeniu (`POST /api/tickers/repair_no_data`) renamy są zapisywane hurtem do `scraper_config.json` (z zachowaniem pozycji na liście) — i opcjonalnie scraper od razu rusza w trybie `no_data_only` dla nowych nazw (toggle „Po naprawie uruchom scraper…”).
+
+Aby rozszerzyć na inne giełdy, dopisz prefiksy w configu (kolejność = priorytet):
+
+```json
+"exchange_prefixes": ["GPW", "NYSE", "LSE"]
+```
+
+Wyniki TV REST są cache'owane w `data/.company_names_cache.json` pod kluczem `@matches:<TICKER>`, więc preview nie odpytuje serwera w kółko.
+
 ### Powiadomienia i skróty
 
 - **Toasty** informują o starcie / zakończeniu scrapera, `already_running` (z informacją który ticker obecnie leci), sukcesie rename, błędach sieci.

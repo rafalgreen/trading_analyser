@@ -132,3 +132,85 @@ def test_lookup_company_name_prefers_exact_ticker_match(tmp_path, monkeypatch):
         cn.urllib.request, "urlopen", return_value=_fake_response(payload)
     ):
         assert cn.lookup_company_name("AAPL") == "Apple Inc."
+
+
+def test_lookup_symbol_match_filters_by_exchange(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {"symbol": "AMB", "exchange": "MIL", "description": "Ambromobiliare S.p.A."},
+            {"symbol": "AMB", "exchange": "CME", "description": "BTIC on Micro BTC"},
+            {"symbol": "AMB", "exchange": "GPW", "description": "Ambra S.A."},
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ):
+        matches = cn.lookup_symbol_match("AMB", ["GPW"])
+
+    assert len(matches) == 1
+    assert matches[0]["symbol"] == "GPW:AMB"
+    assert matches[0]["exchange"] == "GPW"
+    assert matches[0]["description"] == "Ambra S.A."
+
+
+def test_lookup_symbol_match_no_match_returns_empty_list(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {"symbol": "FOO", "exchange": "NASDAQ", "description": "Foo Inc."},
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ):
+        assert cn.lookup_symbol_match("FOO", ["GPW"]) == []
+
+
+def test_lookup_symbol_match_strips_html_in_symbol(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {
+                "symbol": "<em>SHO</em>",
+                "exchange": "GPW",
+                "description": "<em>Shoper</em> SA",
+            }
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ):
+        matches = cn.lookup_symbol_match("SHO", ["GPW"])
+
+    assert matches == [
+        {"symbol": "GPW:SHO", "exchange": "GPW", "description": "Shoper SA"}
+    ]
+
+
+def test_lookup_symbol_match_caches_result(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {"symbol": "ATC", "exchange": "GPW", "description": "Arctic Paper SA"},
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ) as mocked:
+        first = cn.lookup_symbol_match("ATC", ["GPW"])
+    assert first[0]["symbol"] == "GPW:ATC"
+    assert mocked.call_count == 1
+
+    with patch.object(cn.urllib.request, "urlopen") as mocked2:
+        second = cn.lookup_symbol_match("ATC", ["GPW"])
+    assert second[0]["symbol"] == "GPW:ATC"
+    mocked2.assert_not_called()
+
+
+def test_lookup_symbol_match_empty_exchanges_returns_empty(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    with patch.object(cn.urllib.request, "urlopen") as mocked:
+        assert cn.lookup_symbol_match("AAPL", []) == []
+        assert cn.lookup_symbol_match("AAPL", ["", "  "]) == []
+    mocked.assert_not_called()
