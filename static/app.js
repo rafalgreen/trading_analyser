@@ -18,6 +18,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const chartTitle = document.getElementById('chart-title');
     const chartIntervalToggle = document.getElementById('chart-interval-toggle');
     const wlFilterToolbar = document.getElementById('wl-filter-toolbar');
+    const strategyDescriptionEl = document.getElementById('strategy-description');
+    const strategyEmptyBannerEl = document.getElementById('strategy-empty-banner');
     const globalBanner = document.getElementById('global-scrape-banner');
     const globalBannerText = document.getElementById('global-scrape-banner-text');
     const globalBannerFill = document.getElementById('global-scrape-banner-fill');
@@ -60,6 +62,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const BUY_SIGNALS = new Set(['buy', 'strong buy']);
     const ALL_STRATEGY_IDS = ['trend_only', 'cross_priority', 'pca_buckets', 'scoring'];
     const ALLOWED_STRATEGIES = new Set([...ALL_STRATEGY_IDS, 'all']);
+
+    const STRATEGY_LABEL_FALLBACK = {
+        trend_only: 'Trendy + PCA',
+        cross_priority: 'Crossy (priorytet)',
+        pca_buckets: 'PCA (kosze)',
+        scoring: 'Punktowy',
+    };
+    const STRATEGY_DESCRIPTIONS = {
+        all: 'Pokazuje wszystkie tickery — bez filtra strategii. Badże na karcie wyświetlają wynik każdej z 4 strategii.',
+        trend_only: '2× Wzrostowy + PCA ≥ 60 → Strong Buy; 2× Wzrostowy → Buy; mieszane → Neutral; 2× Spadkowy → Sell; 2× Spadkowy + PCA ≤ 40 → Strong Sell. Wymaga jednoznacznego trendu w obu modułach (HTS Trend i MacD Trend).',
+        cross_priority: 'Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem. PCA jako tie-breaker (≥60 → buy, ≤40 → sell). Gdy brak crossów — fallback na strategię trendową.',
+        pca_buckets: 'Wyłącznie z wartości PCA: ≤20 → Strong Buy, 20–40 → Buy, 40–60 → Neutral, 60–80 → Sell, ≥80 → Strong Sell. Najprostsza i najbardziej kontr-trendowa.',
+        scoring: 'HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma w zakresie [−3..+3] mapowana na 5 koszyków: ≥+2 Strong Buy, +1 Buy, 0 Neutral, −1 Sell, ≤−2 Strong Sell.',
+    };
 
     let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'default'))
         ? loadPref(UI_KEYS.sortMode, 'default') : 'default';
@@ -354,6 +370,46 @@ document.addEventListener('DOMContentLoaded', () => {
         wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-interval]').forEach(chip => {
             chip.classList.toggle('active', chip.dataset.filterInterval === signalInterval);
         });
+        updateStrategyDescription();
+    }
+
+    function strategyLabel(id) {
+        if (!id || id === 'all') return 'Wszystkie';
+        const meta = (availableSignalStrategies || []).find(s => s.id === id);
+        return (meta && meta.label) || STRATEGY_LABEL_FALLBACK[id] || id;
+    }
+
+    function updateStrategyDescription() {
+        if (!strategyDescriptionEl) return;
+        const isToolbarVisible = wlFilterToolbar && !wlFilterToolbar.hidden;
+        if (!isToolbarVisible) {
+            strategyDescriptionEl.hidden = true;
+            strategyDescriptionEl.textContent = '';
+            return;
+        }
+        const desc = STRATEGY_DESCRIPTIONS[signalStrategy] || STRATEGY_DESCRIPTIONS.all;
+        const label = strategyLabel(signalStrategy);
+        strategyDescriptionEl.hidden = false;
+        strategyDescriptionEl.innerHTML = '';
+        const strong = document.createElement('strong');
+        strong.textContent = label + ':';
+        strategyDescriptionEl.appendChild(strong);
+        strategyDescriptionEl.appendChild(document.createTextNode(' ' + desc));
+    }
+
+    function updateStrategyEmptyBanner(filteredCount) {
+        if (!strategyEmptyBannerEl) return;
+        const isToolbarVisible = wlFilterToolbar && !wlFilterToolbar.hidden;
+        if (isToolbarVisible && signalStrategy && signalStrategy !== 'all' && filteredCount === 0 && currentData.length > 0) {
+            const label = strategyLabel(signalStrategy);
+            strategyEmptyBannerEl.hidden = false;
+            strategyEmptyBannerEl.textContent =
+                `Brak tickerów spełniających strategię „${label}” dla interwału ${signalInterval}. ` +
+                `Spróbuj inny interwał (D/W/M) lub inną strategię — to nie błąd, po prostu żaden ticker w tej dacie nie ma sygnału Buy/Strong Buy w tej kombinacji.`;
+        } else {
+            strategyEmptyBannerEl.hidden = true;
+            strategyEmptyBannerEl.textContent = '';
+        }
     }
 
     function intervalCodeForSignal() {
@@ -475,6 +531,9 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
         }
+
+        const distinctTickers = new Set(filteredData.map(r => r['Ticker'] || '')).size;
+        updateStrategyEmptyBanner(distinctTickers);
 
         recordCount.textContent = '';
         recordCount.appendChild(document.createTextNode(
@@ -797,7 +856,16 @@ document.addEventListener('DOMContentLoaded', () => {
             cardEl.dataset.ticker = ticker;
 
             cardClone.querySelector('.ticker-name').textContent = ticker;
-            cardClone.querySelector('.company-name').textContent = companyName;
+            const companyEl = cardClone.querySelector('.company-name');
+            const hasRealName = companyName && companyName !== '—'
+                && companyName.toUpperCase() !== ticker.toUpperCase();
+            if (hasRealName) {
+                companyEl.textContent = companyName;
+                companyEl.title = companyName;
+            } else {
+                companyEl.textContent = '';
+                companyEl.removeAttribute('title');
+            }
 
             // Restore collapsed state from prefs (default = collapsed from template)
             if (!collapsedCards.has(ticker) && collapsedCards.size > 0) {
@@ -836,7 +904,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 cardEl.classList.add('ticker-skipped');
                 const err = skipRow['Scrape_Error'] || 'Nie udało się pobrać danych';
                 summaryContainer.innerHTML = `<span class="skip-error-banner">⚠ Pominięty ticker</span>`;
-                cardClone.querySelector('.company-name').textContent = '—';
+                {
+                    const ce = cardClone.querySelector('.company-name');
+                    ce.textContent = '';
+                    ce.removeAttribute('title');
+                }
             } else {
                 // Traktuj jako "no data" gdy Scrape_Status=NO_DATA LUB backend wykrył brak
                 // wszystkich wskaźników we wszystkich wierszach (legacy OK z poprzednich runów).

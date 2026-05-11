@@ -28,6 +28,9 @@ data/tv_dom_dump.html
 # Auto-launched Brave/Chrome profile for CDP (cookies/state)
 data/.cdp-profile/
 
+# Cached company names from TV REST API
+data/.company_names_cache.json
+
 # OS / IDE
 .DS_Store
 .idea/

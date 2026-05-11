@@ -120,11 +120,11 @@
                     <div class="filter-toolbar" id="wl-filter-toolbar" hidden>
                         <div class="filter-group">
                             <span class="filter-group-label">Strategia</span>
-                            <button type="button" class="filter-chip active" data-filter-strategy="all">Wszystkie</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="trend_only">Trendy + PCA</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="cross_priority">Crossy (priorytet)</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="pca_buckets">PCA (kosze)</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="scoring">Punktowy</button>
+                            <button type="button" class="filter-chip active" data-filter-strategy="all" title="Bez filtra: pokazuje wszystkie tickery.">Wszystkie</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="trend_only" title="2× Wzrostowy + PCA ≥ 60 → Strong Buy; 2× Wzrostowy → Buy; mieszane → Neutral; 2× Spadkowy → Sell; 2× Spadkowy + PCA ≤ 40 → Strong Sell.">Trendy + PCA</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="cross_priority" title="Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem; PCA jako tie-breaker (≥60 buy, ≤40 sell). Fallback na trend gdy brak crossów.">Crossy (priorytet)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="pca_buckets" title="Tylko PCA: ≤20 Strong Buy, 20–40 Buy, 40–60 Neutral, 60–80 Sell, ≥80 Strong Sell.">PCA (kosze)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="scoring" title="HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma ∈ [−3..+3] mapowana na 5 koszyków.">Punktowy</button>
                         </div>
                         <div class="filter-separator"></div>
                         <div class="filter-group">
@@ -134,6 +134,8 @@
                             <button type="button" class="filter-chip" data-filter-interval="M">M</button>
                         </div>
                     </div>
+                    <div id="strategy-description" class="strategy-description" hidden></div>
+                    <div id="strategy-empty-banner" class="strategy-empty-banner" hidden></div>
 
                     <!-- Grid for Ticker Cards -->
                     <div class="grid-container" id="results-grid">

@@ -127,8 +127,11 @@ def test_resolve_company_name_prefers_title_over_duplicate_legend_ticker():
     )
 
 
-def test_resolve_company_name_falls_back_when_title_is_only_ticker():
+def test_resolve_company_name_falls_back_when_title_is_only_ticker(monkeypatch):
+    import company_names
     from tv_scraper import resolve_company_name
+
+    monkeypatch.setattr(company_names, "lookup_company_name", lambda t: "")
 
     title = "FCX — TradingView"
     assert resolve_company_name(title, "FCX", "FCX") == "FCX"
@@ -186,3 +189,46 @@ def test_pick_company_from_toolbar_before_parenthetical():
 
     blob = "Charts Nike, Inc. (NKE) · 1D · NYSE"
     assert _pick_company_line_from_header_blob(blob, "NKE") == "Nike, Inc."
+
+
+def test_resolve_company_name_falls_back_to_rest_lookup(monkeypatch):
+    """Gdy żadne źródło DOM nie zwraca sensownej nazwy, używamy TV REST."""
+    import company_names
+    import tv_scraper
+
+    calls = []
+
+    def fake_lookup(ticker: str) -> str:
+        calls.append(ticker)
+        return "Palantir Technologies Inc."
+
+    monkeypatch.setattr(company_names, "lookup_company_name", fake_lookup)
+
+    result = tv_scraper.resolve_company_name(
+        title_text="PLTR — TradingView",
+        legend_description="PLTR",
+        ticker="PLTR",
+        header_toolbar_text="PLTR",
+        symbol_search_text="",
+    )
+
+    assert result == "Palantir Technologies Inc."
+    assert calls == ["PLTR"]
+
+
+def test_resolve_company_name_rest_lookup_blank_returns_ticker(monkeypatch):
+    """Gdy REST też zwróci pusto, kończymy na samym tickerze (bez 'Nieznana')."""
+    import company_names
+    import tv_scraper
+
+    monkeypatch.setattr(company_names, "lookup_company_name", lambda t: "")
+
+    result = tv_scraper.resolve_company_name(
+        title_text="ZZZZZ — TradingView",
+        legend_description="ZZZZZ",
+        ticker="ZZZZZ",
+        header_toolbar_text="ZZZZZ",
+        symbol_search_text="",
+    )
+
+    assert result == "ZZZZZ"

@@ -38,6 +38,7 @@ from signal_strategies import (
     STRATEGY_LABELS as SIGNAL_STRATEGY_LABELS,
     compute_signals as compute_row_signals,
 )
+from company_names import lookup_company_name
 
 logger = logging.getLogger("trading_analyser.app")
 if not logger.handlers:
@@ -1003,7 +1004,13 @@ def get_results(date_id: str):
                 ticker = row.get("Ticker", "")
                 raw_name = row.get("Company_Name", "")
 
-                row["Company_Name"] = clean_company_name(ticker, raw_name, watchlist)
+                cleaned = clean_company_name(ticker, raw_name, watchlist)
+                tkr_norm = (ticker or "").strip().upper()
+                if not cleaned or cleaned.strip().upper() == tkr_norm:
+                    rest_name = lookup_company_name(ticker)
+                    if rest_name:
+                        cleaned = rest_name
+                row["Company_Name"] = cleaned
 
                 wl_data = watchlist.get(ticker, {})
                 if not wl_data:

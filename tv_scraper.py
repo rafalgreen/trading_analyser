@@ -387,6 +387,9 @@ def read_chart_symbol_header_blob(target_page, ticker: str = "") -> str:
         '[data-name="header-toolbar-symbol-search"]',
         "button#header-toolbar-symbol-search",
         '[data-name="header-toolbar-symbol-details"]',
+        '[class*="symbolNameText"]',
+        '[data-name="legend-source-title"]',
+        '[data-qa-id="title-wrapper legend-source-title"]',
     ]
     chunks: list[str] = []
     for sel in selectors:
@@ -436,7 +439,13 @@ def resolve_company_name(
     header_toolbar_text: str = "",
     symbol_search_text: str = "",
 ) -> str:
-    """Kolejność: lista Symbol Search, toolbar nagłówka, tytuł okna, opis legendy."""
+    """Kolejność: lista Symbol Search, toolbar nagłówka, tytuł okna, opis legendy.
+
+    Jako ostatni fallback (gdy żadne z 4 źródeł DOM nie dało sensownej nazwy)
+    odpytujemy publiczny endpoint TV ``symbol-search`` przez
+    :func:`company_names.lookup_company_name`. To i tak jest cache'owane,
+    więc nie generuje znaczącego ruchu sieciowego.
+    """
     ticker_u = (ticker or "").strip().upper()
     leg = (legend_description or "").strip()
     from_symbol_search = (symbol_search_text or "").strip()
@@ -457,15 +466,73 @@ def resolve_company_name(
             return False
         return True
 
-    for candidate in (from_symbol_search, header_pick, from_title, leg):
+    sources = (
+        ("symbol_search", from_symbol_search),
+        ("header_toolbar", header_pick),
+        ("window_title", from_title),
+        ("legend_description", leg),
+    )
+    try:
+        logger.debug(
+            "resolve_company_name(%s) sources: %s",
+            ticker_u,
+            {k: (v[:80] if isinstance(v, str) else v) for k, v in sources},
+        )
+    except Exception:
+        pass
+
+    for src, candidate in sources:
         if _sensible(candidate):
+            try:
+                logger.debug(
+                    "resolve_company_name(%s) -> %r [src=%s]",
+                    ticker_u,
+                    candidate.strip(),
+                    src,
+                )
+            except Exception:
+                pass
             return candidate.strip()
-    for candidate in (from_symbol_search, header_pick, from_title, leg):
+    for src, candidate in sources:
         if candidate and candidate.strip():
             c = candidate.strip()
             if c.upper() != ticker_u:
+                try:
+                    logger.debug(
+                        "resolve_company_name(%s) -> %r [src=%s,fallback]",
+                        ticker_u,
+                        c,
+                        src,
+                    )
+                except Exception:
+                    pass
                 return c
+
+    # REST fallback (TV symbol-search) — last resort before plain ticker.
     if ticker_u:
+        try:
+            from company_names import lookup_company_name as _lookup_rest
+            rest_name = _lookup_rest(ticker_u)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                logger.debug(
+                    "resolve_company_name REST lookup failed for %s: %s",
+                    ticker_u,
+                    exc,
+                )
+            except Exception:
+                pass
+            rest_name = ""
+        if rest_name and rest_name.strip().upper() != ticker_u:
+            try:
+                logger.debug(
+                    "resolve_company_name(%s) -> %r [src=tv_rest]",
+                    ticker_u,
+                    rest_name,
+                )
+            except Exception:
+                pass
+            return rest_name.strip()
         return ticker_u
     return "Nieznana"
 
