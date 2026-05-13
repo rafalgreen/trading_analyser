@@ -48,7 +48,7 @@ def test_save_results_row_new_file_has_meta_columns(tmp_path: Path):
     df = pd.read_csv(f)
     for c in CSV_META_COLUMNS:
         assert c in df.columns
-    assert list(df.columns[:6]) == CSV_META_COLUMNS
+    assert list(df.columns[: len(CSV_META_COLUMNS)]) == CSV_META_COLUMNS
 
 
 def test_save_results_row_upserts_by_ticker_interval(tmp_path: Path):
@@ -101,6 +101,40 @@ def test_load_results_dataframe_tolerates_bad_lines(tmp_path: Path):
     df = load_results_dataframe(str(f))
     assert df is not None
     assert "Ticker" in df.columns
+
+
+def test_remove_ticker_rows_from_csv_counts_and_rewrites_atomically(tmp_path: Path):
+    from results_store import count_ticker_rows_in_csv, remove_ticker_rows_from_csv
+
+    f = tmp_path / "r.csv"
+    f.write_text(
+        "Ticker,Interval,PCA_Values\n"
+        "AAPL,1D,0.5\n"
+        "MSFT,1D,0.6\n"
+        "aapl,1W,0.7\n",
+        encoding="utf-8",
+    )
+
+    assert count_ticker_rows_in_csv(str(f), "AAPL") == 2
+    removed, remaining = remove_ticker_rows_from_csv(str(f), "AAPL")
+    assert removed == 2
+    assert remaining == 1
+
+    df = pd.read_csv(f)
+    assert list(df.columns) == ["Ticker", "Interval", "PCA_Values"]
+    assert df["Ticker"].tolist() == ["MSFT"]
+
+
+def test_remove_ticker_rows_from_csv_leaves_file_when_no_match(tmp_path: Path):
+    from results_store import remove_ticker_rows_from_csv
+
+    f = tmp_path / "r.csv"
+    original = "Ticker,Interval,PCA_Values\nMSFT,1D,0.6\n"
+    f.write_text(original, encoding="utf-8")
+
+    removed, remaining = remove_ticker_rows_from_csv(str(f), "AAPL")
+    assert (removed, remaining) == (0, 1)
+    assert f.read_text(encoding="utf-8") == original
 
 
 def test_merge_existing_row_keeps_fresh_metadata():

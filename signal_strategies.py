@@ -52,7 +52,10 @@ def _cross(value: object) -> Optional[str]:
 
 
 def _pca_value(row: Dict[str, object]) -> Optional[float]:
-    candidates = (row.get("PCA_Value"), row.get("PCA_Values"))
+    # `PCA_Values` is the rich value displayed in the UI and written by the
+    # current scraper. Older CSVs may still contain legacy `PCA_Value`; use it
+    # only as a fallback so signals match the visible card value.
+    candidates = (row.get("PCA_Values"), row.get("PCA_Value"))
     for raw in candidates:
         if raw is None or str(raw).strip() == "":
             continue

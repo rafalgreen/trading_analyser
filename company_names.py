@@ -163,6 +163,72 @@ def _matches_cache_key(ticker: str) -> str:
     return f"@matches:{_ticker_key(ticker)}"
 
 
+def _search_cache_key(query: str) -> str:
+    q = re.sub(r"\s+", " ", (query or "").strip().upper())
+    return f"@search:{q}"
+
+
+def _normalized_search_item(it: dict) -> dict:
+    sym_raw = _strip_html(str(it.get("symbol") or it.get("ticker") or ""))
+    sym = _normalize_symbol(sym_raw)
+    exch_raw = it.get("exchange") or it.get("exchange-traded") or ""
+    exch = _strip_html(str(exch_raw)).strip().upper()
+    descr = _strip_html(str(it.get("description") or ""))
+    typ = _strip_html(str(it.get("type") or it.get("type_disp") or ""))
+    country = _strip_html(str(it.get("country") or ""))
+    return {
+        "symbol": sym,
+        "exchange": exch,
+        "description": descr,
+        "type": typ,
+        "country": country,
+        "raw_symbol": sym_raw,
+    }
+
+
+def search_symbols(query: str) -> list:
+    """Search TradingView symbols by free-text query (usually company name).
+
+    Returns normalized dicts:
+    ``symbol``, ``exchange``, ``description``, ``type``, ``country``,
+    ``raw_symbol``. Results are cached under ``@search:<QUERY>`` and this
+    function never raises.
+    """
+    q = re.sub(r"\s+", " ", (query or "").strip())
+    if not q:
+        return []
+
+    cache_key = _search_cache_key(q)
+    with _lock:
+        cache = _load_cache()
+        entry = cache.get(cache_key)
+        now = time.time()
+        cached = None
+        if isinstance(entry, dict):
+            ts = float(entry.get("ts") or 0.0)
+            items = entry.get("items")
+            if isinstance(items, list):
+                if items or (now - ts) < _NEGATIVE_RETRY_AFTER_S:
+                    cached = items
+
+    if cached is None:
+        raw_items = _fetch_raw_items(q)
+        items = [
+            item for item in (_normalized_search_item(it) for it in raw_items)
+            if item.get("symbol") and item.get("exchange")
+        ]
+        with _lock:
+            cache = _load_cache()
+            cache[cache_key] = {"items": items, "ts": time.time()}
+            _save_cache()
+    else:
+        items = cached
+
+    if items:
+        logger.debug("search_symbols(%r) -> %d item(s)", q, len(items))
+    return list(items)
+
+
 def _fetch_matches(ticker: str) -> list:
     """Pobiera surowe matche z TV REST i normalizuje do {symbol, exchange, description}."""
     items = _fetch_raw_items(ticker)
@@ -273,6 +339,50 @@ def lookup_company_name(ticker: str) -> str:
     else:
         logger.debug("No TV REST match for %s (cached negative)", key)
     return name
+
+
+def lookup_exchange(ticker: str) -> str:
+    """Zwraca podstawową giełdę (np. ``"NYSE"``) dla `ticker` z TV REST.
+
+    Reużywa cache pod kluczem ``@matches:<TICKER>`` (ten sam co
+    :func:`lookup_symbol_match`), żeby nie generować duplikatu requestów.
+    Zwraca pierwszy match z niepustym ``exchange`` (TV typowo zwraca w kolejności
+    od najbardziej trafnego), albo ``""`` przy każdym błędzie / braku matchy.
+    """
+    key = _ticker_key(ticker)
+    if not key:
+        return ""
+
+    cache_key = _matches_cache_key(key)
+    with _lock:
+        cache = _load_cache()
+        entry = cache.get(cache_key)
+        now = time.time()
+        cached_matches = None
+        if isinstance(entry, dict):
+            ts = float(entry.get("ts") or 0.0)
+            cm = entry.get("matches")
+            if isinstance(cm, list):
+                if cm or (now - ts) < _NEGATIVE_RETRY_AFTER_S:
+                    cached_matches = cm
+
+    if cached_matches is None:
+        matches = _fetch_matches(key)
+        with _lock:
+            cache = _load_cache()
+            cache[cache_key] = {"matches": matches, "ts": time.time()}
+            _save_cache()
+    else:
+        matches = cached_matches
+
+    for m in matches:
+        if not isinstance(m, dict):
+            continue
+        exch = str(m.get("exchange") or "").strip().upper()
+        if exch:
+            logger.debug("lookup_exchange(%s) -> %s", key, exch)
+            return exch
+    return ""
 
 
 def clear_cache() -> None:

@@ -168,6 +168,91 @@ def test_company_name_from_symbol_search_modal_text_nke():
     assert company_name_from_symbol_search_modal_text(blob, "NKE") == "NIKE, Inc. Class B"
 
 
+def test_parse_symbol_search_modal_blob_extracts_exchange_from_separate_line():
+    from tv_scraper import parse_symbol_search_modal_blob
+
+    blob = "ZIM\nZIM Integrated Shipping Services Ltd.\nstock\nNYSE"
+    info = parse_symbol_search_modal_blob(blob, "ZIM")
+    assert info == {
+        "name": "ZIM Integrated Shipping Services Ltd.",
+        "exchange": "NYSE",
+    }
+
+
+def test_parse_symbol_search_modal_blob_extracts_exchange_from_ticker_prefix():
+    from tv_scraper import parse_symbol_search_modal_blob
+
+    blob = "GPW:ATC\nArctic Paper SA\nstock"
+    info = parse_symbol_search_modal_blob(blob, "ATC")
+    assert info["exchange"] == "GPW"
+    assert info["name"] == "Arctic Paper SA"
+
+
+def test_parse_symbol_search_modal_blob_no_exchange_returns_empty_string():
+    from tv_scraper import parse_symbol_search_modal_blob
+
+    blob = "BTCUSDT\nBitcoin / Tether\nspot"
+    info = parse_symbol_search_modal_blob(blob, "BTCUSDT")
+    assert info["name"] == "Bitcoin / Tether"
+    assert info["exchange"] == ""
+
+
+def test_parse_symbol_search_modal_blob_ticker_mismatch_returns_blank():
+    from tv_scraper import parse_symbol_search_modal_blob
+
+    blob = "ZIM\nZIM Integrated Shipping Services Ltd.\nstock\nNYSE"
+    assert parse_symbol_search_modal_blob(blob, "NKE") == {"name": "", "exchange": ""}
+
+
+def test_resolve_exchange_prefers_symbol_search_over_other_sources(monkeypatch):
+    import company_names
+    from tv_scraper import resolve_exchange
+
+    def _no_rest(_t):  # pragma: no cover — defence against accidental network
+        raise AssertionError("REST should not be called when modal value is set")
+
+    monkeypatch.setattr(company_names, "lookup_exchange", _no_rest)
+
+    assert resolve_exchange("ZIM", symbol_search_exchange="NYSE") == "NYSE"
+
+
+def test_resolve_exchange_falls_back_to_ticker_prefix(monkeypatch):
+    import company_names
+    from tv_scraper import resolve_exchange
+
+    monkeypatch.setattr(company_names, "lookup_exchange", lambda _t: "")
+
+    assert resolve_exchange("GPW:ATC") == "GPW"
+
+
+def test_resolve_exchange_uses_header_blob_when_others_empty(monkeypatch):
+    import company_names
+    from tv_scraper import resolve_exchange
+
+    monkeypatch.setattr(company_names, "lookup_exchange", lambda _t: "")
+
+    blob = "Charts · ZIM Integrated · NYSE · 1D"
+    assert resolve_exchange("ZIM", header_blob=blob) == "NYSE"
+
+
+def test_resolve_exchange_falls_back_to_rest_lookup(monkeypatch):
+    import company_names
+    from tv_scraper import resolve_exchange
+
+    monkeypatch.setattr(company_names, "lookup_exchange", lambda _t: "NASDAQ")
+
+    assert resolve_exchange("AAPL") == "NASDAQ"
+
+
+def test_resolve_exchange_returns_empty_when_no_source_known(monkeypatch):
+    import company_names
+    from tv_scraper import resolve_exchange
+
+    monkeypatch.setattr(company_names, "lookup_exchange", lambda _t: "")
+
+    assert resolve_exchange("FOO") == ""
+
+
 def test_resolve_company_name_header_parenthetical():
     from tv_scraper import resolve_company_name
 

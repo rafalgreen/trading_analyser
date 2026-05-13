@@ -214,3 +214,104 @@ def test_lookup_symbol_match_empty_exchanges_returns_empty(tmp_path, monkeypatch
         assert cn.lookup_symbol_match("AAPL", []) == []
         assert cn.lookup_symbol_match("AAPL", ["", "  "]) == []
     mocked.assert_not_called()
+
+
+# --- lookup_exchange ------------------------------------------------------
+
+def test_lookup_exchange_returns_first_exchange(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {"symbol": "ZIM", "exchange": "NYSE", "description": "ZIM Integrated"},
+            {"symbol": "ZIM", "exchange": "GETTEX", "description": "Zimmer"},
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ):
+        assert cn.lookup_exchange("ZIM") == "NYSE"
+
+
+def test_lookup_exchange_no_match_returns_empty(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {"symbols": []}
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ):
+        assert cn.lookup_exchange("NOPE") == ""
+
+
+def test_lookup_exchange_uses_matches_cache_with_lookup_symbol_match(
+    tmp_path, monkeypatch
+):
+    """Cache współdzielony — lookup_symbol_match wcześniej zapełnia cache,
+    drugie lookup_exchange() nie woła sieci."""
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {"symbol": "ATC", "exchange": "GPW", "description": "Arctic Paper SA"},
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ) as mocked:
+        cn.lookup_symbol_match("ATC", ["GPW"])
+    assert mocked.call_count == 1
+
+    with patch.object(cn.urllib.request, "urlopen") as mocked2:
+        assert cn.lookup_exchange("ATC") == "GPW"
+    mocked2.assert_not_called()
+
+
+def test_lookup_exchange_handles_network_error(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+
+    def _boom(*a, **kw):
+        raise OSError("network down")
+
+    with patch.object(cn.urllib.request, "urlopen", side_effect=_boom):
+        assert cn.lookup_exchange("ZIM") == ""
+
+
+# --- search_symbols -------------------------------------------------------
+
+def test_search_symbols_normalizes_and_caches_free_text_query(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {
+                "symbol": "<em>PAS</em>",
+                "exchange": "GPW",
+                "description": "<em>Passus</em> SA",
+                "type": "stock",
+                "country": "Poland",
+            }
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ) as mocked:
+        rows = cn.search_symbols("Passus SA")
+    assert rows == [
+        {
+            "symbol": "PAS",
+            "exchange": "GPW",
+            "description": "Passus SA",
+            "type": "stock",
+            "country": "Poland",
+            "raw_symbol": "PAS",
+        }
+    ]
+    assert mocked.call_count == 1
+
+    with patch.object(cn.urllib.request, "urlopen") as mocked2:
+        assert cn.search_symbols("Passus SA")[0]["symbol"] == "PAS"
+    mocked2.assert_not_called()
+
+
+def test_search_symbols_empty_query_short_circuits(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    with patch.object(cn.urllib.request, "urlopen") as mocked:
+        assert cn.search_symbols("") == []
+        assert cn.search_symbols("   ") == []
+    mocked.assert_not_called()

@@ -15,6 +15,7 @@ import urllib.request
 import urllib.error
 from contextlib import asynccontextmanager
 from datetime import datetime
+from difflib import SequenceMatcher
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,8 +29,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from results_store import (
+    count_ticker_rows_in_csv,
     load_results_dataframe,
     parse_pca_number,
+    remove_ticker_rows_from_csv,
     row_has_indicator_data,
     tickers_with_no_data,
 )
@@ -38,7 +41,11 @@ from signal_strategies import (
     STRATEGY_LABELS as SIGNAL_STRATEGY_LABELS,
     compute_signals as compute_row_signals,
 )
-from company_names import lookup_company_name, lookup_symbol_match
+from company_names import (
+    lookup_company_name,
+    lookup_exchange,
+    lookup_symbol_match,
+)
 
 logger = logging.getLogger("trading_analyser.app")
 if not logger.handlers:
@@ -96,6 +103,7 @@ DATA_DIR = "data"
 CSV_PREFIX = "tradingview_results_"
 CONFIG_FILE = "scraper_config.json"
 STATUS_FILE = "scraper_status.json"
+STATE_FILE = "scraper_state.json"
 SCRAPER_LOG_FILE = "scraper.log"
 SCRAPER_LOG_MAX_BYTES = 2_000_000
 
@@ -131,6 +139,7 @@ class ScraperRunRequest(BaseModel):
     tickers: List[str] = Field(default_factory=list)
     no_data_only: bool = False
     date_id: Optional[str] = None
+    fresh: bool = False
 
 
 class TickerRenameRequest(BaseModel):
@@ -1009,7 +1018,9 @@ def get_results(date_id: str):
         raise HTTPException(status_code=404, detail="Data not found for this date")
 
     watchlist = get_watchlist()
-    indicators = load_config().get("indicators") or ["PCA", "HTS Panel", "MacD"]
+    config = load_config()
+    indicators = config.get("indicators") or ["PCA", "HTS Panel", "MacD"]
+    config_tickers = list(config.get("tickers") or [])
 
     results = []
     try:
@@ -1026,6 +1037,28 @@ def get_results(date_id: str):
                     if rest_name:
                         cleaned = rest_name
                 row["Company_Name"] = cleaned
+
+                # Backfill Exchange dla starych CSV-ek bez kolumny i dla świeżych,
+                # które nie złapały giełdy ze scrapera.
+                exch_raw = str(row.get("Exchange") or "").strip().upper()
+                if not exch_raw:
+                    if ":" in ticker:
+                        prefix = ticker.split(":", 1)[0].strip().upper()
+                        if prefix:
+                            exch_raw = prefix
+                    if not exch_raw:
+                        bare = ticker.split(":", 1)[-1].strip()
+                        try:
+                            exch_raw = (lookup_exchange(bare) or "").strip().upper()
+                        except Exception:  # noqa: BLE001
+                            exch_raw = ""
+                row["Exchange"] = exch_raw
+
+                config_resolution = _resolve_config_symbol(ticker, config_tickers)
+                row["In_Config"] = bool(config_resolution.get("in_config"))
+                row["Config_Match"] = str(config_resolution.get("match") or "")
+                row["Config_Status"] = str(config_resolution.get("status") or "unknown")
+                row["Config_Candidates"] = config_resolution.get("candidates") or []
 
                 wl_data = watchlist.get(ticker, {})
                 if not wl_data:
@@ -1136,7 +1169,76 @@ def run_scraper(body: ScraperRunRequest):
             started["count"] = len(target_tickers)
             started["tickers"] = target_tickers
         return started
+
+    # Fresh start dla pełnego runu (bez tickers) — usuwamy ewentualny pending state,
+    # żeby scraper nie dopisywał do wczorajszego pliku.
+    if body.fresh and not tickers:
+        try:
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
+                logger.info("Fresh start: usunięto %s", STATE_FILE)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Fresh start: nie udało się usunąć %s: %s", STATE_FILE, exc
+            )
     return start_scraper_subprocess(tickers if tickers else None)
+
+
+@app.get("/api/scraper/pending_run")
+def scraper_pending_run():
+    """Zwraca info o niedokończonym runie z scraper_state.json.
+
+    State file pozostaje, gdy poprzedni run zakończył się awaryjnie (crash / Stop
+    w trakcie). Po pełnym sukcesie scraper sam usuwa state. UI używa tego, żeby
+    przed „Uruchom wszystkie" zapytać użytkownika: Wznów czy zacznij od nowa.
+    """
+    if not os.path.exists(STATE_FILE):
+        return {"has_pending": False}
+
+    try:
+        with open(STATE_FILE, "r") as f:
+            state = json.load(f) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pending_run: cannot read %s: %s", STATE_FILE, exc)
+        return {"has_pending": False}
+
+    current_file = str(state.get("current_file") or "")
+    if not current_file:
+        return {"has_pending": False}
+
+    file_exists = os.path.exists(current_file)
+
+    current_file_date = ""
+    base = os.path.basename(current_file)
+    m = re.match(rf"^{re.escape(CSV_PREFIX)}(\d{{4}}-\d{{2}}-\d{{2}})", base)
+    if m:
+        current_file_date = m.group(1)
+
+    processed = state.get("processed") or []
+    processed_count = len(processed) if isinstance(processed, list) else 0
+
+    cfg = load_config()
+    cfg_tickers = list(cfg.get("tickers") or [])
+    cfg_intervals = list(cfg.get("intervals") or ["1D", "1W", "1M"])
+    total_in_config = len(cfg_tickers) * max(len(cfg_intervals), 1)
+    remaining_count = max(total_in_config - processed_count, 0)
+
+    mtime = None
+    try:
+        mtime = os.path.getmtime(STATE_FILE)
+    except OSError:
+        pass
+
+    return {
+        "has_pending": True,
+        "current_file": current_file,
+        "current_file_exists": file_exists,
+        "current_file_date": current_file_date,
+        "processed_count": processed_count,
+        "total_in_config": total_in_config,
+        "remaining_count": remaining_count,
+        "state_mtime": mtime,
+    }
 
 
 @app.get("/api/scraper/status")
@@ -1367,10 +1469,147 @@ async def stop_scraper():
 class TickerRenameError(Exception):
     """Błąd logiki rename — z kodem HTTP do zmapowania w warstwie endpointu."""
 
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: Any):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+
+
+def _ticker_base_dot(sym: str) -> str:
+    return (sym or "").split(".", 1)[0]
+
+
+def _ticker_without_exchange(sym: str) -> str:
+    return (sym or "").split(":", 1)[-1]
+
+
+def _ticker_compact(sym: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (sym or "").upper())
+
+
+def _ticker_match_variants(sym: str) -> set[str]:
+    """Warianty porównawcze dla symboli z CSV vs config.
+
+    Celowo nie służy do automatycznego rename dla fuzzy matchy — pomaga znaleźć
+    kandydatów i bezpieczne exact/base trafienia (`GPW:ATC` ↔ `ATC`,
+    `LULU.O` ↔ `LULU`).
+    """
+    s = (sym or "").strip().upper()
+    no_exch = _ticker_without_exchange(s)
+    vals = {
+        s,
+        _ticker_base_dot(s),
+        no_exch,
+        _ticker_base_dot(no_exch),
+        _ticker_compact(s),
+        _ticker_compact(no_exch),
+    }
+    return {v for v in vals if v}
+
+
+def _rename_candidates(old_u: str, tickers: List[str]) -> List[Dict[str, Any]]:
+    """Zwraca podpowiedzi z configu dla symbolu, którego nie znaleziono exact.
+
+    `score=100` oznacza bezpieczne trafienie po wariancie (`ATC` vs `GPW:ATC`).
+    Niższy score to tylko podpowiedź podobieństwa (`DIAP` vs `GPW:DIA`).
+    """
+    old_variants = _ticker_match_variants(old_u)
+    old_compacts = {_ticker_compact(v) for v in old_variants if _ticker_compact(v)}
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for raw in tickers:
+        sym = str(raw or "").strip()
+        sym_u = sym.upper()
+        if not sym or sym_u in seen:
+            continue
+        seen.add(sym_u)
+        variants = _ticker_match_variants(sym_u)
+        reason = ""
+        score = 0
+        if old_variants.intersection(variants):
+            reason = "match_variant"
+            score = 100
+        else:
+            for v in variants:
+                c = _ticker_compact(v)
+                for old_compact in old_compacts:
+                    if not old_compact or not c or min(len(old_compact), len(c)) < 3:
+                        continue
+                    if (
+                        abs(len(old_compact) - len(c)) <= 2
+                        and (old_compact.startswith(c) or c.startswith(old_compact))
+                    ):
+                        reason = "similar_prefix"
+                        score = max(score, min(len(old_compact), len(c)))
+                    ratio = SequenceMatcher(None, old_compact, c).ratio()
+                    if ratio >= 0.75:
+                        reason = "similar_symbol"
+                        score = max(score, int(round(ratio * 100)))
+        if score:
+            out.append({"ticker": sym, "score": score, "reason": reason})
+
+    out.sort(key=lambda x: (-int(x.get("score") or 0), str(x.get("ticker") or "")))
+    return out[:5]
+
+
+def _resolve_config_symbol(
+    ticker: str,
+    config_tickers: List[str],
+    preferred_new: str = "",
+) -> Dict[str, Any]:
+    """Rozpoznaje relację tickera z CSV/requestu do aktualnego configu.
+
+    Zwraca jeden format dla ``/api/results`` i ``/api/tickers/rename``.
+    ``In_Config=True`` tylko dla exact albo bezpiecznego jednoznacznego wariantu.
+    Stare symbole z CSV dostają ``Config_Status=stale`` i listę kandydatów.
+    """
+    t_u = (ticker or "").strip().upper()
+    upper = [str(t or "").strip().upper() for t in config_tickers]
+    if t_u in upper:
+        return {
+            "in_config": True,
+            "match": str(config_tickers[upper.index(t_u)]),
+            "status": "exact",
+            "candidates": [],
+        }
+    variants = _ticker_match_variants(t_u)
+    matches = [
+        i for i, cfg in enumerate(upper)
+        if variants.intersection(_ticker_match_variants(cfg))
+    ]
+    if len(matches) == 1:
+        return {
+            "in_config": True,
+            "match": str(config_tickers[matches[0]]),
+            "status": "variant",
+            "candidates": [],
+        }
+
+    candidates = _rename_candidates(t_u, config_tickers)
+    preferred_u = (preferred_new or "").strip().upper()
+    if preferred_u in upper:
+        preferred = {
+            "ticker": config_tickers[upper.index(preferred_u)],
+            "score": 100,
+            "reason": "new_exists",
+        }
+        candidates = [
+            c for c in candidates
+            if str(c.get("ticker") or "").strip().upper() != preferred_u
+        ]
+        candidates.insert(0, preferred)
+    return {
+        "in_config": False,
+        "match": "",
+        "status": "stale" if candidates else "unknown",
+        "candidates": candidates,
+    }
+
+
+def _config_match_for_ticker(ticker: str, config_tickers: List[str]) -> str:
+    """Najlepszy nieinwazyjny match CSV tickera do configu; pusty string gdy brak."""
+    return str(_resolve_config_symbol(ticker, config_tickers).get("match") or "")
 
 
 def _apply_ticker_rename(config: Dict[str, Any], old: str, new: str) -> Dict[str, Any]:
@@ -1391,28 +1630,40 @@ def _apply_ticker_rename(config: Dict[str, Any], old: str, new: str) -> Dict[str
     tickers = list(config.get("tickers") or [])
     upper_list = [str(t).strip().upper() for t in tickers]
 
-    def _base(sym: str) -> str:
-        return (sym or "").split(".", 1)[0]
-
-    if old_u in upper_list:
-        idx = upper_list.index(old_u)
+    resolution = _resolve_config_symbol(old_u, tickers, preferred_new=new_u)
+    if resolution.get("in_config") and resolution.get("match"):
+        match_u = str(resolution["match"]).strip().upper()
+        idx = upper_list.index(match_u)
     else:
-        old_base = _base(old_u)
-        candidates = [
-            i for i, t in enumerate(upper_list) if _base(t) == old_base and old_base
+        hints = list(resolution.get("candidates") or [])
+        hard_matches = [
+            h for h in hints
+            if int(h.get("score") or 0) >= 100
+            and str(h.get("reason") or "") in {"match_variant", "base_match"}
         ]
-        if len(candidates) == 0:
-            raise TickerRenameError(404, f"Ticker {old_u} not found in config")
-        if len(candidates) > 1:
-            matched = [tickers[i] for i in candidates]
+        if len(hard_matches) > 1:
+            matched = [h.get("ticker") for h in hard_matches]
             raise TickerRenameError(
                 409,
-                (
-                    f"Niejednoznaczne dopasowanie dla {old_u}: {matched}. "
-                    "Usuń duplikaty w konfiguracji."
-                ),
+                {
+                    "message": (
+                        f"Niejednoznaczne dopasowanie dla {old_u}: {matched}. "
+                        "Usuń duplikaty w konfiguracji."
+                    ),
+                    "requested_old": old_u,
+                    "config_status": resolution.get("status") or "unknown",
+                    "candidates": hints,
+                },
             )
-        idx = candidates[0]
+        raise TickerRenameError(
+            404,
+            {
+                "message": f"Ticker {old_u} not found in config",
+                "requested_old": old_u,
+                "config_status": resolution.get("status") or "unknown",
+                "candidates": hints,
+            },
+        )
 
     if new_u in upper_list and upper_list.index(new_u) != idx:
         raise TickerRenameError(409, f"Ticker {new_u} already exists in config")
@@ -1447,6 +1698,103 @@ def rename_ticker(body: TickerRenameRequest):
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     save_config(config)
     return result
+
+
+def _normalize_delete_ticker(ticker: str) -> str:
+    ticker_u = str(ticker or "").strip().upper()
+    if not ticker_u or not TICKER_PATTERN.match(ticker_u):
+        raise HTTPException(status_code=400, detail="Invalid ticker")
+    return ticker_u
+
+
+def _ticker_delete_preview(ticker: str) -> Dict[str, Any]:
+    ticker_u = _normalize_delete_ticker(ticker)
+    config = load_config()
+    config_tickers = list(config.get("tickers") or [])
+    config_matches = [
+        str(t)
+        for t in config_tickers
+        if str(t or "").strip().upper() == ticker_u
+    ]
+
+    files: List[Dict[str, Any]] = []
+    rows_total = 0
+    for path in sorted(get_csv_files()):
+        rows = count_ticker_rows_in_csv(path, ticker_u)
+        if rows <= 0:
+            continue
+        base = os.path.basename(path)
+        date_id = base.replace(CSV_PREFIX, "").replace(".csv", "")
+        rows_total += rows
+        files.append(
+            {
+                "filename": base,
+                "date_id": date_id,
+                "rows": rows,
+            }
+        )
+
+    return {
+        "ticker": ticker_u,
+        "in_config": bool(config_matches),
+        "config_matches": config_matches,
+        "config_removed_count": len(config_matches),
+        "files_count": len(files),
+        "rows_count": rows_total,
+        "files": files,
+    }
+
+
+@app.get("/api/tickers/{ticker}/delete_preview")
+def ticker_delete_preview(ticker: str):
+    return _ticker_delete_preview(ticker)
+
+
+@app.delete("/api/tickers/{ticker}")
+def delete_ticker_everywhere(ticker: str):
+    """Trwale usuwa ticker z configu i ze wszystkich historycznych CSV."""
+    ticker_u = _normalize_delete_ticker(ticker)
+    preview = _ticker_delete_preview(ticker_u)
+
+    config = load_config()
+    old_tickers = list(config.get("tickers") or [])
+    new_tickers = [
+        t for t in old_tickers
+        if str(t or "").strip().upper() != ticker_u
+    ]
+    config_removed = len(old_tickers) - len(new_tickers)
+    if config_removed:
+        config["tickers"] = new_tickers
+        save_config(config)
+        reschedule_auto_scraper()
+
+    files: List[Dict[str, Any]] = []
+    rows_removed = 0
+    for path in sorted(get_csv_files()):
+        removed, remaining = remove_ticker_rows_from_csv(path, ticker_u)
+        if removed <= 0:
+            continue
+        rows_removed += removed
+        base = os.path.basename(path)
+        files.append(
+            {
+                "filename": base,
+                "date_id": base.replace(CSV_PREFIX, "").replace(".csv", ""),
+                "removed_rows": removed,
+                "remaining_rows": remaining,
+            }
+        )
+
+    return {
+        "status": "deleted",
+        "ticker": ticker_u,
+        "preview": preview,
+        "config_removed_count": config_removed,
+        "files_modified": len(files),
+        "rows_removed": rows_removed,
+        "files": files,
+        "config": config,
+    }
 
 
 def _exchange_prefixes() -> List[str]:

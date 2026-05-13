@@ -509,6 +509,28 @@ body {
     white-space: nowrap;
 }
 
+.exchange-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    color: var(--text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1.4;
+    text-transform: uppercase;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.exchange-badge[hidden] {
+    display: none;
+}
+
 /* Card collapsible mechanics */
 .card-chevron {
     font-size: 18px;
@@ -669,6 +691,25 @@ body {
     background: rgba(239, 68, 68, 0.15);
     color: #f87171;
     border: 1px solid rgba(239, 68, 68, 0.25);
+}
+.wl-badge.consensus-badge {
+    font-weight: 700;
+    border-style: solid;
+}
+.wl-badge.consensus-bullish {
+    background: rgba(16, 185, 129, 0.20);
+    color: #a7f3d0;
+    border-color: rgba(16, 185, 129, 0.35);
+}
+.wl-badge.consensus-bearish {
+    background: rgba(239, 68, 68, 0.18);
+    color: #fecaca;
+    border-color: rgba(239, 68, 68, 0.35);
+}
+.wl-badge.consensus-neutral {
+    background: rgba(148, 163, 184, 0.14);
+    color: #cbd5e1;
+    border-color: rgba(148, 163, 184, 0.25);
 }
 
 /* Grouped Layout for Intervals */
@@ -1487,6 +1528,93 @@ input[type="text"]:focus {
     margin-right: 6px;
     vertical-align: middle;
 }
+.ticker-config-stale {
+    border-color: rgba(249, 115, 22, 0.55) !important;
+    box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.22);
+}
+.config-stale-banner {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: rgba(249, 115, 22, 0.14);
+    color: #fb923c;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.inline-action-btn {
+    border: 1px solid rgba(249, 115, 22, 0.45);
+    background: rgba(249, 115, 22, 0.12);
+    color: #fed7aa;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+.inline-action-btn:hover {
+    background: rgba(249, 115, 22, 0.24);
+    border-color: rgba(249, 115, 22, 0.7);
+}
+.card-delete-btn {
+    color: #fca5a5;
+}
+.card-delete-btn:hover {
+    color: #fecaca;
+    border-color: rgba(239, 68, 68, 0.45);
+    background: rgba(239, 68, 68, 0.12);
+}
+.delete-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.delete-warning {
+    padding: 12px 14px;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: 8px;
+    background: rgba(239, 68, 68, 0.10);
+    color: #fecaca;
+    line-height: 1.45;
+}
+.delete-preview-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+.delete-preview-grid > div {
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+}
+.delete-preview-grid span {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    margin-bottom: 4px;
+}
+.delete-preview-grid strong {
+    color: var(--text-primary);
+    font-size: 1.2rem;
+}
+.delete-file-list {
+    max-height: 180px;
+    overflow: auto;
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-secondary);
+}
+.delete-file-list li {
+    margin: 4px 0;
+}
+.delete-muted {
+    color: var(--text-muted);
+    margin: 0;
+}
 .skip-detail {
     padding: 16px;
     color: var(--text-secondary);
@@ -2262,5 +2390,45 @@ input[type="text"]:focus {
     width: 16px;
     height: 16px;
     cursor: pointer;
+}
+
+/* ---------- Pending run modal (Wznów / Od nowa / Anuluj) ---------- */
+.pending-run-meta {
+    margin: 4px 0 14px 0;
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.30);
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.pending-run-meta code {
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.pending-run-label {
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-right: 4px;
+}
+
+.pending-run-meta-date {
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+
+.pending-run-actions {
+    flex-wrap: wrap;
+    gap: 8px;
 }
 

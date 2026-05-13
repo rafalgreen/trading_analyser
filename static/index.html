@@ -14,7 +14,7 @@
     <!-- Phosphor Icons for modern iconography -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=8">
+    <link rel="stylesheet" href="styles.css?v=10">
 </head>
 <body>
     <div id="global-scrape-banner" class="global-scrape-banner" aria-live="polite">
@@ -67,9 +67,12 @@
                     <!-- Sort Dropdown -->
                     <div class="sort-container">
                         <select id="sort-select" class="sort-select" title="Sortuj karty">
-                            <option value="default">Domyślne</option>
+                            <option value="data-status">Problemy najpierw</option>
+                            <option value="default">Kolejność CSV</option>
                             <option value="pca-desc">PCA ↓ (najwyższe)</option>
                             <option value="pca-asc">PCA ↑ (najniższe)</option>
+                            <option value="consensus-bullish">Consensus bullish ↓</option>
+                            <option value="consensus-bearish">Consensus bearish ↓</option>
                             <option value="ticker-asc">Ticker A→Z</option>
                             <option value="ticker-desc">Ticker Z→A</option>
                         </select>
@@ -135,6 +138,14 @@
                             <button type="button" class="filter-chip active" data-filter-interval="D">D</button>
                             <button type="button" class="filter-chip" data-filter-interval="W">W</button>
                             <button type="button" class="filter-chip" data-filter-interval="M">M</button>
+                        </div>
+                        <div class="filter-separator"></div>
+                        <div class="filter-group">
+                            <span class="filter-group-label">Consensus</span>
+                            <button type="button" class="filter-chip active" data-filter-consensus="all" title="Bez filtra consensus.">Wszystkie</button>
+                            <button type="button" class="filter-chip" data-filter-consensus="bullish" title="Więcej strategii bullish niż bearish.">Bullish</button>
+                            <button type="button" class="filter-chip" data-filter-consensus="bearish" title="Więcej strategii bearish niż bullish.">Bearish</button>
+                            <button type="button" class="filter-chip" data-filter-consensus="neutral" title="Brak przewagi bullish/bearish lub neutralny consensus.">Neutral</button>
                         </div>
                     </div>
                     <div id="strategy-description" class="strategy-description" hidden></div>
@@ -280,6 +291,7 @@
             <div class="card-header">
                 <div class="ticker-info">
                     <h2 class="ticker-name">BTCUSDT</h2>
+                    <span class="exchange-badge" hidden></span>
                     <span class="company-name">Nazwa Firmy</span>
                 </div>
                 <div class="card-header-right">
@@ -293,6 +305,9 @@
                     </button>
                     <button type="button" class="card-action-btn card-history-btn" title="Historia PCA" aria-label="Historia PCA">
                         <i class="ph ph-chart-line"></i>
+                    </button>
+                    <button type="button" class="card-action-btn card-delete-btn" title="Usuń ticker z konfiguracji i historii CSV" aria-label="Usuń ticker">
+                        <i class="ph ph-trash"></i>
                     </button>
                     <i class="ph ph-caret-down card-chevron"></i>
                 </div>
@@ -442,6 +457,28 @@
         </div>
     </div>
 
+    <!-- Modal: trwałe usunięcie tickera -->
+    <div id="ticker-delete-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div>
+                    <h3>Usuń ticker z historii</h3>
+                    <div class="modal-subtitle" id="ticker-delete-subtitle">Ta operacja usuwa ticker z konfiguracji i wszystkich historycznych CSV.</div>
+                </div>
+                <button type="button" class="modal-close" id="ticker-delete-close" aria-label="Zamknij">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="ticker-delete-loading" class="repair-loading">Sprawdzam wystąpienia tickera…</div>
+                <div id="ticker-delete-error" class="rename-error hidden"></div>
+                <div id="ticker-delete-preview" class="delete-preview" hidden></div>
+                <div class="rename-actions">
+                    <button type="button" class="btn btn-secondary" id="ticker-delete-cancel">Anuluj</button>
+                    <button type="button" class="btn btn-danger" id="ticker-delete-confirm" disabled>Usuń na stałe</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal: Napraw symbole giełdowe -->
     <div id="repair-symbols-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-hidden="true">
         <div class="modal-dialog">
@@ -471,6 +508,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=16"></script>
+    <script src="app.js?v=22"></script>
 </body>
 </html>

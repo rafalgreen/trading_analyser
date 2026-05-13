@@ -313,6 +313,85 @@ def test_rename_ticker_not_found(client, app_env, tmp_path, monkeypatch):
 
     r = client.post("/api/tickers/rename", json={"old": "MSFT", "new": "MSFT.US"})
     assert r.status_code == 404
+    detail = r.json()["detail"]
+    assert detail["message"] == "Ticker MSFT not found in config"
+    assert detail["candidates"] == []
+
+
+def test_rename_ticker_not_found_returns_similar_config_candidates(
+    client, app_env, tmp_path, monkeypatch
+):
+    """DIAP z CSV nie jest w configu, ale GPW:DIA powinno wrócić jako podpowiedź."""
+    m, _res, _dat = app_env
+    cfg_file = tmp_path / "scraper_config.json"
+    cfg_file.write_text(
+        json.dumps({
+            "tickers": ["AAPL", "GPW:DIA", "MSFT"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_file))
+
+    r = client.post("/api/tickers/rename", json={"old": "DIAP", "new": "GPW:DIAP"})
+    assert r.status_code == 404
+    detail = r.json()["detail"]
+    assert detail["requested_old"] == "DIAP"
+    assert detail["config_status"] == "stale"
+    assert detail["candidates"][0]["ticker"] == "GPW:DIA"
+
+
+def test_rename_ticker_not_found_returns_new_existing_as_candidate(
+    client, app_env, tmp_path, monkeypatch
+):
+    """GPW:TOY z historycznego CSV, ale GPW:TOA już jest w configu."""
+    m, _res, _dat = app_env
+    cfg_file = tmp_path / "scraper_config.json"
+    cfg_file.write_text(
+        json.dumps({
+            "tickers": ["AAPL", "GPW:TOA", "MSFT"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_file))
+
+    r = client.post("/api/tickers/rename", json={"old": "GPW:TOY", "new": "GPW:TOA"})
+    assert r.status_code == 404
+    detail = r.json()["detail"]
+    assert detail["requested_old"] == "GPW:TOY"
+    assert detail["config_status"] == "stale"
+    assert detail["candidates"][0] == {
+        "ticker": "GPW:TOA",
+        "score": 100,
+        "reason": "new_exists",
+    }
+
+
+def test_rename_ticker_matches_exchange_prefix_variant(
+    client, app_env, tmp_path, monkeypatch
+):
+    """ATC z karty CSV może bezpiecznie wskazać configowy wpis GPW:ATC."""
+    m, _res, _dat = app_env
+    cfg_file = tmp_path / "scraper_config.json"
+    cfg_file.write_text(
+        json.dumps({
+            "tickers": ["AAPL", "GPW:ATC", "MSFT"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_file))
+
+    r = client.post("/api/tickers/rename", json={"old": "ATC", "new": "GPW:ATC2"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["old"] == "GPW:ATC"
+    saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert saved["tickers"] == ["AAPL", "GPW:ATC2", "MSFT"]
 
 
 def test_rename_ticker_conflict(client, app_env, tmp_path, monkeypatch):
@@ -677,4 +756,436 @@ def test_repair_no_data_apply_empty_renames_400(client, app_env, tmp_path, monke
         "/api/tickers/repair_no_data",
         json={"renames": [], "rerun": False},
     )
+    assert r.status_code == 400
+
+
+# --- Pending run / fresh start (Wznów vs Od nowa) -------------------------
+
+def test_pending_run_no_state_file_returns_false(client, app_env, tmp_path, monkeypatch):
+    m, _res, _dat = app_env
+    monkeypatch.setattr(m, "STATE_FILE", str(tmp_path / "scraper_state.json"))
+
+    r = client.get("/api/scraper/pending_run")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"has_pending": False}
+
+
+def test_pending_run_with_state_returns_metadata(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    csv_path = res / "tradingview_results_2026-05-11.csv"
+    csv_path.write_text("Ticker,Interval\nAAPL,1D\n", encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "current_file": str(csv_path),
+                "processed": [["AAPL", "1D"], ["AAPL", "1W"], ["MSFT", "1D"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {
+            "tickers": ["AAPL", "MSFT", "GOOGL", "TSLA"],
+            "intervals": ["1D", "1W", "1M"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+        },
+    )
+
+    r = client.get("/api/scraper/pending_run")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["has_pending"] is True
+    assert body["current_file"].endswith("tradingview_results_2026-05-11.csv")
+    assert body["current_file_date"] == "2026-05-11"
+    assert body["current_file_exists"] is True
+    assert body["processed_count"] == 3
+    assert body["total_in_config"] == 4 * 3
+    assert body["remaining_count"] == 12 - 3
+    assert isinstance(body["state_mtime"], (int, float))
+
+
+def test_pending_run_handles_missing_csv_file(client, app_env, tmp_path, monkeypatch):
+    """State pokazuje plik, ale go już nie ma na dysku — odpowiedź ma current_file_exists=false."""
+    m, _res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "current_file": "results/tradingview_results_2099-12-31.csv",
+                "processed": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {"tickers": ["AAPL"], "intervals": ["1D"], "indicators": ["PCA"]},
+    )
+
+    r = client.get("/api/scraper/pending_run")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["has_pending"] is True
+    assert body["current_file_exists"] is False
+    assert body["processed_count"] == 0
+
+
+def test_scraper_run_fresh_true_removes_state_file(client, app_env, tmp_path, monkeypatch):
+    m, _res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    state_path.write_text(
+        json.dumps({"current_file": "results/x.csv", "processed": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+
+    called = {"count": 0}
+
+    def fake_start(tickers=None):
+        called["count"] += 1
+        return {"status": "started", "pid": 111}
+
+    monkeypatch.setattr(m, "start_scraper_subprocess", fake_start)
+
+    r = client.post("/api/scraper/run", json={"fresh": True})
+    assert r.status_code == 200
+    assert called["count"] == 1
+    assert not state_path.exists(), "fresh=true powinno usunąć scraper_state.json"
+
+
+def test_scraper_run_fresh_false_keeps_state_file(client, app_env, tmp_path, monkeypatch):
+    m, _res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    state_path.write_text(
+        json.dumps({"current_file": "results/x.csv", "processed": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+
+    monkeypatch.setattr(
+        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+    )
+
+    r = client.post("/api/scraper/run", json={"fresh": False})
+    assert r.status_code == 200
+    assert state_path.exists()
+
+
+def test_scraper_run_fresh_ignored_for_partial(client, app_env, tmp_path, monkeypatch):
+    """Subset run (z konkretnymi tickerami) NIE czyści state'u, nawet gdy fresh=true."""
+    m, _res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    state_path.write_text(
+        json.dumps({"current_file": "results/x.csv", "processed": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+    monkeypatch.setattr(
+        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+    )
+
+    r = client.post(
+        "/api/scraper/run", json={"fresh": True, "tickers": ["AAPL", "MSFT"]}
+    )
+    assert r.status_code == 200
+    assert state_path.exists(), "Subset run nie powinien ruszać state'u"
+
+
+def test_scraper_run_fresh_ignored_for_no_data_only(client, app_env, tmp_path, monkeypatch):
+    """no_data_only NIE czyści state'u nawet z fresh=true."""
+    m, res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    state_path.write_text(
+        json.dumps({"current_file": "results/x.csv", "processed": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+    # Brak no-data tickerów → endpoint zwróci no_data_empty bez wołania subprocesu
+    monkeypatch.setattr(
+        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+    )
+
+    r = client.post("/api/scraper/run", json={"fresh": True, "no_data_only": True})
+    assert r.status_code == 200
+    assert state_path.exists(), "no_data_only nie powinien ruszać state'u"
+
+
+# --- /api/results pass-through Exchange + backfill ------------------------
+
+def test_results_passes_through_exchange_column(client, app_env, monkeypatch):
+    _m, res, _dat = app_env
+    date_id = "2026-05-12"
+    path = res / f"tradingview_results_{date_id}.csv"
+    header = (
+        "Ticker,Company_Name,Exchange,Current_Price,Interval,Scrape_Status,"
+        "Scrape_Error,PCA_Values\n"
+    )
+    body = (
+        "ZIM,ZIM Integrated,NYSE,12.34,1D,OK,,0.5 (Niebieski)\n"
+        "ATC,Arctic Paper,GPW,8.10,1D,OK,,0.3 (Niebieski)\n"
+    )
+    path.write_text(header + body, encoding="utf-8")
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    rows = r.json()["data"]
+    by_t = {row["Ticker"]: row for row in rows}
+    assert by_t["ZIM"]["Exchange"] == "NYSE"
+    assert by_t["ATC"]["Exchange"] == "GPW"
+
+
+def test_results_backfills_exchange_from_ticker_prefix(client, app_env, monkeypatch):
+    """Stary CSV bez kolumny Exchange — ticker `GPW:ATC` → backend rozpoznaje GPW."""
+    import app as m
+
+    monkeypatch.setattr(m, "lookup_exchange", lambda _t: "")
+
+    _m, res, _dat = app_env
+    date_id = "2026-05-12"
+    path = res / f"tradingview_results_{date_id}.csv"
+    header = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,"
+        "PCA_Values\n"
+    )
+    body = "GPW:ATC,Arctic Paper,8.10,1D,OK,,0.3 (Niebieski)\n"
+    path.write_text(header + body, encoding="utf-8")
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    rows = r.json()["data"]
+    assert rows[0]["Exchange"] == "GPW"
+
+
+def test_results_backfills_exchange_from_rest_lookup(client, app_env, monkeypatch):
+    """Brak kolumny Exchange + brak prefixa → backfill z REST."""
+    import app as m
+
+    monkeypatch.setattr(m, "lookup_exchange", lambda _t: "NASDAQ")
+
+    _m, res, _dat = app_env
+    date_id = "2026-05-12"
+    path = res / f"tradingview_results_{date_id}.csv"
+    header = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,"
+        "PCA_Values\n"
+    )
+    body = "AAPL,Apple Inc.,180.0,1D,OK,,0.5 (Niebieski)\n"
+    path.write_text(header + body, encoding="utf-8")
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    rows = r.json()["data"]
+    assert rows[0]["Exchange"] == "NASDAQ"
+
+
+def test_results_backfill_exchange_uppercases_value(client, app_env, monkeypatch):
+    import app as m
+
+    monkeypatch.setattr(m, "lookup_exchange", lambda _t: "nyse")
+
+    _m, res, _dat = app_env
+    date_id = "2026-05-12"
+    path = res / f"tradingview_results_{date_id}.csv"
+    path.write_text(
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "ZIM,ZIM Integrated,12.0,1D,OK,,0.5 (Niebieski)\n",
+        encoding="utf-8",
+    )
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    rows = r.json()["data"]
+    assert rows[0]["Exchange"] == "NYSE"
+
+
+def test_results_marks_config_match_for_exact_and_exchange_variant(
+    client, app_env, tmp_path, monkeypatch
+):
+    import app as m
+
+    cfg_path = tmp_path / "scraper_config.json"
+    cfg_path.write_text(
+        json.dumps({
+            "tickers": ["AAPL", "GPW:ATC"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+    monkeypatch.setattr(m, "lookup_exchange", lambda _t: "")
+
+    _m, res, _dat = app_env
+    date_id = "2026-05-13"
+    path = res / f"tradingview_results_{date_id}.csv"
+    path.write_text(
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "AAPL,Apple Inc.,180.0,1D,OK,,0.5 (Niebieski)\n"
+        "ATC,Arctic Paper,8.0,1D,OK,,0.3 (Niebieski)\n"
+        "DIAP,Diagnostyka,1.0,1D,OK,,0.3 (Niebieski)\n",
+        encoding="utf-8",
+    )
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    by_t = {row["Ticker"]: row for row in r.json()["data"]}
+    assert by_t["AAPL"]["In_Config"] is True
+    assert by_t["AAPL"]["Config_Match"] == "AAPL"
+    assert by_t["AAPL"]["Config_Status"] == "exact"
+    assert by_t["AAPL"]["Config_Candidates"] == []
+    assert by_t["ATC"]["In_Config"] is True
+    assert by_t["ATC"]["Config_Match"] == "GPW:ATC"
+    assert by_t["ATC"]["Config_Status"] == "variant"
+    assert by_t["ATC"]["Config_Candidates"] == []
+    assert by_t["DIAP"]["In_Config"] is False
+    assert by_t["DIAP"]["Config_Match"] == ""
+    assert by_t["DIAP"]["Config_Status"] == "unknown"
+    assert by_t["DIAP"]["Config_Candidates"] == []
+
+
+def test_results_marks_stale_config_candidates(client, app_env, tmp_path, monkeypatch):
+    import app as m
+
+    cfg_path = tmp_path / "scraper_config.json"
+    cfg_path.write_text(
+        json.dumps({
+            "tickers": ["AAPL", "GPW:TOA", "GPW:APT"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+    monkeypatch.setattr(m, "lookup_exchange", lambda _t: "")
+
+    _m, res, _dat = app_env
+    date_id = "2026-05-14"
+    path = res / f"tradingview_results_{date_id}.csv"
+    path.write_text(
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "GPW:TOY,Toy old,8.0,1D,OK,,0.3 (Niebieski)\n"
+        "APTP,Atal old,1.0,1D,OK,,0.3 (Niebieski)\n"
+        "ZZZQ,Unknown,1.0,1D,OK,,0.3 (Niebieski)\n",
+        encoding="utf-8",
+    )
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    by_t = {row["Ticker"]: row for row in r.json()["data"]}
+
+    assert by_t["GPW:TOY"]["In_Config"] is False
+    assert by_t["GPW:TOY"]["Config_Match"] == ""
+    assert by_t["GPW:TOY"]["Config_Status"] == "stale"
+    assert by_t["GPW:TOY"]["Config_Candidates"][0]["ticker"] == "GPW:TOA"
+
+    assert by_t["APTP"]["In_Config"] is False
+    assert by_t["APTP"]["Config_Status"] == "stale"
+    assert by_t["APTP"]["Config_Candidates"][0]["ticker"] == "GPW:APT"
+
+    assert by_t["ZZZQ"]["In_Config"] is False
+    assert by_t["ZZZQ"]["Config_Status"] == "unknown"
+    assert by_t["ZZZQ"]["Config_Candidates"] == []
+
+
+def test_delete_ticker_preview_counts_config_and_history(
+    client, app_env, tmp_path, monkeypatch
+):
+    import app as m
+
+    cfg_path = tmp_path / "scraper_config.json"
+    cfg_path.write_text(
+        json.dumps({"tickers": ["AAPL", "MSFT"], "intervals": ["1D"], "indicators": ["PCA"]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+
+    _m, res, _dat = app_env
+    f1 = res / "tradingview_results_2026-05-15.csv"
+    f2 = res / "tradingview_results_2026-05-16.csv"
+    f1_text = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "AAPL,Apple,180,1D,OK,,0.5\n"
+        "MSFT,Microsoft,300,1D,OK,,0.6\n"
+        "AAPL,Apple,180,1W,OK,,0.7\n"
+    )
+    f2_text = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "MSFT,Microsoft,300,1D,OK,,0.6\n"
+    )
+    f1.write_text(f1_text, encoding="utf-8")
+    f2.write_text(f2_text, encoding="utf-8")
+
+    r = client.get("/api/tickers/AAPL/delete_preview")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ticker"] == "AAPL"
+    assert data["in_config"] is True
+    assert data["config_removed_count"] == 1
+    assert data["files_count"] == 1
+    assert data["rows_count"] == 2
+    assert data["files"][0]["filename"] == "tradingview_results_2026-05-15.csv"
+    assert f1.read_text(encoding="utf-8") == f1_text
+    assert f2.read_text(encoding="utf-8") == f2_text
+
+
+def test_delete_ticker_removes_from_config_and_all_csv(
+    client, app_env, tmp_path, monkeypatch
+):
+    import app as m
+
+    cfg_path = tmp_path / "scraper_config.json"
+    cfg_path.write_text(
+        json.dumps({"tickers": ["AAPL", "MSFT", "aapl"], "intervals": ["1D"], "indicators": ["PCA"]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+
+    _m, res, _dat = app_env
+    f1 = res / "tradingview_results_2026-05-17.csv"
+    f2 = res / "tradingview_results_2026-05-18.csv"
+    f3 = res / "tradingview_results_2026-05-19.csv"
+    f1.write_text(
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "AAPL,Apple,180,1D,OK,,0.5\n"
+        "MSFT,Microsoft,300,1D,OK,,0.6\n"
+        "aapl,Apple,180,1W,OK,,0.7\n",
+        encoding="utf-8",
+    )
+    f2.write_text(
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "AAPL,Apple,180,1D,OK,,0.8\n",
+        encoding="utf-8",
+    )
+    f3_text = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "MSFT,Microsoft,300,1D,OK,,0.6\n"
+    )
+    f3.write_text(f3_text, encoding="utf-8")
+
+    r = client.delete("/api/tickers/AAPL")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["config_removed_count"] == 2
+    assert data["files_modified"] == 2
+    assert data["rows_removed"] == 3
+
+    saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert saved["tickers"] == ["MSFT"]
+    assert "AAPL" not in f1.read_text(encoding="utf-8").upper()
+    assert "AAPL" not in f2.read_text(encoding="utf-8").upper()
+    assert f3.read_text(encoding="utf-8") == f3_text
+
+
+def test_delete_ticker_rejects_invalid_ticker(client):
+    r = client.get("/api/tickers/BAD%24/delete_preview")
+    assert r.status_code == 400
+
+    r = client.delete("/api/tickers/BAD%24")
     assert r.status_code == 400

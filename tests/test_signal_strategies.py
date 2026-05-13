@@ -82,6 +82,13 @@ def test_pca_buckets_empty_without_value():
     assert strategy_pca_buckets(_row()) == ""
 
 
+def test_pca_values_preferred_over_legacy_pca_value():
+    row = _row(pca="12.54 (Niebieski)")
+    row["PCA_Value"] = "35.50"
+    out = compute_signals(row)
+    assert out["pca_buckets"] == "strong buy"
+
+
 def test_scoring_strong_buy_all_aligned():
     r = _row(hts_trend="Wzrostowy", macd_trend="Wzrostowy", pca="35.0")
     assert strategy_scoring(r) == "strong buy"

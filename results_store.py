@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
 from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 CSV_META_COLUMNS: List[str] = [
     "Ticker",
     "Company_Name",
+    "Exchange",
     "Current_Price",
     "Interval",
     "Scrape_Status",
@@ -131,6 +133,62 @@ def load_results_dataframe(path: Optional[str]) -> Optional[pd.DataFrame]:
         return None
 
 
+def count_ticker_rows_in_csv(path: str, ticker: str) -> int:
+    """Liczy dokładne wystąpienia tickera w jednym CSV (case-insensitive)."""
+    df = load_results_dataframe(path)
+    if df is None or df.empty or "Ticker" not in df.columns:
+        return 0
+    ticker_u = str(ticker or "").strip().upper()
+    if not ticker_u:
+        return 0
+    mask = df["Ticker"].astype(str).str.strip().str.upper() == ticker_u
+    return int(mask.sum())
+
+
+def remove_ticker_rows_from_csv(path: str, ticker: str) -> Tuple[int, int]:
+    """Usuwa dokładne wiersze tickera z CSV, zapisując atomowo.
+
+    Zwraca ``(removed_rows, remaining_rows)``. Jeśli ticker nie występuje, plik
+    nie jest przepisywany. Nagłówki pozostają w pliku nawet gdy usunięto
+    wszystkie wiersze.
+    """
+    if not path or not os.path.exists(path):
+        return 0, 0
+    ticker_u = str(ticker or "").strip().upper()
+    if not ticker_u:
+        return 0, 0
+
+    try:
+        df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+    except Exception as e:
+        logger.warning("Nie można odczytać CSV do usunięcia tickera (%s): %s", path, e)
+        return 0, 0
+
+    if df.empty or "Ticker" not in df.columns:
+        return 0, int(len(df))
+
+    mask = df["Ticker"].astype(str).str.strip().str.upper() == ticker_u
+    removed = int(mask.sum())
+    if removed <= 0:
+        return 0, int(len(df))
+
+    out = df.loc[~mask].copy()
+    out = out[df.columns]
+    dir_name = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".delete-ticker-", suffix=".csv", dir=dir_name)
+    os.close(fd)
+    try:
+        out.to_csv(tmp_path, index=False, encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        finally:
+            raise
+    return removed, int(len(out))
+
+
 def get_row_for_ticker_interval(df, ticker: str, interval: str):
     if df is None or "Ticker" not in df.columns or "Interval" not in df.columns:
         return None
@@ -172,6 +230,7 @@ def merge_existing_row_into_row_data(row_data: dict, erow) -> None:
         "Ticker",
         "Interval",
         "Company_Name",
+        "Exchange",
         "Current_Price",
         "Scrape_Status",
         "Scrape_Error",
@@ -362,6 +421,7 @@ def record_skipped_ticker(current_run_file: str, ticker: str, reason: str) -> No
     row_base = {
         "Ticker": ticker,
         "Company_Name": "\u2014",
+        "Exchange": "",
         "Current_Price": "",
         "Interval": "-",
         "Scrape_Status": "SKIPPED",

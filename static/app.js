@@ -33,6 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
         collapsedCards: 'ta_collapsed_cards',
         signalStrategy: 'ta_signal_strategy',
         signalInterval: 'ta_signal_interval',
+        consensusFilter: 'ta_consensus_filter',
         renamedHidden: 'ta_renamed_hidden',
     };
 
@@ -56,10 +57,12 @@ document.addEventListener('DOMContentLoaded', () => {
     let pcaChartInstance = null;
     let historyChartInstance = null;
 
-    const ALLOWED_SORT = new Set(['default', 'pca-desc', 'pca-asc', 'ticker-asc', 'ticker-desc']);
+    const ALLOWED_SORT = new Set(['data-status', 'default', 'pca-desc', 'pca-asc', 'consensus-bullish', 'consensus-bearish', 'ticker-asc', 'ticker-desc']);
     const ALLOWED_INTERVAL = new Set(['1D', '1W', '1M']);
     const ALLOWED_SIGNAL_INTERVALS = new Set(['D', 'W', 'M']);
     const BUY_SIGNALS = new Set(['buy', 'strong buy']);
+    const SELL_SIGNALS = new Set(['sell', 'strong sell']);
+    const ALLOWED_CONSENSUS_FILTERS = new Set(['all', 'bullish', 'bearish', 'neutral']);
     const ALL_STRATEGY_IDS = ['trend_only', 'cross_priority', 'pca_buckets', 'scoring'];
     const ALLOWED_STRATEGIES = new Set([...ALL_STRATEGY_IDS, 'all']);
 
@@ -77,8 +80,8 @@ document.addEventListener('DOMContentLoaded', () => {
         scoring: 'HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma w zakresie [−3..+3] mapowana na 5 koszyków: ≥+2 Strong Buy, +1 Buy, 0 Neutral, −1 Sell, ≤−2 Strong Sell.',
     };
 
-    let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'default'))
-        ? loadPref(UI_KEYS.sortMode, 'default') : 'default';
+    let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'data-status'))
+        ? loadPref(UI_KEYS.sortMode, 'data-status') : 'data-status';
     let currentChartInterval = ALLOWED_INTERVAL.has(loadPref(UI_KEYS.chartInterval, '1D'))
         ? loadPref(UI_KEYS.chartInterval, '1D') : '1D';
 
@@ -89,6 +92,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ? loadPref(UI_KEYS.signalStrategy, 'all') : 'all';
     let signalInterval = ALLOWED_SIGNAL_INTERVALS.has(loadPref(UI_KEYS.signalInterval, 'D'))
         ? loadPref(UI_KEYS.signalInterval, 'D') : 'D';
+    let consensusFilter = ALLOWED_CONSENSUS_FILTERS.has(loadPref(UI_KEYS.consensusFilter, 'all'))
+        ? loadPref(UI_KEYS.consensusFilter, 'all') : 'all';
     let availableSignalStrategies = ALL_STRATEGY_IDS.map(id => ({ id, label: id }));
 
     function persistCollapsed() {
@@ -235,6 +240,103 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    /**
+     * Modal dla niedokończonego runu: 3 przyciski (Wznów / Od nowa / Anuluj).
+     * Resolve: 'resume' | 'fresh' | 'cancel'.
+     * `pending` to obiekt z /api/scraper/pending_run.
+     */
+    function pendingRunDialog(pending) {
+        return new Promise((resolve) => {
+            let overlay = document.getElementById('app-pending-run-dialog');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'app-pending-run-dialog';
+                overlay.className = 'modal-overlay';
+                overlay.setAttribute('role', 'dialog');
+                overlay.setAttribute('aria-modal', 'true');
+                overlay.innerHTML = `
+                    <div class="modal-dialog modal-dialog-sm">
+                        <div class="modal-header">
+                            <div>
+                                <h3>Niedokończony scraping</h3>
+                                <div class="modal-subtitle" data-role="msg"></div>
+                            </div>
+                            <button type="button" class="modal-close" data-role="close" aria-label="Zamknij">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="pending-run-meta" data-role="meta"></div>
+                            <div class="rename-actions pending-run-actions">
+                                <button type="button" class="btn btn-secondary" data-role="cancel">Anuluj</button>
+                                <button type="button" class="btn btn-secondary" data-role="resume">Wznów</button>
+                                <button type="button" class="btn btn-primary" data-role="fresh">Zacznij od nowa</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+            }
+
+            const msgEl = overlay.querySelector('[data-role="msg"]');
+            const metaEl = overlay.querySelector('[data-role="meta"]');
+            const resumeBtn = overlay.querySelector('[data-role="resume"]');
+            const freshBtn = overlay.querySelector('[data-role="fresh"]');
+            const cancelBtn = overlay.querySelector('[data-role="cancel"]');
+            const closeBtn = overlay.querySelector('[data-role="close"]');
+
+            msgEl.textContent =
+                'Wykryto niedokończony run scrapera (po crashu lub po Stop). ' +
+                'Wznowienie dopisze do tego samego pliku — „Od nowa" utworzy nowy z dzisiejszą datą.';
+
+            const file = (pending?.current_file || '').replace(/^results\//, '');
+            const fileDate = pending?.current_file_date || '';
+            const proc = Number(pending?.processed_count || 0);
+            const total = Number(pending?.total_in_config || 0);
+            const remaining = Number(pending?.remaining_count || (total - proc));
+
+            const lines = [];
+            if (file) {
+                lines.push(`<div><span class="pending-run-label">Plik:</span> <code>${escapeHtml(file)}</code>${fileDate ? ` <span class="pending-run-meta-date">(${escapeHtml(fileDate)})</span>` : ''}</div>`);
+            }
+            if (total > 0) {
+                lines.push(`<div><span class="pending-run-label">Postęp:</span> ${proc}/${total} (pozostało: ${remaining})</div>`);
+            } else if (proc > 0) {
+                lines.push(`<div><span class="pending-run-label">Przetworzonych:</span> ${proc}</div>`);
+            }
+            metaEl.innerHTML = lines.join('');
+
+            // Heurystyka: state >1h od ostatniej modyfikacji → focus na „Od nowa"
+            // (user pewnie zapomniał o starym runie). Inaczej focus na „Wznów".
+            const mtime = Number(pending?.state_mtime || 0) * 1000;
+            const isStale = mtime > 0 && (Date.now() - mtime) > 60 * 60 * 1000;
+            const defaultBtn = isStale ? freshBtn : resumeBtn;
+
+            const close = (value) => {
+                overlay.classList.remove('visible');
+                overlay.setAttribute('aria-hidden', 'true');
+                resumeBtn.onclick = null;
+                freshBtn.onclick = null;
+                cancelBtn.onclick = null;
+                closeBtn.onclick = null;
+                overlay.onclick = null;
+                document.removeEventListener('keydown', onKey);
+                resolve(value);
+            };
+            const onKey = (e) => {
+                if (e.key === 'Escape') { e.preventDefault(); close('cancel'); }
+                else if (e.key === 'Enter') { e.preventDefault(); close(isStale ? 'fresh' : 'resume'); }
+            };
+            resumeBtn.onclick = () => close('resume');
+            freshBtn.onclick = () => close('fresh');
+            cancelBtn.onclick = () => close('cancel');
+            closeBtn.onclick = () => close('cancel');
+            overlay.onclick = (e) => { if (e.target === overlay) close('cancel'); };
+            document.addEventListener('keydown', onKey);
+            overlay.classList.add('visible');
+            overlay.setAttribute('aria-hidden', 'false');
+            setTimeout(() => defaultBtn.focus(), 50);
+        });
+    }
+
     function setGlobalBanner(visible, { text = 'Scraper w toku…', progressPct = null } = {}) {
         if (!globalBanner) return;
         if (visible) {
@@ -357,6 +459,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 signalInterval = iv;
                 savePref(UI_KEYS.signalInterval, signalInterval);
             }
+        } else if (chip.hasAttribute('data-filter-consensus')) {
+            const cf = chip.dataset.filterConsensus;
+            if (ALLOWED_CONSENSUS_FILTERS.has(cf)) {
+                consensusFilter = cf;
+                savePref(UI_KEYS.consensusFilter, consensusFilter);
+            }
         }
         syncWlFilterChipsUI();
         filterAndRenderCards(searchInput.value.toLowerCase().trim());
@@ -369,6 +477,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-interval]').forEach(chip => {
             chip.classList.toggle('active', chip.dataset.filterInterval === signalInterval);
+        });
+        wlFilterToolbar.querySelectorAll('.filter-chip[data-filter-consensus]').forEach(chip => {
+            chip.classList.toggle('active', chip.dataset.filterConsensus === consensusFilter);
         });
         updateStrategyDescription();
     }
@@ -395,16 +506,24 @@ document.addEventListener('DOMContentLoaded', () => {
         strong.textContent = label + ':';
         strategyDescriptionEl.appendChild(strong);
         strategyDescriptionEl.appendChild(document.createTextNode(' ' + desc));
+        if (consensusFilter && consensusFilter !== 'all') {
+            strategyDescriptionEl.appendChild(document.createTextNode(
+                ` Consensus: pokazuję tylko tickery z przewagą „${consensusFilter}” na interwale ${signalInterval}.`
+            ));
+        }
     }
 
     function updateStrategyEmptyBanner(filteredCount) {
         if (!strategyEmptyBannerEl) return;
         const isToolbarVisible = wlFilterToolbar && !wlFilterToolbar.hidden;
-        if (isToolbarVisible && signalStrategy && signalStrategy !== 'all' && filteredCount === 0 && currentData.length > 0) {
+        const hasSignalFilter = signalStrategy && signalStrategy !== 'all';
+        const hasConsensusFilter = consensusFilter && consensusFilter !== 'all';
+        if (isToolbarVisible && (hasSignalFilter || hasConsensusFilter) && filteredCount === 0 && currentData.length > 0) {
             const label = strategyLabel(signalStrategy);
+            const consensusText = hasConsensusFilter ? ` oraz consensus „${consensusFilter}”` : '';
             strategyEmptyBannerEl.hidden = false;
             strategyEmptyBannerEl.textContent =
-                `Brak tickerów spełniających strategię „${label}” dla interwału ${signalInterval}. ` +
+                `Brak tickerów spełniających strategię „${label}”${consensusText} dla interwału ${signalInterval}. ` +
                 `Spróbuj inny interwał (D/W/M) lub inną strategię — to nie błąd, po prostu żaden ticker w tej dacie nie ma sygnału Buy/Strong Buy w tej kombinacji.`;
         } else {
             strategyEmptyBannerEl.hidden = true;
@@ -428,6 +547,43 @@ document.addEventListener('DOMContentLoaded', () => {
             if (iv && iv !== targetIv) return false;
             return BUY_SIGNALS.has(rowSignalForStrategy(r, strategyId));
         });
+    }
+
+    function consensusForRows(rows) {
+        const targetIv = intervalCodeForSignal();
+        const row = (rows || []).find(r => (r?.['Interval'] || '').trim().toUpperCase() === targetIv);
+        if (!row) {
+            return { direction: 'none', bullish: 0, bearish: 0, neutral: 0, total: 0, score: 0 };
+        }
+        let bullish = 0;
+        let bearish = 0;
+        let neutral = 0;
+        ALL_STRATEGY_IDS.forEach(id => {
+            const sig = rowSignalForStrategy(row, id);
+            if (BUY_SIGNALS.has(sig)) bullish += 1;
+            else if (SELL_SIGNALS.has(sig)) bearish += 1;
+            else if (sig === 'neutral') neutral += 1;
+        });
+        const total = bullish + bearish + neutral;
+        let direction = 'none';
+        if (total > 0) {
+            if (bullish > bearish) direction = 'bullish';
+            else if (bearish > bullish) direction = 'bearish';
+            else direction = 'neutral';
+        }
+        return { direction, bullish, bearish, neutral, total, score: bullish - bearish };
+    }
+
+    function tickerMatchesConsensus(rows) {
+        if (!consensusFilter || consensusFilter === 'all') return true;
+        return consensusForRows(rows).direction === consensusFilter;
+    }
+
+    function consensusLabel(c) {
+        if (!c || c.total === 0 || c.direction === 'none') return '';
+        if (c.direction === 'bullish') return `${c.bullish}/${ALL_STRATEGY_IDS.length} bullish`;
+        if (c.direction === 'bearish') return `${c.bearish}/${ALL_STRATEGY_IDS.length} bearish`;
+        return `${c.neutral}/${ALL_STRATEGY_IDS.length} neutral`;
     }
 
     // Fetch History Dates
@@ -508,6 +664,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // w UI nie chcemy widzieć już starej nazwy).
         let filteredData = currentData.filter(row => !isTickerHidden(row['Ticker']));
         const hiddenCount = currentData.length - filteredData.length;
+        const hiddenTickerCount = new Set(
+            currentData
+                .filter(row => isTickerHidden(row['Ticker']))
+                .map(row => row['Ticker'] || '')
+                .filter(Boolean)
+        ).size;
         if (searchTerm) {
             filteredData = filteredData.filter(row => {
                 const ticker = (row['Ticker'] || '').toLowerCase();
@@ -532,16 +694,37 @@ document.addEventListener('DOMContentLoaded', () => {
             filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
         }
 
+        if (consensusFilter && consensusFilter !== 'all') {
+            const byTicker = new Map();
+            filteredData.forEach(row => {
+                const t = row['Ticker'] || '';
+                if (!byTicker.has(t)) byTicker.set(t, []);
+                byTicker.get(t).push(row);
+            });
+            const allowedTickers = new Set();
+            byTicker.forEach((rows, ticker) => {
+                if (tickerMatchesConsensus(rows)) {
+                    allowedTickers.add(ticker);
+                }
+            });
+            filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
+        }
+
         const distinctTickers = new Set(filteredData.map(r => r['Ticker'] || '')).size;
+        const totalDistinctTickers = new Set(currentData.map(r => r['Ticker'] || '')).size;
         updateStrategyEmptyBanner(distinctTickers);
 
         recordCount.textContent = '';
         recordCount.appendChild(document.createTextNode(
-            `${filteredData.length} rekordów (z ${currentData.length})`
+            `${distinctTickers} tickerów / ${filteredData.length} wierszy ` +
+            `(z ${totalDistinctTickers} tickerów / ${currentData.length} wierszy CSV)`
         ));
         if (hiddenCount > 0) {
+            const hiddenInfo = hiddenTickerCount > 0
+                ? `${hiddenTickerCount} tickerów / ${hiddenCount} wierszy`
+                : `${hiddenCount} wierszy`;
             recordCount.appendChild(document.createTextNode(
-                ` · ${hiddenCount} ukrytych po zmianie nazwy `
+                ` · ${hiddenInfo} ukrytych po zmianie nazwy `
             ));
             const link = document.createElement('a');
             link.href = '#';
@@ -722,6 +905,81 @@ document.addEventListener('DOMContentLoaded', () => {
         return a - b;
     }
 
+    function signalRank(signal) {
+        const s = String(signal || '').toLowerCase().trim();
+        if (s === 'strong buy') return 5;
+        if (s === 'buy') return 4;
+        if (s === 'neutral') return 3;
+        if (s === 'sell') return 2;
+        if (s === 'strong sell') return 1;
+        return 0;
+    }
+
+    function groupCurrentIntervalRow(rows) {
+        return (rows || []).find(r => (r['Interval'] || '').toUpperCase() === currentChartInterval)
+            || (rows || [])[0]
+            || null;
+    }
+
+    function groupMissingCount(rows) {
+        return (rows || []).reduce((sum, row) => {
+            if (Array.isArray(row['Missing_Indicators'])) return sum + row['Missing_Indicators'].length;
+            if (row['All_Indicators_Missing'] === true) return sum + 3;
+            return sum;
+        }, 0);
+    }
+
+    function groupDataStatusRank(rows) {
+        const rs = rows || [];
+        if (getConfigIssue(rs)) return 0;
+        if (rs.some(r => (r['Scrape_Status'] || '').toUpperCase() === 'SKIPPED')) return 1;
+        if (rs.some(r => (r['Scrape_Status'] || '').toUpperCase() === 'NO_DATA') || rs.every(r => r['All_Indicators_Missing'] === true)) return 2;
+        if (groupMissingCount(rs) > 0) return 3;
+        return 4;
+    }
+
+    function groupSignalRank(rows) {
+        const target = groupCurrentIntervalRow(rows);
+        if (!target) return 0;
+        const ids = signalStrategy && signalStrategy !== 'all'
+            ? [signalStrategy]
+            : ALL_STRATEGY_IDS;
+        return Math.max(...ids.map(id => signalRank(target[`Computed_Signal_${id}`])), 0);
+    }
+
+    function cmpConsensusGroups(aTicker, bTicker, groupedData, mode) {
+        const a = consensusForRows(groupedData[aTicker] || []);
+        const b = consensusForRows(groupedData[bTicker] || []);
+        const aPrimary = mode === 'bearish' ? a.bearish : a.bullish;
+        const bPrimary = mode === 'bearish' ? b.bearish : b.bullish;
+        if (aPrimary !== bPrimary) return bPrimary - aPrimary;
+        const aAbs = Math.abs(a.score);
+        const bAbs = Math.abs(b.score);
+        if (aAbs !== bAbs) return bAbs - aAbs;
+        if (a.total !== b.total) return b.total - a.total;
+        return aTicker.localeCompare(bTicker);
+    }
+
+    function cmpDataStatusGroups(aTicker, bTicker, groupedData) {
+        const aRows = groupedData[aTicker] || [];
+        const bRows = groupedData[bTicker] || [];
+        const aStatus = groupDataStatusRank(aRows);
+        const bStatus = groupDataStatusRank(bRows);
+        if (aStatus !== bStatus) return aStatus - bStatus;
+
+        const aMissing = groupMissingCount(aRows);
+        const bMissing = groupMissingCount(bRows);
+        if (aMissing !== bMissing) return bMissing - aMissing;
+
+        const sigDiff = groupSignalRank(bRows) - groupSignalRank(aRows);
+        if (sigDiff !== 0) return sigDiff;
+
+        const pcaDiff = cmpPcaDesc(getGroupPCA(aRows), getGroupPCA(bRows));
+        if (pcaDiff !== 0) return pcaDiff;
+
+        return aTicker.localeCompare(bTicker);
+    }
+
     // Build compact summary pills for collapsed header
     function buildSummaryPills(rows) {
         const sortOrder = {"1D": 1, "1W": 2, "1M": 3};
@@ -795,6 +1053,81 @@ document.addEventListener('DOMContentLoaded', () => {
         return any;
     }
 
+    function pickBestExchange(rows, ticker) {
+        // Najpierw niepuste wartości z kolumny Exchange w wierszach.
+        const fromRows = (rows || [])
+            .map(r => String(r['Exchange'] || '').trim().toUpperCase())
+            .filter(Boolean);
+        if (fromRows.length) return fromRows[0];
+        // Fallback: prefix w tickerze, np. "GPW:ATC" → "GPW".
+        const t = String(ticker || '');
+        if (t.includes(':')) {
+            return t.split(':', 1)[0].trim().toUpperCase();
+        }
+        return '';
+    }
+
+    function isConfigPresentValue(value) {
+        return value === true || String(value || '').toLowerCase() === 'true';
+    }
+
+    function getConfigIssue(rows) {
+        const row = (rows || []).find(r => !isConfigPresentValue(r['In_Config']));
+        if (!row) return null;
+        const candidates = Array.isArray(row['Config_Candidates']) ? row['Config_Candidates'] : [];
+        return {
+            status: String(row['Config_Status'] || 'unknown'),
+            match: String(row['Config_Match'] || ''),
+            candidates,
+        };
+    }
+
+    function addConfigIssueBanner(summaryContainer, ticker, issue) {
+        if (!summaryContainer || !issue) return;
+        const banner = document.createElement('span');
+        banner.className = 'config-stale-banner';
+        const candidates = issue.candidates || [];
+        const oneCandidate = candidates.length === 1 ? String(candidates[0]?.ticker || '').trim() : '';
+        const statusLabel = issue.status === 'unknown'
+            ? 'Symbol z CSV nie jest w konfiguracji'
+            : 'Stary symbol z CSV';
+        banner.appendChild(document.createTextNode(statusLabel));
+
+        if (oneCandidate) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'inline-action-btn';
+            btn.textContent = `Użyj ${oneCandidate}`;
+            btn.title = `Ukryj ${ticker} i pobierz ${oneCandidate}`;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                markTickerRenamed(ticker, oneCandidate);
+                showToast({
+                    type: 'success',
+                    title: 'Używam symbolu z konfiguracji',
+                    message: `${ticker} ukryty, pobieram ${oneCandidate}.`,
+                });
+                filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
+                requestRescrapeTicker(oneCandidate, null);
+            });
+            banner.appendChild(btn);
+        } else {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'inline-action-btn';
+            btn.textContent = 'Ukryj z widoku';
+            btn.title = `Ukryj ${ticker} w tym widoku`;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                markTickerRenamed(ticker, '');
+                filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
+            });
+            banner.appendChild(btn);
+        }
+        summaryContainer.prepend(document.createTextNode(' '));
+        summaryContainer.prepend(banner);
+    }
+
     // Process and Render Cards
     function renderCards(dataRows) {
         resultsGrid.innerHTML = '';
@@ -829,11 +1162,20 @@ document.addEventListener('DOMContentLoaded', () => {
         // Sort groups based on selected sort mode
         let sortedKeys = [...tickerOrder];
         switch (currentSortMode) {
+            case 'data-status':
+                sortedKeys.sort((a, b) => cmpDataStatusGroups(a, b, groupedData));
+                break;
             case 'pca-desc':
                 sortedKeys.sort((a, b) => cmpPcaDesc(getGroupPCA(groupedData[a]), getGroupPCA(groupedData[b])));
                 break;
             case 'pca-asc':
                 sortedKeys.sort((a, b) => cmpPcaAsc(getGroupPCA(groupedData[a]), getGroupPCA(groupedData[b])));
+                break;
+            case 'consensus-bullish':
+                sortedKeys.sort((a, b) => cmpConsensusGroups(a, b, groupedData, 'bullish'));
+                break;
+            case 'consensus-bearish':
+                sortedKeys.sort((a, b) => cmpConsensusGroups(a, b, groupedData, 'bearish'));
                 break;
             case 'ticker-asc':
                 sortedKeys.sort((a, b) => a.localeCompare(b));
@@ -870,6 +1212,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 companyEl.removeAttribute('title');
             }
 
+            const exchangeEl = cardClone.querySelector('.exchange-badge');
+            if (exchangeEl) {
+                const exch = pickBestExchange(rows, ticker);
+                if (exch) {
+                    exchangeEl.textContent = exch;
+                    exchangeEl.title = `Giełda: ${exch}`;
+                    exchangeEl.hidden = false;
+                } else {
+                    exchangeEl.textContent = '';
+                    exchangeEl.hidden = true;
+                    exchangeEl.removeAttribute('title');
+                }
+            }
+
             // Restore collapsed state from prefs (default = collapsed from template)
             if (!collapsedCards.has(ticker) && collapsedCards.size > 0) {
                 cardEl.classList.remove('collapsed');
@@ -878,6 +1234,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const rescrapeBtn = cardClone.querySelector('.card-rescrape-btn');
             const historyBtn = cardClone.querySelector('.card-history-btn');
             const renameBtn = cardClone.querySelector('.card-rename-btn');
+            const deleteBtn = cardClone.querySelector('.card-delete-btn');
             if (rescrapeBtn) {
                 if (rerunningTickers.has(ticker)) {
                     rescrapeBtn.classList.add('spinning');
@@ -898,6 +1255,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 renameBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     openRenameModal(ticker);
+                });
+            }
+            if (deleteBtn) {
+                deleteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openDeleteTickerModal(ticker);
                 });
             }
             
@@ -934,11 +1297,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 summaryContainer.innerHTML = summaryHtml;
             }
+
+            const configIssue = getConfigIssue(rows);
+            if (configIssue) {
+                cardEl.classList.add('ticker-config-stale');
+                addConfigIssueBanner(summaryContainer, ticker, configIssue);
+            }
             
             const badgesContainer = cardClone.querySelector('.watchlist-badges');
             const dRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1D') || rows[0];
             const wRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1W');
             const mRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1M');
+            addConsensusBadge(badgesContainer, rows);
             const strategiesToShow = signalStrategy === 'all'
                 ? availableSignalStrategies.map(s => s.id)
                 : [signalStrategy];
@@ -1076,6 +1446,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         badge.textContent = `${label}: ${signal}`;
+        container.appendChild(badge);
+    }
+
+    function addConsensusBadge(container, rows) {
+        if (!container) return;
+        const c = consensusForRows(rows);
+        const label = consensusLabel(c);
+        if (!label) return;
+        const badge = document.createElement('span');
+        badge.className = `wl-badge consensus-badge consensus-${c.direction}`;
+        badge.textContent = `Consensus ${signalInterval}: ${label}`;
+        badge.title = `Bullish ${c.bullish}, bearish ${c.bearish}, neutral ${c.neutral} z ${ALL_STRATEGY_IDS.length} strategii`;
         container.appendChild(badge);
     }
 
@@ -1509,6 +1891,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const payload = { tickers: tickersOverride };
             if (options?.noDataOnly) payload.no_data_only = true;
+            if (options?.fresh) payload.fresh = true;
             const res = await fetch('/api/scraper/run', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1532,13 +1915,30 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     btnRunAll.addEventListener('click', async () => {
-        const ok = await confirmDialog({
-            title: 'Pobrać dane dla wszystkich tickerów?',
-            message: 'Operacja może potrwać kilka minut. Zostanie uruchomione pełne pobieranie.',
-            confirmLabel: 'Uruchom',
-            cancelLabel: 'Anuluj',
-        });
-        if (ok) startScraper([]);
+        let pending = null;
+        try {
+            const r = await fetch('/api/scraper/pending_run');
+            if (r.ok) pending = await r.json();
+        } catch (e) { /* ignore — fallback do confirmDialog */ }
+
+        let fresh = false;
+        if (pending && pending.has_pending) {
+            const choice = await pendingRunDialog(pending);
+            if (choice === 'cancel') return;
+            fresh = (choice === 'fresh');
+        } else {
+            const ok = await confirmDialog({
+                title: 'Pobrać dane dla wszystkich tickerów?',
+                message: 'Operacja może potrwać kilka minut. Zostanie uruchomione pełne pobieranie.',
+                confirmLabel: 'Uruchom',
+                cancelLabel: 'Anuluj',
+            });
+            if (!ok) return;
+            // Brak pending state'u — fresh i tak bez efektu (backend no-op),
+            // ale wysyłamy true, żeby intencja była jednoznaczna.
+            fresh = true;
+        }
+        startScraper([], { fresh });
     });
 
     btnRunNoData?.addEventListener('click', async () => {
@@ -1895,11 +2295,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function autoReloadAfterScrape() {
+        const previousActive = activeDateId;
         fetchHistory().then(() => {
-            if (!activeDateId) return;
-            if (activeDateId.slice(0, 10) === todayDateId()) {
-                const obj = currentDates.find(d => d.id === activeDateId);
-                if (obj) selectDate(activeDateId, obj.label);
+            if (!Array.isArray(currentDates) || currentDates.length === 0) return;
+
+            const newest = currentDates[0];
+            // Jeśli pojawił się nowszy plik niż ten, który użytkownik miał wybrany
+            // (np. fresh start utworzył dzisiejszy CSV), automatycznie na niego skacz.
+            if (newest && newest.id !== previousActive) {
+                selectDate(newest.id, newest.label);
+                return;
+            }
+            // Inaczej — reload aktualnie wybranego, niezależnie od tego czy
+            // ma dzisiejszą datę czy nie (resume mógł dopisać do wczorajszego).
+            if (previousActive) {
+                const obj = currentDates.find(d => d.id === previousActive);
+                if (obj) selectDate(previousActive, obj.label);
             }
         });
     }
@@ -1935,6 +2346,12 @@ document.addEventListener('DOMContentLoaded', () => {
             if (renameOpen) {
                 document.getElementById('ticker-rename-modal')?.classList.remove('visible');
                 document.getElementById('ticker-rename-modal')?.setAttribute('aria-hidden', 'true');
+                e.preventDefault();
+                return;
+            }
+            const deleteOpen = document.getElementById('ticker-delete-modal')?.classList.contains('visible');
+            if (deleteOpen) {
+                closeDeleteTickerModal();
                 e.preventDefault();
                 return;
             }
@@ -1985,6 +2402,135 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ==========================================
+    // DELETE TICKER MODAL
+    // ==========================================
+    const deleteModal = document.getElementById('ticker-delete-modal');
+    const deleteCloseBtn = document.getElementById('ticker-delete-close');
+    const deleteCancelBtn = document.getElementById('ticker-delete-cancel');
+    const deleteConfirmBtn = document.getElementById('ticker-delete-confirm');
+    const deleteLoadingEl = document.getElementById('ticker-delete-loading');
+    const deleteErrorEl = document.getElementById('ticker-delete-error');
+    const deletePreviewEl = document.getElementById('ticker-delete-preview');
+    const deleteSubtitleEl = document.getElementById('ticker-delete-subtitle');
+    let deleteTickerValue = '';
+
+    function setDeleteError(msg) {
+        if (!deleteErrorEl) return;
+        if (!msg) {
+            deleteErrorEl.textContent = '';
+            deleteErrorEl.classList.add('hidden');
+        } else {
+            deleteErrorEl.textContent = msg;
+            deleteErrorEl.classList.remove('hidden');
+        }
+    }
+
+    function closeDeleteTickerModal() {
+        if (!deleteModal) return;
+        deleteModal.classList.remove('visible');
+        deleteModal.setAttribute('aria-hidden', 'true');
+        deleteTickerValue = '';
+    }
+
+    function renderDeletePreview(preview) {
+        if (!deletePreviewEl) return;
+        const files = Array.isArray(preview?.files) ? preview.files : [];
+        const rowsCount = Number(preview?.rows_count || 0);
+        const filesCount = Number(preview?.files_count || 0);
+        const configCount = Number(preview?.config_removed_count || 0);
+        const fileItems = files.slice(0, 8).map(f => (
+            `<li><strong>${escapeHtml(f.filename || '')}</strong>: ${Number(f.rows || 0)} wiersz(e)</li>`
+        )).join('');
+        const extra = files.length > 8
+            ? `<li>… oraz ${files.length - 8} kolejnych plików</li>`
+            : '';
+        deletePreviewEl.innerHTML = `
+            <div class="delete-warning">
+                Ta operacja jest trwała: usunie <strong>${escapeHtml(preview?.ticker || deleteTickerValue)}</strong>
+                z konfiguracji i fizycznie wytnie jego wiersze z historycznych CSV.
+            </div>
+            <div class="delete-preview-grid">
+                <div><span>W configu</span><strong>${configCount}</strong></div>
+                <div><span>Pliki CSV</span><strong>${filesCount}</strong></div>
+                <div><span>Wiersze</span><strong>${rowsCount}</strong></div>
+            </div>
+            ${files.length ? `<ul class="delete-file-list">${fileItems}${extra}</ul>` : '<p class="delete-muted">Nie znaleziono wierszy w historycznych CSV.</p>'}
+        `;
+        deletePreviewEl.hidden = false;
+    }
+
+    async function openDeleteTickerModal(ticker) {
+        if (!deleteModal || !ticker) return;
+        deleteTickerValue = String(ticker || '').trim().toUpperCase();
+        if (deleteSubtitleEl) {
+            deleteSubtitleEl.textContent = `Usuwanie ${deleteTickerValue} z konfiguracji i wszystkich CSV.`;
+        }
+        if (deletePreviewEl) {
+            deletePreviewEl.innerHTML = '';
+            deletePreviewEl.hidden = true;
+        }
+        if (deleteLoadingEl) deleteLoadingEl.hidden = false;
+        if (deleteConfirmBtn) deleteConfirmBtn.disabled = true;
+        setDeleteError('');
+        deleteModal.classList.add('visible');
+        deleteModal.setAttribute('aria-hidden', 'false');
+
+        try {
+            const res = await fetch(`/api/tickers/${encodeURIComponent(deleteTickerValue)}/delete_preview`);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data?.detail || data?.message || `Błąd ${res.status}`);
+            }
+            if (deleteLoadingEl) deleteLoadingEl.hidden = true;
+            renderDeletePreview(data);
+            if (deleteConfirmBtn) {
+                deleteConfirmBtn.disabled = !(Number(data.rows_count || 0) > 0 || Number(data.config_removed_count || 0) > 0);
+            }
+        } catch (err) {
+            if (deleteLoadingEl) deleteLoadingEl.hidden = true;
+            setDeleteError(String(err?.message || err || 'Nie udało się pobrać preview usunięcia.'));
+        }
+    }
+
+    deleteCloseBtn?.addEventListener('click', closeDeleteTickerModal);
+    deleteCancelBtn?.addEventListener('click', closeDeleteTickerModal);
+    deleteModal?.addEventListener('click', (e) => {
+        if (e.target === deleteModal) closeDeleteTickerModal();
+    });
+    deleteConfirmBtn?.addEventListener('click', async () => {
+        const ticker = deleteTickerValue;
+        if (!ticker) return;
+        deleteConfirmBtn.disabled = true;
+        setDeleteError('');
+        try {
+            const res = await fetch(`/api/tickers/${encodeURIComponent(ticker)}`, { method: 'DELETE' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data?.detail || data?.message || `Błąd ${res.status}`);
+            }
+            delete renamedHidden[ticker];
+            persistRenamedHidden();
+            currentData = (currentData || []).filter(row => String(row['Ticker'] || '').trim().toUpperCase() !== ticker);
+            showToast({
+                type: 'success',
+                title: 'Ticker usunięty',
+                message: `${ticker}: usunięto ${Number(data.rows_removed || 0)} wierszy z ${Number(data.files_modified || 0)} plików.`,
+            });
+            closeDeleteTickerModal();
+            await fetchHistory();
+            const current = currentDates.find(d => d.id === activeDateId) || currentDates[0];
+            if (current) {
+                await selectDate(current.id, current.label);
+            } else {
+                filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
+            }
+        } catch (err) {
+            setDeleteError(String(err?.message || err || 'Nie udało się usunąć tickera.'));
+            deleteConfirmBtn.disabled = false;
+        }
+    });
+
+    // ==========================================
     // RENAME TICKER MODAL
     // ==========================================
     const renameModal = document.getElementById('ticker-rename-modal');
@@ -1996,9 +2542,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const renameErrorEl = document.getElementById('ticker-rename-error');
     const renameSubmitBtn = document.getElementById('ticker-rename-submit');
     const TICKER_RE_CLIENT = /^[A-Z0-9._:-]{1,24}$/;
+    let renameOpenedTicker = '';
 
     function openRenameModal(ticker) {
         if (!renameModal || !ticker) return;
+        renameOpenedTicker = String(ticker || '').trim().toUpperCase();
         if (renameOldInput) renameOldInput.value = ticker;
         if (renameNewInput) {
             renameNewInput.value = '';
@@ -2015,6 +2563,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!renameModal) return;
         renameModal.classList.remove('visible');
         renameModal.setAttribute('aria-hidden', 'true');
+        renameOpenedTicker = '';
     }
 
     function setRenameError(msg) {
@@ -2026,6 +2575,57 @@ document.addEventListener('DOMContentLoaded', () => {
             renameErrorEl.textContent = msg;
             renameErrorEl.classList.remove('hidden');
         }
+    }
+
+    function showRenameCandidateError(detail, requestedOld) {
+        if (!renameErrorEl || !detail || typeof detail !== 'object') return false;
+        const candidates = Array.isArray(detail.candidates) ? detail.candidates : [];
+        if (!candidates.length) return false;
+
+        renameErrorEl.textContent = '';
+        renameErrorEl.classList.remove('hidden');
+
+        const msg = document.createElement('span');
+        const requested = detail.requested_old || requestedOld;
+        const names = candidates.map(c => c?.ticker).filter(Boolean);
+        msg.textContent = `${requested} jest w wynikach CSV, ale nie ma go w konfiguracji. `;
+        renameErrorEl.appendChild(msg);
+
+        if (candidates.length === 1 && names[0]) {
+            const candidate = names[0];
+            const hint = document.createElement('span');
+            hint.textContent = `Podobny wpis w configu: ${candidate}. `;
+            renameErrorEl.appendChild(hint);
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'record-count-action rename-candidate-btn';
+            btn.textContent = `Użyj ${candidate}`;
+            btn.addEventListener('click', () => {
+                const original = String(requested || renameOpenedTicker || '').trim().toUpperCase();
+                const target = String(candidate || '').trim().toUpperCase();
+                if (!original || !target) return;
+
+                // Ten przypadek oznacza: karta pochodzi ze starego CSV, ale config
+                // ma już właściwy symbol. Nie robimy rename w configu, tylko chowamy
+                // błędną kartę CSV i odpalamy pobranie właściwego symbolu.
+                markTickerRenamed(original, target);
+                showToast({
+                    type: 'success',
+                    title: 'Używam symbolu z konfiguracji',
+                    message: `${original} ukryty. Pobieram dane dla ${target}…`,
+                });
+                closeRenameModal();
+                filterAndRenderCards(searchInput?.value || '');
+                requestRescrapeTicker(target, null);
+            });
+            renameErrorEl.appendChild(btn);
+        } else {
+            const hint = document.createElement('span');
+            hint.textContent = `Podobne wpisy w configu: ${names.join(', ')}. Wybierz właściwy wpis w konfiguracji albo zmień ręcznie.`;
+            renameErrorEl.appendChild(hint);
+        }
+        return true;
     }
 
     renameModalClose?.addEventListener('click', closeRenameModal);
@@ -2063,7 +2663,13 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json().catch(() => ({}));
             if (!res.ok) {
                 const detail = (data && (data.detail || data.message)) || `Błąd ${res.status}`;
-                setRenameError(typeof detail === 'string' ? detail : 'Nie udało się zmienić nazwy.');
+                if (!showRenameCandidateError(detail, oldTicker)) {
+                    setRenameError(
+                        typeof detail === 'string'
+                            ? detail
+                            : (detail?.message || 'Nie udało się zmienić nazwy.')
+                    );
+                }
                 if (renameSubmitBtn) renameSubmitBtn.disabled = false;
                 return;
             }
@@ -2072,13 +2678,17 @@ document.addEventListener('DOMContentLoaded', () => {
             // zarówno to, co wpisał użytkownik, jak i realnie zmatchowany
             // symbol z configu (np. LULU.O → LULU), żeby nic nie zostało.
             const matchedOld = (data && typeof data.old === 'string' && data.old) || oldTicker;
+            const openedOld = renameOpenedTicker;
             markTickerRenamed(oldTicker, newTicker);
             if (matchedOld && matchedOld.toUpperCase() !== oldTicker) {
                 markTickerRenamed(matchedOld, newTicker);
             }
+            if (openedOld && openedOld !== oldTicker && openedOld !== String(matchedOld || '').toUpperCase()) {
+                markTickerRenamed(openedOld, newTicker);
+            }
             // Dodatkowo ukryj wszystkie wiersze z tą samą bazą (prefiks przed
             // pierwszą kropką) — spójnie z logiką fuzzy-match w backendzie.
-            const baseOld = oldTicker.split('.', 1)[0];
+            const baseOld = (openedOld || oldTicker).split('.', 1)[0];
             if (baseOld) {
                 (currentData || []).forEach(row => {
                     const t = String(row['Ticker'] || '').toUpperCase();

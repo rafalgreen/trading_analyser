@@ -157,61 +157,103 @@ def _exchange_suffix_ticker(line: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-def company_name_from_symbol_search_modal_text(blob: str, ticker: str) -> str:
-    """Wyciąga pełną nazwę firmy z tekstu pojedynczego wiersza listy Symbol Search (EN/PL UI)."""
+def parse_symbol_search_modal_blob(blob: str, ticker: str) -> Dict[str, str]:
+    """Wyciąga ``{name, exchange}`` z tekstu pojedynczego wiersza Symbol Search (EN/PL UI).
+
+    Pierwsza linia musi być dopasowana do `ticker` (sam ticker albo ``EXCH:TICKER``);
+    w przeciwnym razie zwraca puste pola. Najdłuższa nie-szumowa linia z literami
+    leci jako nazwa firmy. Giełda to pierwszy token z whitelisty
+    :data:`_SYMBOL_SEARCH_EXCH_UPPER` (np. ``"NYSE"``, ``"GPW"``) — może być na
+    osobnej linii albo w prefiksie tickera (``GPW:ATC``).
+    """
+    out = {"name": "", "exchange": ""}
     ticker_u = (ticker or "").strip().upper()
     if not ticker_u or not (blob or "").strip():
-        return ""
+        return out
     lines = [
         re.sub(r"\s+", " ", x.strip()) for x in blob.splitlines() if x.strip()
     ]
     if not lines:
-        return ""
+        return out
     first = lines[0]
     ticker_match = _first_line_open_ticker(first) == ticker_u or (
         _exchange_suffix_ticker(first) == ticker_u
     )
     if not ticker_match:
-        return ""
+        return out
+
+    # Giełda — preferujemy prefix w pierwszej linii ("GPW:ATC"), inaczej osobny token.
+    if ":" in first:
+        prefix = first.split(":", 1)[0].strip().upper()
+        if prefix in _SYMBOL_SEARCH_EXCH_UPPER:
+            out["exchange"] = prefix
+
     best = ""
     for line in lines[1:]:
+        lu = line.upper().strip()
+        if not out["exchange"] and lu in _SYMBOL_SEARCH_EXCH_UPPER:
+            out["exchange"] = lu
+            continue
         if _symbol_search_line_is_noise(line):
             continue
-        if line.upper().strip() == ticker_u:
+        if lu == ticker_u:
             continue
         if len(line) < 3 or not re.search(r"[A-Za-zÀ-ÖØ-öø-ÿ]", line):
             continue
         if len(line) > len(best):
             best = line.strip()
-    return best
+    out["name"] = best
+    return out
 
 
-def read_symbol_search_modal_company_name(page: Any, ticker: str) -> str:
-    """Czyta pierwszy sensowny wiersz nazwy z otwartego Symbol Search zanim wybrano Enter."""
+def company_name_from_symbol_search_modal_text(blob: str, ticker: str) -> str:
+    """Wyciąga pełną nazwę firmy z tekstu pojedynczego wiersza listy Symbol Search (EN/PL UI).
+
+    Cienki wrapper nad :func:`parse_symbol_search_modal_blob` — zwraca tylko
+    ``name`` (zachowane API dla testów i innych callerów).
+    """
+    return parse_symbol_search_modal_blob(blob, ticker)["name"]
+
+
+def read_symbol_search_modal_company_info(page: Any, ticker: str) -> Dict[str, str]:
+    """Czyta `{name, exchange}` z otwartego Symbol Search zanim wybrano Enter.
+
+    Iteruje po widocznych wierszach listy i bierze pierwszy, dla którego nazwa
+    firmy została rozpoznana. Giełda — z tego samego wiersza (jeśli była).
+    """
     tu = (ticker or "").strip().upper()
     if not tu:
-        return ""
+        return {"name": "", "exchange": ""}
     try:
         page.wait_for_selector(
             'div[data-role="list-item"]:visible',
             timeout=SYMBOL_SEARCH_LIST_WAIT_MS,
         )
     except Exception:
-        return ""
+        return {"name": "", "exchange": ""}
     try:
         items = page.locator('div[data-role="list-item"]:visible')
         n = min(items.count(), 25)
     except Exception:
-        return ""
+        return {"name": "", "exchange": ""}
     for i in range(n):
         try:
             blob = items.nth(i).inner_text(timeout=1500)
         except Exception:
             continue
-        name = company_name_from_symbol_search_modal_text(blob, tu)
-        if name:
-            return name
-    return ""
+        info = parse_symbol_search_modal_blob(blob, tu)
+        if info.get("name"):
+            return info
+    return {"name": "", "exchange": ""}
+
+
+def read_symbol_search_modal_company_name(page: Any, ticker: str) -> str:
+    """Czyta pierwszy sensowny wiersz nazwy z otwartego Symbol Search zanim wybrano Enter.
+
+    Zachowane dla wstecznej kompatybilności — używa
+    :func:`read_symbol_search_modal_company_info` i zwraca tylko nazwę.
+    """
+    return read_symbol_search_modal_company_info(page, ticker)["name"]
 
 
 def _configure_logging() -> None:
@@ -535,6 +577,67 @@ def resolve_company_name(
             return rest_name.strip()
         return ticker_u
     return "Nieznana"
+
+
+def _exchange_from_header_blob(blob: str) -> str:
+    """Z tekstu toolbaru/legendy znajduje pierwszy token z whitelisty giełd."""
+    if not blob:
+        return ""
+    for tok in re.findall(r"[A-Z]{2,8}", blob.upper()):
+        if tok in _SYMBOL_SEARCH_EXCH_UPPER:
+            return tok
+    return ""
+
+
+def resolve_exchange(
+    ticker: str,
+    *,
+    symbol_search_exchange: str = "",
+    header_blob: str = "",
+) -> str:
+    """Zwraca symbol giełdy (np. ``"NYSE"``) dla `ticker`.
+
+    Priorytet: symbol-search modal → prefix tickera (``GPW:ATC``) → header blob
+    (whitelist tokenów) → REST ``lookup_exchange`` (cached). Zwraca ``""`` gdy
+    żadne źródło nie da pewnej giełdy.
+    """
+    cand = (symbol_search_exchange or "").strip().upper()
+    if cand and cand in _SYMBOL_SEARCH_EXCH_UPPER:
+        logger.debug("resolve_exchange(%s) -> %s [src=symbol_search]", ticker, cand)
+        return cand
+
+    tk = (ticker or "").strip()
+    if ":" in tk:
+        prefix = tk.split(":", 1)[0].strip().upper()
+        if prefix in _SYMBOL_SEARCH_EXCH_UPPER:
+            logger.debug(
+                "resolve_exchange(%s) -> %s [src=ticker_prefix]", ticker, prefix
+            )
+            return prefix
+
+    from_header = _exchange_from_header_blob(header_blob or "")
+    if from_header:
+        logger.debug(
+            "resolve_exchange(%s) -> %s [src=header_blob]", ticker, from_header
+        )
+        return from_header
+
+    bare_ticker = tk.split(":", 1)[-1].strip()
+    if bare_ticker:
+        try:
+            from company_names import lookup_exchange as _lookup_rest_exch
+            rest_exch = (_lookup_rest_exch(bare_ticker) or "").strip().upper()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "resolve_exchange REST lookup failed for %s: %s", ticker, exc
+            )
+            rest_exch = ""
+        if rest_exch:
+            logger.debug(
+                "resolve_exchange(%s) -> %s [src=tv_rest]", ticker, rest_exch
+            )
+            return rest_exch
+    return ""
 
 
 def indicator_title_matches(title_text: str, ind_name: str) -> bool:
@@ -1004,12 +1107,17 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                     time.sleep(SLEEP_AFTER_MICRO_ACTION_S)
                     target_page.keyboard.type(ticker, delay=100)
                     time.sleep(SLEEP_AFTER_SMALL_ACTION_S)
-                    symbol_search_name = read_symbol_search_modal_company_name(
+                    symbol_search_info = read_symbol_search_modal_company_info(
                         target_page, ticker
                     )
+                    symbol_search_name = symbol_search_info.get("name", "")
+                    symbol_search_exchange = symbol_search_info.get("exchange", "")
                     if symbol_search_name:
                         logger.debug(
-                            "Symbol search: %s → %s", ticker, symbol_search_name
+                            "Symbol search: %s → %s (giełda: %s)",
+                            ticker,
+                            symbol_search_name,
+                            symbol_search_exchange or "?",
                         )
                     target_page.keyboard.press("Enter")
                     time.sleep(SLEEP_AFTER_TICKER_ENTER_S)
@@ -1035,6 +1143,7 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                         pass
 
                     company_name = "Nieznana"
+                    exchange = ""
                     current_price = ""
                     try:
                         title_text = target_page.title()
@@ -1071,6 +1180,16 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                             header_blob,
                             symbol_search_name,
                         )
+                        exchange = resolve_exchange(
+                            ticker,
+                            symbol_search_exchange=symbol_search_exchange,
+                            header_blob=" ".join(
+                                filter(
+                                    None,
+                                    [header_blob, title_text, legend_desc],
+                                )
+                            ),
+                        )
 
                         title_clean = (
                             title_text.split(" Wskaźnik")[0]
@@ -1090,7 +1209,10 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                         )
 
                     logger.info(
-                        "(Spółka: %s | Cena: %s)", company_name, current_price
+                        "(Spółka: %s | Giełda: %s | Cena: %s)",
+                        company_name,
+                        exchange or "?",
+                        current_price,
                     )
 
                     is_last_indicator = ind_idx == n_inds - 1
@@ -1146,6 +1268,7 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                         row_data = {
                             "Ticker": ticker,
                             "Company_Name": company_name,
+                            "Exchange": exchange,
                             "Current_Price": current_price,
                             "Interval": interval,
                             "Scrape_Status": "",
