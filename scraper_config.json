@@ -138,7 +138,7 @@
     "EWO",
     "DOV",
     "BOWP",
-    "TXTP",
+    "GPW:TXT",
     "GPW:KGH",
     "ALB",
     "CCJ",
@@ -183,6 +183,9 @@
     "HTS Panel",
     "MacD"
   ],
+  "indicator_search": {
+    "MacD": "CM_Ult_MacD_MTF"
+  },
   "auto_schedule": {
     "enabled": true,
     "hour": 8,

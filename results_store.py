@@ -221,7 +221,19 @@ def ticker_fully_done_in_csv(df, ticker: str, intervals, indicators) -> bool:
     return True
 
 
-def merge_existing_row_into_row_data(row_data: dict, erow) -> None:
+def _is_indicator_column(col: str) -> bool:
+    c = str(col)
+    if c in ("PCA_Values", "PCA_Value", "PCA_Color"):
+        return True
+    for prefix in ("HTS Panel_", "MacD_"):
+        if c.startswith(prefix):
+            return True
+    return False
+
+
+def merge_existing_row_into_row_data(
+    row_data: dict, erow, *, skip_indicator_merge: bool = False
+) -> None:
     if erow is None:
         return
     # Świeżo odczytane metadane z bieżącego runu (np. nazwa spółki)
@@ -236,12 +248,15 @@ def merge_existing_row_into_row_data(row_data: dict, erow) -> None:
         "Scrape_Error",
     }
     for col in erow.index:
-        if str(col) in preserve_cols:
+        c = str(col)
+        if c in preserve_cols:
+            continue
+        if skip_indicator_merge and _is_indicator_column(c):
             continue
         try:
             v = erow[col]
             if pd.notna(v):
-                row_data[str(col)] = v
+                row_data[c] = v
         except Exception:
             pass
 

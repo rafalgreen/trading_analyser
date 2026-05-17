@@ -815,6 +815,10 @@ body {
     grid-template-columns: 1fr 1fr;
 }
 
+.values-grid-3 {
+    grid-template-columns: 1fr 1fr;
+}
+
 .value-box {
     display: flex;
     flex-direction: column;

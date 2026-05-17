@@ -1380,6 +1380,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 const htsCrossNode = colClone.querySelector('.hts-cross');
                 setCrossTag(htsCrossNode, row['HTS Panel_Cross'] || 'Brak');
 
+                const htsTrendChangeRow = colClone.querySelector('.hts-trend-change-row');
+                const htsTrendChangeVal = row['HTS Panel_Trend_Change'] || '';
+                if (htsTrendChangeRow) {
+                    if (htsTrendChangeVal.trim()) {
+                        htsTrendChangeRow.classList.remove('hidden');
+                        const tcNode = htsTrendChangeRow.querySelector('.hts-trend-change');
+                        if (tcNode) tcNode.innerHTML = parseValueWithColor(htsTrendChangeVal);
+                    } else {
+                        htsTrendChangeRow.classList.add('hidden');
+                    }
+                }
+
                 colClone.querySelector('.hts-fast-high').innerHTML = parseValueWithColor(row['HTS Panel_Fast_High']);
                 colClone.querySelector('.hts-fast-low').innerHTML = parseValueWithColor(row['HTS Panel_Fast_Low']);
                 colClone.querySelector('.hts-slow-high').innerHTML = parseValueWithColor(row['HTS Panel_Slow_High']);
@@ -1392,12 +1404,24 @@ document.addEventListener('DOMContentLoaded', () => {
                 const macdCrossNode = colClone.querySelector('.macd-cross');
                 setCrossTag(macdCrossNode, row['MacD_Cross'] || 'Brak');
 
-                colClone.querySelector('.macd-fast').innerHTML = parseValueWithColor(row['MacD_Fast_High']);
-                colClone.querySelector('.macd-slow').innerHTML = parseValueWithColor(row['MacD_Slow_Low']); 
-                
-                if (row['MacD_Fast_Low']) colClone.querySelector('.macd-fast').innerHTML += ` <br/> ` + parseValueWithColor(row['MacD_Fast_Low']);
-                if (row['MacD_Slow_High']) {
-                     colClone.querySelector('.macd-slow').innerHTML = parseValueWithColor(row['MacD_Slow_High']) + ` <br/> ` + parseValueWithColor(row['MacD_Slow_Low']);
+                const macdLine = row['MacD_Line'] || row['MacD_Fast_High'];
+                const macdSignal = row['MacD_Signal'] || row['MacD_Slow_Low'];
+                const macdCrossVal = row['MacD_Cross_Value'] || '';
+
+                const macdLineNode = colClone.querySelector('.macd-line') || colClone.querySelector('.macd-fast');
+                const macdSignalNode = colClone.querySelector('.macd-signal') || colClone.querySelector('.macd-slow');
+                if (macdLineNode) macdLineNode.innerHTML = parseValueWithColor(macdLine);
+                if (macdSignalNode) macdSignalNode.innerHTML = parseValueWithColor(macdSignal);
+
+                const macdCrossValBox = colClone.querySelector('.macd-cross-value-box');
+                const macdCrossValNode = colClone.querySelector('.macd-cross-value');
+                if (macdCrossValBox && macdCrossValNode) {
+                    if (macdCrossVal.trim()) {
+                        macdCrossValBox.classList.remove('hidden');
+                        macdCrossValNode.innerHTML = parseValueWithColor(macdCrossVal);
+                    } else {
+                        macdCrossValBox.classList.add('hidden');
+                    }
                 }
 
                 // -- PCA Panel --
@@ -1470,6 +1494,8 @@ document.addEventListener('DOMContentLoaded', () => {
             node.classList.add('trend-up');
         } else if (low.includes('spadkowy') || low === 'down') {
             node.classList.add('trend-down');
+        } else if (low.includes('brak trendu') || low.includes('mieszany')) {
+            node.classList.add('trend-neutral');
         } else {
             node.classList.add('trend-neutral');
         }

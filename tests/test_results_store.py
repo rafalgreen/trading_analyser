@@ -163,6 +163,30 @@ def test_merge_existing_row_keeps_fresh_metadata():
     assert fresh["MacD_Trend"] == "Spadkowy"
 
 
+def test_merge_skip_indicator_merge_on_partial_refresh():
+    from results_store import merge_existing_row_into_row_data
+
+    fresh = {
+        "Ticker": "GPW:TXT",
+        "Interval": "1D",
+        "Company_Name": "Text S.A.",
+        "Current_Price": "40.28",
+    }
+    old = pd.Series(
+        {
+            "Ticker": "GPW:TXT",
+            "Interval": "1D",
+            "HTS Panel_Trend": "Wzrostowy",
+            "HTS Panel_Fast_High": "40,15 (Brak)",
+            "PCA_Values": "46,60 (Zielony)",
+        }
+    )
+    merge_existing_row_into_row_data(fresh, old, skip_indicator_merge=True)
+    assert fresh["Company_Name"] == "Text S.A."
+    assert "HTS Panel_Trend" not in fresh
+    assert "PCA_Values" not in fresh
+
+
 def test_tickers_with_no_data_detects_no_data_and_all_missing():
     from results_store import tickers_with_no_data
 

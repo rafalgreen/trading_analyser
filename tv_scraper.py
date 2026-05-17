@@ -315,26 +315,66 @@ def get_color_name(rgb_str):
     """Pomocnicza funkcja do nazywania podstawowych kolorów TradingView"""
     if not rgb_str:
         return "Brak"
-    if "242, 54, 69" in rgb_str or "red" in rgb_str.lower():
+    low = rgb_str.lower()
+    if (
+        "242, 54, 69" in rgb_str
+        or "255, 0, 0" in rgb_str
+        or "128, 0, 0" in rgb_str
+        or "red" in low
+    ):
         return "Czerwony"
-    if "0, 188, 212" in rgb_str or "blue" in rgb_str.lower():
+    if (
+        "0, 188, 212" in rgb_str
+        or "0, 255, 255" in rgb_str
+        or "0, 0, 255" in rgb_str
+        or "blue" in low
+        or "cyan" in low
+    ):
         return "Niebieski"
-    if "8, 153, 129" in rgb_str or "green" in rgb_str.lower():
+    if (
+        "8, 153, 129" in rgb_str
+        or "0, 255, 0" in rgb_str
+        or "green" in low
+    ):
         return "Zielony"
-    if "255, 170, 0" in rgb_str or "orange" in rgb_str.lower():
-        return "Pomarańczowy"
+    if (
+        "255, 170, 0" in rgb_str
+        or "255, 235, 59" in rgb_str
+        or "255, 255, 0" in rgb_str
+        or "orange" in low
+        or "yellow" in low
+    ):
+        return "Żółty" if "255, 255, 0" in rgb_str or "255, 235, 59" in rgb_str else "Pomarańczowy"
     return rgb_str
 
 
 def _to_float(text) -> Optional[float]:
-    """Parsuje liczby z TradingView: NBSP/tysięczne, przecinek dziesiętny, unicode minus."""
+    """Parsuje liczby z TradingView: PL/US separators, NBSP, unicode minus."""
     if text is None:
         return None
     s = str(text)
     s = re.sub(r"\s+", "", s)
-    s = s.replace("\u2212", "-").replace(",", ".")
+    s = s.replace("\u2212", "-").replace("'", "")
     if not s:
         return None
+
+    if "," in s and "." in s:
+        # Last separator is the decimal separator; the other one is thousands.
+        if s.rfind(".") > s.rfind(","):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        parts = s.split(",")
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            s = "".join(parts)
+        else:
+            s = s.replace(",", ".")
+    elif "." in s:
+        parts = s.split(".")
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            s = "".join(parts)
+
     try:
         return float(s)
     except (TypeError, ValueError):
@@ -712,10 +752,206 @@ def _wait_for_legend_indicator_ready(
     )
 
 
+def _macd_title_score(title_text: str) -> int:
+    """Wyższy wynik = lepsze dopasowanie do CM_Ult_MacD_MTF."""
+    tl = (title_text or "").lower()
+    if "ult" in tl and "mtf" in tl:
+        return 3
+    if "ult" in tl or "mtf" in tl:
+        return 2
+    if "macd" in tl:
+        return 1
+    return 0
+
+
+def _class_has_token(classes, token: str) -> bool:
+    return any(token in c for c in (classes or []))
+
+
+def _legend_style(val_el, title_el=None, item_el=None) -> str:
+    for el in (val_el, title_el, item_el):
+        if el is not None and el.get("style"):
+            return el.get("style", "")
+    if item_el is not None:
+        for child in item_el.find_all("div"):
+            if child.get("style"):
+                return child.get("style", "")
+    return ""
+
+
+def _legend_value_from_div(div, *, style: str = "", keep_empty: bool = False) -> Optional[dict]:
+    text = div.get_text(strip=True)
+    missing = not text or text == "\u2205"
+    if missing and not keep_empty:
+        return None
+    style = style or div.get("style", "")
+    return {
+        "text": "" if missing else text,
+        "color": get_color_name(style),
+        "missing": missing,
+    }
+
+
+def _normalize_legend_label(label: str) -> str:
+    return re.sub(r"\s+", " ", (label or "").strip()).lower()
+
+
+def _collect_legend_entries(
+    item, *, skip_zero: bool = False, keep_empty: bool = False
+) -> list:
+    """Zbiera wpisy legendy: etykieta (valueTitle) + wartość (valueValue) + kolor."""
+    entries: list = []
+    values_root = item.find(attrs={"data-qa-id": "legend-source-values"})
+    search_in = values_root if values_root is not None else item
+
+    value_items = [
+        d
+        for d in search_in.find_all("div")
+        if _class_has_token(d.get("class"), "valueItem")
+    ]
+    for val_item in value_items:
+        title_el = None
+        val_el = None
+        for child in val_item.find_all("div"):
+            if title_el is None and _class_has_token(child.get("class"), "valueTitle"):
+                title_el = child
+            if _class_has_token(child.get("class"), "valueValue"):
+                val_el = child
+                break
+        if val_el is None:
+            continue
+        raw = _legend_value_from_div(
+            val_el,
+            style=_legend_style(val_el, title_el, val_item),
+            keep_empty=keep_empty,
+        )
+        if raw is None:
+            continue
+        if skip_zero and not raw.get("missing") and raw["text"] in ("0", "0.00", "0,00"):
+            continue
+        label = title_el.get_text(strip=True) if title_el else ""
+        entries.append({"label": label, "text": raw["text"], "color": raw["color"]})
+        if raw.get("missing"):
+            entries[-1]["missing"] = True
+
+    if not entries:
+        for div in search_in.find_all("div"):
+            if not _class_has_token(div.get("class"), "valueValue"):
+                continue
+            raw = _legend_value_from_div(div, keep_empty=keep_empty)
+            if raw is None:
+                continue
+            if skip_zero and not raw.get("missing") and raw["text"] in ("0", "0.00", "0,00"):
+                continue
+            entries.append({"label": "", "text": raw["text"], "color": raw["color"]})
+            if raw.get("missing"):
+                entries[-1]["missing"] = True
+
+    if keep_empty:
+        return entries
+
+    deduped: list = []
+    for e in entries:
+        key = (_normalize_legend_label(e["label"]), e["text"])
+        replaced = False
+        for i, existing in enumerate(deduped):
+            if (_normalize_legend_label(existing["label"]), existing["text"]) != key:
+                continue
+            replaced = True
+            if existing["color"] == "Brak" and e["color"] != "Brak":
+                deduped[i] = e
+            break
+        if not replaced:
+            deduped.append(e)
+    return deduped
+
+
+def _entry_by_label_pattern(entries: list, *patterns: str) -> Optional[dict]:
+    for pat in patterns:
+        pl = re.sub(r"\s+", "", pat.lower())
+        for e in entries:
+            lab = re.sub(r"\s+", "", _normalize_legend_label(e.get("label", "")))
+            if not lab:
+                continue
+            if pl in lab or lab in pl:
+                return e
+    return None
+
+
+def _entry_has_value(entry: Optional[dict]) -> bool:
+    return bool(entry) and not entry.get("missing") and bool(str(entry.get("text", "")).strip())
+
+
+def _entry_at(entries: list, idx: int) -> Optional[dict]:
+    if idx >= len(entries):
+        return None
+    entry = entries[idx]
+    return entry if _entry_has_value(entry) else None
+
+
+def _entry_macd_line(entries: list) -> Optional[dict]:
+    for e in entries:
+        lab = _normalize_legend_label(e.get("label", ""))
+        if not lab:
+            continue
+        if "macd" not in lab:
+            continue
+        if any(x in lab for x in ("signal", "hist", "cross")):
+            continue
+        if not _entry_has_value(e):
+            continue
+        return e
+    return None
+
+
+def _trend_from_macd_color(color: str) -> str:
+    if color == "Zielony":
+        return "Wzrostowy"
+    if color == "Czerwony":
+        return "Spadkowy"
+    return "Brak trendu"
+
+
+def _trend_from_macd_signal(macd_f: float, signal_f: float) -> Optional[str]:
+    """Trend z pozycji linii MACD względem Signal (MACD powyżej Signal → byk)."""
+    if macd_f > signal_f:
+        return "Wzrostowy"
+    if macd_f < signal_f:
+        return "Spadkowy"
+    return None
+
+
+def _cross_from_color(color: str) -> str:
+    if color == "Zielony":
+        return "BULL CROSS"
+    if color == "Czerwony":
+        return "BEAR CROSS"
+    return "Brak Crossa"
+
+
+def _collect_legend_values(item, *, skip_zero: bool = False) -> list:
+    """Kompatybilność wsteczna: same wartości bez etykiet."""
+    return [
+        {"text": e["text"], "color": e["color"]}
+        for e in _collect_legend_entries(item, skip_zero=skip_zero)
+    ]
+
+
+def _indicator_search_query(
+    ind_name: str, indicator_search: Optional[Dict[str, str]] = None
+) -> str:
+    if indicator_search:
+        q = indicator_search.get(ind_name)
+        if q:
+            return str(q).strip()
+    return (ind_name or "").strip()
+
+
 def parse_indicators(html_content, indicators_to_find):
     """Pobiera i parsuje wartości wskaźników z html dla podanej listy nazw."""
     soup = BeautifulSoup(html_content, "lxml")
     legend_items = soup.find_all("div", attrs={"data-qa-id": "legend-source-item"})
+    macd_best_score = -1
     if logger.isEnabledFor(logging.DEBUG):
         titles_dbg = []
         for _it in legend_items:
@@ -749,8 +985,14 @@ def parse_indicators(html_content, indicators_to_find):
             try:
                 if ind_name == "PCA":
                     _parse_pca_block(item, results, ind_name)
+                elif (ind_name or "").strip().lower() == "macd":
+                    score = _macd_title_score(title_text)
+                    if score < macd_best_score:
+                        continue
+                    macd_best_score = score
+                    _parse_macd_block(item, results, ind_name)
                 else:
-                    _parse_hts_like_block(item, results, ind_name)
+                    _parse_hts_block(item, results, ind_name)
             except Exception as exc:
                 logger.warning("Błąd parsowania bloku %s: %s", ind_name, exc)
 
@@ -758,97 +1000,173 @@ def parse_indicators(html_content, indicators_to_find):
 
 
 def _parse_pca_block(item, results, ind_name: str) -> None:
-    values = []
-    for div in item.find_all("div"):
-        classes = div.get("class", [])
-        if any("valueValue" in c for c in classes) or any(
-            "valueItem" in c for c in classes
-        ):
-            text = div.get_text(strip=True)
-            style = div.get("style", "")
-            if text and text != "\u2205":
-                values.append({"text": text, "style": style})
-
+    values = [
+        e
+        for e in _collect_legend_entries(item, skip_zero=False)
+        if _to_float(e["text"]) is not None
+    ]
     if not values:
         return
-    last_val = values[-1]
+
+    colored_values = [v for v in values if v["color"] != "Brak"]
+    last_val = (colored_values or values)[-1]
     results["PCA_Value"] = last_val["text"]
-    results["PCA_Color"] = get_color_name(last_val["style"])
+    results["PCA_Color"] = last_val["color"]
     results[f"{ind_name}_Values"] = (
         f"{last_val['text']} ({results['PCA_Color']})"
     )
 
 
-def _parse_hts_like_block(item, results, ind_name: str) -> None:
-    values = []
-    values_root = item.find("div", attrs={"data-qa-id": "legend-source-values"})
-    search_roots = [values_root] if values_root else [item]
-    for root in search_roots:
-        if root is None:
-            continue
-        for div in root.find_all("div"):
-            classes = div.get("class", [])
-            if any("valueValue" in c for c in classes) or any(
-                "valueItem" in c for c in classes
-            ):
-                text = div.get_text(strip=True)
-                style = div.get("style", "")
-                if text and text not in ("\u2205", "0", "0.00", "0,00"):
-                    values.append({"text": text, "color": get_color_name(style)})
+def _hts_trend_and_cross(fh: float, fl: float, sh: float, sl: float) -> tuple:
+    """Trend i cross z geometrii wstęg Fast vs Slow."""
+    if fl > sh:
+        return (
+            "Wzrostowy",
+            "BULL CROSS (Wstęgi się przecięły w górę)",
+        )
+    if fh < sl:
+        return (
+            "Spadkowy",
+            "BEAR CROSS (Wstęgi się przecięły w dół)",
+        )
+    if fl < sh:
+        return ("Spadkowy", "Brak Crossa")
+    if fh > sl and fh > sh:
+        return ("Wzrostowy", "Brak Crossa")
+    return ("Brak trendu", "Brak Crossa")
 
-    dedup_values = []
-    for v in values:
-        if v not in dedup_values:
-            dedup_values.append(v)
 
-    if len(dedup_values) < 4:
-        str_vals = [f"{v['text']} ({v['color']})" for v in dedup_values]
+def _parse_hts_block(item, results, ind_name: str) -> None:
+    entries = _collect_legend_entries(item, skip_zero=False, keep_empty=True)
+
+    trend_change = _entry_by_label_pattern(entries, "trend change", "trendchange")
+    if _entry_has_value(trend_change):
+        results[f"{ind_name}_Trend_Change"] = _format_legend_value(trend_change)
+
+    fh_e = _entry_by_label_pattern(entries, "fast high", "fasthigh")
+    fl_e = _entry_by_label_pattern(entries, "fast low", "fastlow")
+    sh_e = _entry_by_label_pattern(entries, "slow high", "slowhigh")
+    sl_e = _entry_by_label_pattern(entries, "slow low", "slowlow")
+
+    slot_entries = [
+        e
+        for e in entries
+        if "trend" not in _normalize_legend_label(e.get("label", ""))
+    ]
+
+    if not all([fh_e, fl_e, sh_e, sl_e]):
+        if len(slot_entries) < 2:
+            str_vals = [f"{e['text']} ({e['color']})" for e in slot_entries]
+            results[f"{ind_name}_Values"] = (
+                " | ".join(str_vals) if str_vals else "Brak poprawnych danych"
+            )
+            return
+        positional = (slot_entries + [None, None, None, None])[:4]
+        fh_e, fl_e, sh_e, sl_e = positional
+
+    if _entry_has_value(fh_e):
+        results[f"{ind_name}_Fast_High"] = _format_legend_value(fh_e)
+    if _entry_has_value(fl_e):
+        results[f"{ind_name}_Fast_Low"] = _format_legend_value(fl_e)
+    if _entry_has_value(sh_e):
+        results[f"{ind_name}_Slow_High"] = _format_legend_value(sh_e)
+    if _entry_has_value(sl_e):
+        results[f"{ind_name}_Slow_Low"] = _format_legend_value(sl_e)
+
+    if not all(_entry_has_value(e) for e in (fh_e, fl_e, sh_e, sl_e)):
+        results[f"{ind_name}_Trend"] = "Brak trendu"
+        results[f"{ind_name}_Cross"] = "Brak Crossa"
+        return
+
+    fh = _to_float(fh_e["text"])
+    fl = _to_float(fl_e["text"])
+    sh = _to_float(sh_e["text"])
+    sl = _to_float(sl_e["text"])
+    if None in (fh, fl, sh, sl):
+        logger.debug(
+            "Nie udało się sparsować liczb dla %s: %s",
+            ind_name,
+            [fh_e["text"], fl_e["text"], sh_e["text"], sl_e["text"]],
+        )
+        results[f"{ind_name}_Trend"] = "Brak trendu"
+        results[f"{ind_name}_Cross"] = "Brak Crossa"
+        return
+
+    trend, cross_info = _hts_trend_and_cross(fh, fl, sh, sl)
+    results[f"{ind_name}_Trend"] = trend
+    results[f"{ind_name}_Cross"] = cross_info
+
+
+def _format_legend_value(raw: dict) -> str:
+    return f"{raw['text']} ({raw['color']})"
+
+
+def _parse_macd_block(item, results, ind_name: str) -> None:
+    """Parser CM_Ult_MacD_MTF: trend z koloru MACD, fallback na MACD vs Signal."""
+    entries = _collect_legend_entries(item, skip_zero=False, keep_empty=True)
+
+    signal_labeled = _entry_by_label_pattern(entries, "signal")
+    hist_labeled = _entry_by_label_pattern(entries, "hist", "histogram")
+    cross_labeled = _entry_by_label_pattern(entries, "cross")
+
+    line_raw = _entry_macd_line(entries) or _entry_at(entries, 0)
+    signal_raw = signal_labeled if _entry_has_value(signal_labeled) else _entry_at(entries, 1)
+    hist_raw = hist_labeled if _entry_has_value(hist_labeled) else _entry_at(entries, 2)
+    cross_raw = cross_labeled if _entry_has_value(cross_labeled) else _entry_at(entries, 3)
+
+    if line_raw is None:
+        str_vals = [f"{e['text']} ({e['color']})" for e in entries]
         results[f"{ind_name}_Values"] = (
             " | ".join(str_vals) if str_vals else "Brak poprawnych danych"
         )
         return
 
-    fh_raw, fl_raw, sh_raw, sl_raw = (
-        dedup_values[0],
-        dedup_values[1],
-        dedup_values[2],
-        dedup_values[3],
+    results[f"{ind_name}_Line"] = _format_legend_value(line_raw)
+    if _entry_has_value(signal_raw):
+        results[f"{ind_name}_Signal"] = _format_legend_value(signal_raw)
+    if _entry_has_value(hist_raw):
+        results[f"{ind_name}_Histogram"] = _format_legend_value(hist_raw)
+    if _entry_has_value(cross_raw):
+        results[f"{ind_name}_Cross_Value"] = _format_legend_value(cross_raw)
+
+    results[f"{ind_name}_Fast_High"] = _format_legend_value(line_raw)
+    results[f"{ind_name}_Fast_Low"] = (
+        _format_legend_value(hist_raw) if _entry_has_value(hist_raw) else _format_legend_value(line_raw)
     )
-    results[f"{ind_name}_Fast_High"] = f"{fh_raw['text']} ({fh_raw['color']})"
-    results[f"{ind_name}_Fast_Low"] = f"{fl_raw['text']} ({fl_raw['color']})"
-    results[f"{ind_name}_Slow_High"] = f"{sh_raw['text']} ({sh_raw['color']})"
-    results[f"{ind_name}_Slow_Low"] = f"{sl_raw['text']} ({sl_raw['color']})"
-
-    results[f"{ind_name}_Trend"] = (
-        "Wzrostowy" if fl_raw["color"] == "Niebieski" else "Spadkowy"
+    results[f"{ind_name}_Slow_High"] = (
+        _format_legend_value(cross_raw) if _entry_has_value(cross_raw) else _format_legend_value(signal_raw)
+        if _entry_has_value(signal_raw)
+        else _format_legend_value(line_raw)
+    )
+    results[f"{ind_name}_Slow_Low"] = (
+        _format_legend_value(signal_raw) if _entry_has_value(signal_raw) else _format_legend_value(line_raw)
     )
 
-    fh = _to_float(fh_raw["text"])
-    fl = _to_float(fl_raw["text"])
-    sh = _to_float(sh_raw["text"])
-    sl = _to_float(sl_raw["text"])
-    if None in (fh, fl, sh, sl):
-        logger.debug(
-            "Nie udało się sparsować liczb dla %s: %s",
-            ind_name,
-            [fh_raw["text"], fl_raw["text"], sh_raw["text"], sl_raw["text"]],
-        )
-        results[f"{ind_name}_Cross"] = "Brak Crossa"
-        return
+    macd_f = _to_float(line_raw["text"])
+    signal_f = _to_float(signal_raw["text"]) if signal_raw else None
+    trend = _trend_from_macd_color(line_raw["color"])
+    if trend == "Brak trendu" and macd_f is not None and signal_f is not None:
+        trend = _trend_from_macd_signal(macd_f, signal_f)
+    if trend is None:
+        trend = "Brak trendu"
 
-    cross_info = "Brak Crossa"
-    if fl > sh:
-        cross_info = "BULL CROSS (Wstęgi się przecięły w górę)"
-    elif fh < sl:
-        cross_info = "BEAR CROSS (Wstęgi się przecięły w dół)"
+    cross_info = _cross_from_color(cross_raw["color"]) if _entry_has_value(cross_raw) else "Brak Crossa"
+
+    results[f"{ind_name}_Trend"] = trend
     results[f"{ind_name}_Cross"] = cross_info
 
 
-def add_indicator_to_chart(target_page, ind_name: str, ticker: str) -> None:
+def add_indicator_to_chart(
+    target_page,
+    ind_name: str,
+    ticker: str,
+    indicator_search: Optional[Dict[str, str]] = None,
+) -> None:
     """Otwiera modal wskaźników, wybiera pierwszy wynik, zamyka modal."""
+    search_query = _indicator_search_query(ind_name, indicator_search)
     target_page.keyboard.press("/")
     time.sleep(SLEEP_AFTER_INDICATOR_MODAL_S)
-    target_page.keyboard.type(ind_name, delay=100)
+    target_page.keyboard.type(search_query, delay=100)
     time.sleep(SLEEP_AFTER_INDICATOR_QUERY_S)
     try:
         target_page.wait_for_selector(
@@ -896,8 +1214,43 @@ def remove_active_indicator(target_page, ind_name: str, ticker: str) -> None:
         )
 
 
-def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
+def _move_crosshair_off_chart(target_page) -> None:
+    """TradingView legend can show values under the last crosshair position.
+
+    Move the pointer away from the plot before reading DOM so legend values
+    fall back to the latest bar / right-side labels instead of a historical bar.
+    """
+    try:
+        target_page.keyboard.press("Escape")
+    except Exception:
+        pass
+    try:
+        viewport = target_page.viewport_size or {"width": 1280, "height": 720}
+        target_page.mouse.move(
+            max(10, min(40, int(viewport.get("width", 1280)) - 10)),
+            max(10, min(40, int(viewport.get("height", 720)) - 10)),
+        )
+        time.sleep(SLEEP_AFTER_MICRO_ACTION_S)
+    except Exception as exc:
+        logger.debug("Nie udało się odsunąć crosshair przed odczytem legendy: %s", exc)
+
+
+def run_scraper(
+    tickers,
+    intervals,
+    indicators,
+    port=9222,
+    is_partial=False,
+    indicator_search: Optional[Dict[str, str]] = None,
+):
     _configure_logging()
+    if indicator_search is None and os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                indicator_search = json.load(f).get("indicator_search") or {}
+        except Exception:
+            indicator_search = {}
+    indicator_search = indicator_search or {}
     # Use 127.0.0.1 (not "localhost"): on many systems localhost resolves to ::1 first,
     # while Chromium's CDP often listens only on IPv4 — then connect_over_cdp fails with ECONNREFUSED ::1:9222.
     cdp_url = f"http://127.0.0.1:{port}"
@@ -1070,7 +1423,9 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                     n_inds,
                 )
                 logger.info("Dodaję wskaźnik na wykres (raz na fazę): %s", ind_name)
-                add_indicator_to_chart(target_page, ind_name, ind_name)
+                add_indicator_to_chart(
+                    target_page, ind_name, ind_name, indicator_search
+                )
 
                 for ticker_idx, ticker in enumerate(tickers):
                     write_scraper_status(
@@ -1274,11 +1629,18 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                             "Scrape_Status": "",
                             "Scrape_Error": "",
                         }
-                        merge_existing_row_into_row_data(row_data, erow)
+                        merge_existing_row_into_row_data(
+                            row_data,
+                            erow,
+                            skip_indicator_merge=is_partial,
+                        )
 
-                        if erow is not None and row_has_indicator_data(
-                            erow, ind_name
-                        ):
+                        should_parse = (
+                            erow is None
+                            or not row_has_indicator_data(erow, ind_name)
+                            or is_partial
+                        )
+                        if not should_parse:
                             logger.info(
                                 "Pomijam wskaźnik %s — już zapisany w CSV dla %s/%s",
                                 ind_name,
@@ -1299,6 +1661,7 @@ def run_scraper(tickers, intervals, indicators, port=9222, is_partial=False):
                             )
                             time.sleep(SLEEP_AFTER_INDICATOR_COMPUTE_S)
                             _ensure_legend_expanded(target_page)
+                            _move_crosshair_off_chart(target_page)
                             html_content = target_page.content()
                             indicator_data = parse_indicators(
                                 html_content, [ind_name]
