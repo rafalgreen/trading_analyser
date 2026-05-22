@@ -1,3 +1,5 @@
+import csv
+
 import pytest
 
 
@@ -84,6 +86,7 @@ def test_wl_signal_visibility_for_ticker():
             "Scrape_Status": "OK",
             "PCA_Values": "10 (Niebieski)",
             "HTS Panel_Trend": "Wzrostowy",
+            "MacD_Line": "0.5 (Czerwony)",
             "MacD_Trend": "Spadkowy",
             "Interval": iv,
         }
@@ -145,3 +148,31 @@ def test_wl_signal_visibility_for_ticker():
         [full_interval("1D"), {**base_bad, "Interval": "1W"}],
         IND3,
     ) == {"daily": True, "weekly": False, "monthly": False}
+
+
+def test_resolve_no_data_tickers_matches_dashboard(app_env, monkeypatch):
+    """_resolve_no_data_tickers używa tej samej logiki co dashboard (Brak danych)."""
+    m, res, _dat = app_env
+    fields = ["Ticker", "Company_Name", "Interval", "PCA_Values", "Scrape_Status"]
+    fp = res / "tradingview_results_2026-05-22.csv"
+    with open(fp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({
+            "Ticker": "OK1",
+            "Company_Name": "Ok Inc",
+            "Interval": "1D",
+            "PCA_Values": "1 (Niebieski)",
+            "Scrape_Status": "OK",
+        })
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {
+            "tickers": ["OK1", "MISSING", "GPW:BAD"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        },
+    )
+    out = m._resolve_no_data_tickers(None, None)
+    assert set(out) == {"MISSING", "GPW:BAD"}

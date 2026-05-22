@@ -84,6 +84,34 @@ def test_row_has_indicator_data_filters_placeholders():
     assert row_has_indicator_data(row_skipped_ok, "PCA") is False
 
 
+def test_row_has_indicator_data_macd_requires_macd_line_present():
+    """MacD: sam ``MacD_Trend`` to za mało — bez ``MacD_Line`` zwraca False."""
+    from results_store import row_has_indicator_data
+
+    row_trend_only = pd.Series({"MacD_Trend": "Wzrostowy", "MacD_Line": ""})
+    row_no_line_col = pd.Series({"MacD_Trend": "Wzrostowy"})
+    row_line_placeholder = pd.Series(
+        {"MacD_Line": "Brak danych na wykresie", "MacD_Trend": "Wzrostowy"}
+    )
+
+    assert row_has_indicator_data(row_trend_only, "MacD") is False
+    assert row_has_indicator_data(row_no_line_col, "MacD") is False
+    assert row_has_indicator_data(row_line_placeholder, "MacD") is False
+
+
+def test_row_has_indicator_data_macd_line_value_true():
+    """Niepuste ``MacD_Line`` (np. ``0.123``) wystarczy by uznać dane MacD."""
+    from results_store import row_has_indicator_data
+
+    row_simple = pd.Series({"MacD_Line": "0.123"})
+    row_formatted = pd.Series(
+        {"MacD_Line": "0.123 (Zielony)", "MacD_Trend": "Wzrostowy"}
+    )
+
+    assert row_has_indicator_data(row_simple, "MacD") is True
+    assert row_has_indicator_data(row_formatted, "MacD") is True
+
+
 def test_load_results_dataframe_missing_returns_none(tmp_path: Path):
     from results_store import load_results_dataframe
 
@@ -222,3 +250,279 @@ def test_tickers_with_no_data_detects_no_data_and_all_missing():
     )
     out = tickers_with_no_data(df, ["PCA", "HTS Panel", "MacD"])
     assert out == ["AAA", "BBB"]
+
+
+def test_ticker_rows_show_no_data_matches_dashboard_rules():
+    from results_store import config_tickers_with_no_data, ticker_rows_show_no_data
+
+    placeholder_rows = [
+        {"Ticker": "NEVER", "Interval": "1D", "Scrape_Status": "", "All_Indicators_Missing": True},
+        {"Ticker": "NEVER", "Interval": "1W", "Scrape_Status": "", "All_Indicators_Missing": True},
+    ]
+    assert ticker_rows_show_no_data([]) is True
+    assert ticker_rows_show_no_data(placeholder_rows) is True
+
+    ok_rows = [
+        {"Ticker": "OK", "Interval": "1D", "Scrape_Status": "OK", "All_Indicators_Missing": False},
+    ]
+    assert ticker_rows_show_no_data(ok_rows) is False
+
+    skipped_rows = [
+        {"Ticker": "SKIP", "Interval": "-", "Scrape_Status": "SKIPPED", "All_Indicators_Missing": True},
+    ]
+    assert ticker_rows_show_no_data(skipped_rows) is False
+
+    no_data_rows = [
+        {"Ticker": "BAD", "Interval": "1D", "Scrape_Status": "NO_DATA", "All_Indicators_Missing": True},
+    ]
+    assert ticker_rows_show_no_data(no_data_rows) is True
+
+    flat = placeholder_rows + ok_rows + no_data_rows
+    assert config_tickers_with_no_data(["NEVER", "OK", "BAD", "MISSING"], flat) == [
+        "NEVER",
+        "BAD",
+        "MISSING",
+    ]
+
+
+def test_row_has_indicator_data_macd_requires_line():
+    """MacD: sam Trend/Cross bez MacD_Line liczy się jako brak danych."""
+    from results_store import row_has_indicator_data
+
+    row_ok = pd.Series({"MacD_Line": "0.48 (Czerwony)", "MacD_Trend": "Spadkowy"})
+    row_empty_line = pd.Series({"MacD_Trend": "Spadkowy", "MacD_Cross": "BEAR CROSS"})
+    row_placeholder = pd.Series({"MacD_Line": "Brak danych na wykresie"})
+    assert row_has_indicator_data(row_ok, "MacD") is True
+    assert row_has_indicator_data(row_empty_line, "MacD") is False
+    assert row_has_indicator_data(row_placeholder, "MacD") is False
+
+
+def test_save_and_load_fundamentals_roundtrip(tmp_path: Path):
+    from results_store import (
+        FUNDAMENTALS_COLUMNS,
+        get_fundamentals_for_ticker,
+        load_fundamentals_dataframe,
+        save_fundamentals_row,
+    )
+
+    path = tmp_path / "fundamentals.csv"
+    save_fundamentals_row(
+        {
+            "Ticker": "AAPL",
+            "Fund_PE": 12.5,
+            "Fund_PB": 2.0,
+            "Fund_EV_EBITDA": 8.0,
+            "Fund_ROE": 0.15,
+            "Fund_NetMargin": 0.10,
+            "Fund_DE": 0.4,
+            "Fund_FCF": 1.2e9,
+            "Fund_Source": "yfinance",
+            "Fund_Updated_At": "2026-05-22T10:00:00Z",
+        },
+        path=str(path),
+    )
+
+    df = load_fundamentals_dataframe(str(path))
+    assert list(df.columns)[: len(FUNDAMENTALS_COLUMNS)] == FUNDAMENTALS_COLUMNS
+    assert len(df) == 1
+    assert df.iloc[0]["Ticker"] == "AAPL"
+
+    one = get_fundamentals_for_ticker("AAPL", path=str(path))
+    assert one is not None
+    assert one["Fund_PE"] == pytest.approx(12.5)
+    assert one["Fund_Source"] == "yfinance"
+    assert one["Fund_Updated_At"] == "2026-05-22T10:00:00Z"
+
+
+def test_save_fundamentals_row_upsert_overwrites(tmp_path: Path):
+    from results_store import (
+        get_fundamentals_for_ticker,
+        load_fundamentals_dataframe,
+        save_fundamentals_row,
+    )
+
+    path = tmp_path / "fundamentals.csv"
+    save_fundamentals_row(
+        {
+            "Ticker": "AAPL",
+            "Fund_PE": 12.5,
+            "Fund_Source": "yfinance",
+            "Fund_Updated_At": "2026-05-22T10:00:00Z",
+        },
+        path=str(path),
+    )
+    save_fundamentals_row(
+        {
+            "Ticker": "AAPL",
+            "Fund_PE": 13.0,
+            "Fund_PB": 2.5,
+            "Fund_Source": "yfinance",
+            "Fund_Updated_At": "2026-05-23T10:00:00Z",
+        },
+        path=str(path),
+    )
+
+    df = load_fundamentals_dataframe(str(path))
+    assert len(df) == 1, "upsert nie powinien duplikować tickera"
+
+    one = get_fundamentals_for_ticker("AAPL", path=str(path))
+    assert one is not None
+    assert one["Fund_PE"] == pytest.approx(13.0)
+    assert one["Fund_PB"] == pytest.approx(2.5)
+    assert one["Fund_Updated_At"] == "2026-05-23T10:00:00Z"
+
+
+def test_save_fundamentals_row_handles_none_values(tmp_path: Path):
+    from results_store import (
+        get_fundamentals_for_ticker,
+        save_fundamentals_row,
+    )
+
+    path = tmp_path / "fundamentals.csv"
+    save_fundamentals_row(
+        {
+            "Ticker": "BTCUSDT",
+            "Fund_PE": None,
+            "Fund_PB": None,
+            "Fund_EV_EBITDA": None,
+            "Fund_ROE": None,
+            "Fund_NetMargin": None,
+            "Fund_DE": None,
+            "Fund_FCF": None,
+            "Fund_Source": "none",
+            "Fund_Updated_At": "2026-05-22T10:00:00Z",
+        },
+        path=str(path),
+    )
+
+    one = get_fundamentals_for_ticker("BTCUSDT", path=str(path))
+    assert one is not None
+    assert one["Fund_PE"] is None
+    assert one["Fund_Source"] == "none"
+
+
+def test_get_fundamentals_for_ticker_returns_none_when_missing(tmp_path: Path):
+    from results_store import (
+        get_fundamentals_for_ticker,
+        save_fundamentals_row,
+    )
+
+    path = tmp_path / "fundamentals.csv"
+    save_fundamentals_row(
+        {"Ticker": "AAPL", "Fund_PE": 1.0, "Fund_Source": "yfinance"},
+        path=str(path),
+    )
+
+    assert get_fundamentals_for_ticker("MSFT", path=str(path)) is None
+    assert get_fundamentals_for_ticker("", path=str(path)) is None
+    # Brak pliku — None
+    assert get_fundamentals_for_ticker("AAPL", path=str(tmp_path / "missing.csv")) is None
+
+
+def test_row_skipped_for_dashboard_allows_no_data_with_values():
+    from results_store import normalize_served_scrape_status, row_skipped_for_dashboard
+
+    indicators = ["PCA", "HTS Panel", "MacD"]
+    alb_like = {
+        "Ticker": "ALB",
+        "Interval": "1D",
+        "Scrape_Status": "NO_DATA",
+        "Scrape_Error": "Brak danych wskaźników na wykresie",
+        "PCA_Values": "22.43 (Niebieski)",
+        "HTS Panel_Fast_High": "186.12 (Niebieski)",
+        "HTS Panel_Trend": "Wzrostowy",
+        "MacD_Line": "−3.88 (Czerwony)",
+    }
+    assert row_skipped_for_dashboard(alb_like, indicators) is False
+    normalized = normalize_served_scrape_status(alb_like, indicators)
+    assert normalized["Scrape_Status"] == "OK"
+    assert normalized["Scrape_Error"] == ""
+
+    empty_no_data = {
+        "Ticker": "BAD",
+        "Interval": "1D",
+        "Scrape_Status": "NO_DATA",
+        "PCA_Values": "",
+        "HTS Panel_Values": "Brak danych na wykresie",
+        "MacD_Line": "",
+    }
+    assert row_skipped_for_dashboard(empty_no_data, indicators) is True
+
+    partial_mid_scrape = {
+        "Ticker": "BTCUSDT",
+        "Interval": "1D",
+        "Scrape_Status": "",
+        "PCA_Values": "31.73 (color: rgb(0, 184, 70);)",
+        "MacD_Line": "1,005.89 (Czerwony)",
+    }
+    assert row_skipped_for_dashboard(partial_mid_scrape, indicators) is True
+
+
+def test_row_interval_complete_accepts_no_data_with_all_indicators():
+    from results_store import row_interval_complete
+
+    indicators = ["PCA", "HTS Panel", "MacD"]
+    row = pd.Series(
+        {
+            "Scrape_Status": "NO_DATA",
+            "PCA_Values": "31.73 (Niebieski)",
+            "HTS Panel_Trend": "Spadkowy",
+            "HTS Panel_Fast_High": "77,613.93 (Niebieski)",
+            "MacD_Line": "1,005.89 (Czerwony)",
+        }
+    )
+    assert row_interval_complete(row, indicators) is True
+
+
+def test_merge_indicator_into_row_copies_hts_only():
+    from results_store import merge_indicator_into_row
+
+    target = {
+        "Ticker": "BTCUSDT",
+        "Interval": "1D",
+        "PCA_Values": "20 (Zielony)",
+        "MacD_Line": "0.5 (Czerwony)",
+    }
+    source = {
+        "HTS Panel_Trend": "Wzrostowy",
+        "HTS Panel_Fast_High": "90,464.39 (Niebieski)",
+        "PCA_Values": "99 (Czerwony)",
+    }
+    merge_indicator_into_row(target, source, "HTS Panel")
+    assert target["HTS Panel_Trend"] == "Wzrostowy"
+    assert target["PCA_Values"] == "20 (Zielony)"
+
+
+def test_config_tickers_with_no_data_flags_stale_and_partial():
+    from results_store import config_tickers_with_no_data
+
+    flat = [
+        {
+            "Ticker": "BTCUSDT",
+            "Interval": "1D",
+            "Last_Refresh": "2026-05-18",
+            "Missing_Indicators": [],
+            "Scrape_Status": "OK",
+        },
+        {
+            "Ticker": "PARTIAL",
+            "Interval": "1D",
+            "Last_Refresh": "2026-05-22",
+            "Missing_Indicators": ["HTS Panel"],
+            "Scrape_Status": "OK",
+        },
+        {
+            "Ticker": "FRESH",
+            "Interval": "1D",
+            "Last_Refresh": "2026-05-22",
+            "Missing_Indicators": [],
+            "Scrape_Status": "OK",
+        },
+    ]
+    out = config_tickers_with_no_data(
+        ["BTCUSDT", "PARTIAL", "FRESH", "NEVER"],
+        flat,
+        latest_scrape_date="2026-05-22",
+        tickers_in_latest_csv=["FRESH", "PARTIAL"],
+    )
+    assert set(out) == {"BTCUSDT", "PARTIAL", "NEVER"}

@@ -254,6 +254,41 @@ def _fetch_matches(ticker: str) -> list:
     return out
 
 
+def fetch_symbol_matches(ticker: str) -> list:
+    """Return all TV symbol-search matches for ``ticker`` (any exchange).
+
+    Each element: ``{"symbol": "SSE:601088", "exchange": "SSE", "description": "..."}``.
+    Never raises.
+    """
+    key = _ticker_key(ticker)
+    if not key:
+        return []
+
+    cache_key = _matches_cache_key(key)
+    with _lock:
+        cache = _load_cache()
+        entry = cache.get(cache_key)
+        now = time.time()
+        cached_matches = None
+        if isinstance(entry, dict):
+            ts = float(entry.get("ts") or 0.0)
+            cm = entry.get("matches")
+            if isinstance(cm, list):
+                if cm or (now - ts) < _NEGATIVE_RETRY_AFTER_S:
+                    cached_matches = cm
+
+    if cached_matches is None:
+        matches = _fetch_matches(key)
+        with _lock:
+            cache = _load_cache()
+            cache[cache_key] = {"matches": matches, "ts": time.time()}
+            _save_cache()
+    else:
+        matches = cached_matches
+
+    return [m for m in matches if isinstance(m, dict) and m.get("symbol")]
+
+
 def lookup_symbol_match(ticker: str, exchanges) -> list:
     """Zwraca listę dopasowań dla ``ticker`` ograniczoną do giełd z ``exchanges``.
 

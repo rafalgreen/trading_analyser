@@ -67,6 +67,7 @@ body {
     position: fixed;
     height: 100vh;
     z-index: 10;
+    overflow-x: hidden;
 }
 
 .sidebar-header {
@@ -93,8 +94,9 @@ body {
 /* Sidebar Navigation */
 .sidebar-nav {
     display: flex;
+    flex-direction: column;
     padding: 16px 16px 0;
-    gap: 8px;
+    gap: 6px;
     border-bottom: 1px solid var(--border-color);
     padding-bottom: 16px;
 }
@@ -102,18 +104,23 @@ body {
 .nav-link {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 8px;
-    padding: 9px 14px;
+    padding: 9px 12px;
     color: var(--text-secondary);
     text-decoration: none;
     font-weight: 600;
-    font-size: 0.9rem;
+    font-size: 0.875rem;
     border: 1px solid transparent;
     border-radius: 10px;
     transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-    flex: 1;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     min-height: 40px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 .nav-link:hover {
@@ -133,6 +140,7 @@ body {
 
 .nav-link i {
     font-size: 18px;
+    flex-shrink: 0;
 }
 
 .history-section {
@@ -370,6 +378,22 @@ body {
     width: 100%;
 }
 
+.chart-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.chart-empty i {
+    font-size: 36px;
+}
+
 /* Chart Interval Toggle */
 .chart-interval-toggle {
     display: flex;
@@ -545,6 +569,24 @@ body {
 
 .ticker-card.collapsed .card-body {
     display: none;
+}
+
+.card-fundamentals {
+    padding: 0 24px 16px;
+}
+
+.ticker-card:not(.collapsed) .card-fundamentals {
+    padding-top: 0;
+}
+
+.ticker-card:not(.collapsed) .card-fundamentals .fundamentals-section {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.ticker-card:not(.collapsed) .card-body {
+    padding-top: 0;
 }
 
 .ticker-card:not(.collapsed) .card-header {
@@ -1999,6 +2041,61 @@ input[type="text"]:focus {
     animation: spinLoader 0.85s linear infinite;
 }
 
+.card-rescrape-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.card-rescrape-menu-btn {
+    width: 22px;
+    font-size: 12px;
+}
+
+.card-rescrape-menu,
+.scraper-dropdown-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 168px;
+    background: var(--bg-secondary, #1a1f2e);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: 6px;
+    z-index: 40;
+}
+
+.card-rescrape-menu button,
+.scraper-dropdown-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.card-rescrape-menu button:hover,
+.scraper-dropdown-menu button:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.scraper-no-data-menu-wrap {
+    position: relative;
+    display: inline-flex;
+}
+
+.scraper-no-data-menu-wrap .btn-icon-only {
+    min-width: 36px;
+    padding-inline: 10px;
+}
+
 /* Modal (history chart) */
 .modal-overlay {
     position: fixed;
@@ -2295,7 +2392,15 @@ input[type="text"]:focus {
 }
 
 .repair-row.no-match {
+    opacity: 0.85;
+}
+
+.repair-row.no-match.skipped {
     opacity: 0.55;
+}
+
+.repair-row.has-other-match {
+    border-color: rgba(251, 191, 36, 0.35);
 }
 
 .repair-row input[type="checkbox"] {
@@ -2396,6 +2501,55 @@ input[type="text"]:focus {
     cursor: pointer;
 }
 
+.repair-manual-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.repair-manual-input {
+    flex: 1;
+    min-width: 180px;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: inherit;
+}
+
+.repair-manual-input:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+}
+
+.repair-edit-btn {
+    font-size: 0.8rem;
+    padding: 4px 8px;
+    white-space: nowrap;
+}
+
+.repair-row-note {
+    line-height: 1.35;
+}
+
+.repair-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.repair-row.has-other-match {
+    border-color: rgba(251, 191, 36, 0.35);
+}
+
+.repair-row.no-match.skipped {
+    opacity: 0.55;
+}
+
 /* ---------- Pending run modal (Wznów / Od nowa / Anuluj) ---------- */
 .pending-run-meta {
     margin: 4px 0 14px 0;
@@ -2434,5 +2588,80 @@ input[type="text"]:focus {
 .pending-run-actions {
     flex-wrap: wrap;
     gap: 8px;
+}
+
+.chart-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.chart-metric-select {
+    min-width: 160px;
+}
+
+.fundamentals-section {
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-color, rgba(255,255,255,0.08));
+}
+
+.fundamentals-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 10px 14px;
+    margin-top: 8px;
+}
+
+.fund-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.fund-item .label {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.fund-item .fund-label[title] {
+    cursor: help;
+    border-bottom: 1px dotted rgba(148, 163, 184, 0.45);
+    width: fit-content;
+}
+
+.fund-item .value {
+    font-size: 0.92rem;
+    font-weight: 600;
+}
+
+.fund-updated-at {
+    margin-top: 8px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.card-last-refresh {
+    display: block;
+    font-size: 0.68rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.ticker-card.card-stale {
+    border-color: rgba(239, 68, 68, 0.45);
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.15);
+}
+
+.ticker-card.card-stale .card-header {
+    background: rgba(239, 68, 68, 0.06);
+}
+
+.history-metric-row select {
+    min-width: 160px;
 }
 

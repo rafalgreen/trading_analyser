@@ -95,22 +95,32 @@ Start aplikacji (uvicorn):
 
 ## Panel web — funkcjonalność
 
+Dashboard pokazuje **zawsze wszystkie tickery z konfiguracji** — bez wyboru daty z sidebara. Dla każdego tickera backend (`GET /api/dashboard`) łączy najnowszy wiersz per interwał (`1D` / `1W` / `1M`) z historycznych plików `results/tradingview_results_*.csv`, dołącza `Last_Refresh` (data pliku źródłowego) oraz fundamentale z `results/fundamentals.csv`.
+
 ### Karty tickerów (widok główny)
 
-Dla każdego tickera z wybranego pliku wynikowego generowana jest karta z ikonami akcji po prawej stronie nagłówka:
+Dla każdego tickera generowana jest karta z ikonami akcji po prawej stronie nagłówka:
 
-- 🔄 **odśwież** — zleca ponowne pobranie tylko tego tickera (`POST /api/scraper/run` z `tickers=[ticker]`). Spinner gaśnie po zakończeniu runu lub po 60 s bezpiecznika.
-- 🕘 **historia** — modal z wykresem historycznym PCA dla wybranego interwału (`1D` / `1W` / `1M`), złączony z danych wszystkich dostępnych plików wynikowych.
-- ✏️ **zmiana nazwy** — modal do zmiany symbolu tickera w konfiguracji (np. gdy TradingView rozpoznaje go pod innym zapisem). Stara nazwa znika z bieżącego widoku (ukrywana w `localStorage`), nowy symbol jest automatycznie zlecany do pobrania.
+- 🔄 **odśwież** — zleca ponowne pobranie techniki (`POST /api/scraper/run`) **oraz** fundamentów (`POST /api/fundamentals/refresh`) dla tego tickera.
+- 🕘 **historia** — modal z wykresem historycznym wybranego wskaźnika (PCA, MacD Line/Histogram, Fund P/E, P/B, EV/EBITDA, ROE, FCF) dla interwału `1D` / `1W` / `1M` (fundamentale bez filtra interwału).
+- ✏️ **zmiana nazwy** — modal do zmiany symbolu tickera w konfiguracji.
 
-Po każdej karcie widać trzy kolumny interwałów (`1D`, `1W`, `1M`) z sekcjami dla każdego wskaźnika z konfiguracji. Jeśli brakuje danych dla konkretnego wskaźnika / interwału, pojawia się żółty banner „Brak danych dla: …", a jeśli cały ticker nie ma danych — dodatkowo baner „⚠ Brak danych" z podpowiedzią żeby sprawdzić zapis symbolu lub zmienić nazwę. Diagnostyka jest liczona niezależnie od kolumny `Scrape_Status` (`/api/results/{date_id}` zwraca pola `Missing_Indicators` oraz `All_Indicators_Missing`).
+Każda karta zawiera:
+
+- sekcję **Fundamentale** (P/E, P/B, EV/EBITDA, ROE, Net Margin, D/E, FCF) — wspólna dla całej karty; najedź na etykietę wskaźnika, aby zobaczyć krótki opis (tooltip),
+- trzy kolumny interwałów z sekcjami HTS / MacD / PCA,
+- **`Ostatnio: …`** per interwał (timestamp `Last_Refresh`).
+
+Karta jest podświetlona na czerwono, gdy żaden interwał nie był odświeżany dłużej niż **24 h**.
 
 Na górze widoku:
 
+- **Filtr interwału** — `1D` / `1W` / `1M` / wszystkie.
 - **Pasek wyszukiwania** — filtrowanie po tickerze / nazwie spółki.
-- **Sortowanie** — domyślnie **„Problemy najpierw"**: na górze są stare symbole z CSV nieobecne w configu, potem tickery `SKIPPED`, `NO_DATA` / wszystkie wskaźniki brakujące, częściowo niekompletne i kompletne dane. W ramach grup UI sortuje po liczbie braków, sygnale/PCA dla aktualnego interwału i tickerze. Dostępne są też sorty po PCA, consensus strategii i nazwie tickera.
-- **Licznik rekordów** — pokazuje liczbę widocznych / wszystkich wierszy i ewentualnie „N ukrytych po zmianie nazwy · (pokaż)" by przywrócić ukryte karty.
-- **Wskaźnik świeżości danych** — kropka kolorowa + wiek pliku („dzisiaj 08:12", „wczoraj", „7 dni temu").
+- **Sortowanie** — domyślnie „Problemy najpierw", plus PCA, MacD Line, P/E, ROE, FCF, consensus i ticker A→Z.
+- **Wykres dashboardu** — dropdown metryki (PCA, MacD, HTS, fundamentale); dla fundamentów ukryty jest przełącznik interwału.
+
+Diagnostyka braków wskaźników: `/api/results/{date_id}` i `/api/dashboard` zwracają `Missing_Indicators` oraz `All_Indicators_Missing`.
 
 ### Zmiana nazwy tickera (`POST /api/tickers/rename`)
 
@@ -209,11 +219,35 @@ Konfiguracja domyślna jest w **`scraper_config.json`**: lista **tickers**, **in
 
 ## Wyniki
 
-Pliki zapisywane są w katalogu **`results/`**, nazwa w stylu:
+Pliki techniczne zapisywane są w katalogu **`results/`**, nazwa w stylu:
 
 `tradingview_results_YYYY-MM-DD.csv`
 
-Kolejność kolumn jest stała na początku każdego wiersza (meta), potem kolumny wskaźników z konfiguracji:
+Fundamentale (osobny cykl odświeżania) trafiają do:
+
+`results/fundamentals.csv`
+
+— jeden wiersz na ticker: `Fund_PE`, `Fund_PB`, `Fund_EV_EBITDA`, `Fund_ROE`, `Fund_NetMargin`, `Fund_DE`, `Fund_FCF`, `Fund_Source`, `Fund_Updated_At`.
+
+### Fundamentale
+
+Moduł `fundamentals.py` pobiera dane przez **yfinance** (`Ticker.info`). Mapowanie symboli:
+
+- `GPW:XXX` → `XXX.WA`
+- `NASDAQ:XXX` / `NYSE:XXX` → `XXX`
+- krypto (`*USDT`, `*USD`, `BINANCE:*`, …) → `N/A`
+
+Dla GPW, gdy yfinance zwraca puste pola, scraper może użyć fallbacku **TradingView Financials** (Playwright) podczas pełnego runu.
+
+API:
+
+- `GET /api/fundamentals` — lista wszystkich
+- `GET /api/fundamentals/{ticker}` — jeden ticker
+- `POST /api/fundamentals/refresh` — odświeżenie yfinance (body: `{tickers:[...]}` lub `{all:true}`)
+
+Cache JSON: `data/.fundamentals_cache.json` (TTL domyślnie 24 h, konfiguracja w `scraper_config.json` → sekcja `fundamentals`).
+
+Kolejność kolumn w plikach technicznych jest stała na początku każdego wiersza (meta), potem kolumny wskaźników z konfiguracji:
 
 1. **`Ticker`**, **`Company_Name`**, **`Current_Price`**, **`Interval`**
 2. **`Scrape_Status`**, **`Scrape_Error`**

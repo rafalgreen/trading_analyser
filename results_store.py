@@ -13,7 +13,7 @@ import logging
 import os
 import re
 import tempfile
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import pandas as pd
 
@@ -87,6 +87,17 @@ def row_has_indicator_data(row, ind_name: str) -> bool:
     if row is None:
         return False
     ind_name = (ind_name or "").strip()
+    # MacD wymaga twardo niepustego MacD_Line — sam Trend/Cross to za mało,
+    # bo to potencjalnie residual z innej fazy wskaźnika.
+    if ind_name.lower() == "macd":
+        line_val = None
+        try:
+            line_val = row.get("MacD_Line")  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            line_val = None
+        if line_val is None and hasattr(row, "index") and "MacD_Line" in row.index:
+            line_val = row["MacD_Line"]
+        return value_counts_as_indicator_data(line_val, "MacD_Line")
     for col in row.index:
         c = str(col)
         if c in ("Scrape_Status", "Scrape_Error"):
@@ -104,8 +115,52 @@ def row_has_indicator_data(row, ind_name: str) -> bool:
     return False
 
 
+def row_has_all_configured_indicators(row, indicators: Iterable[str]) -> bool:
+    """True when every configured indicator has parseable data in the row."""
+    inds = [str(i).strip() for i in indicators or [] if str(i).strip()]
+    if not inds:
+        return False
+    ser = row if hasattr(row, "index") else pd.Series(row)
+    return all(row_has_indicator_data(ser, ind) for ind in inds)
+
+
+def row_skipped_for_dashboard(row, indicators: Iterable[str]) -> bool:
+    """True when a CSV row must not supply technical data to the dashboard.
+
+    Rows are used only when all configured indicators have parseable values.
+    Legacy ``Scrape_Status=NO_DATA`` rows with full indicator payloads are kept;
+    partial rows (including mid-scrape ``Scrape_Status=""`` saves) are skipped so
+    an older complete row or per-indicator merge can supply missing fields.
+    """
+    if row is None:
+        return True
+    try:
+        raw = row.get("Scrape_Status") if hasattr(row, "get") else None  # type: ignore[union-attr]
+    except (AttributeError, TypeError):
+        raw = None
+    if raw is None and hasattr(row, "index") and "Scrape_Status" in row.index:
+        raw = row["Scrape_Status"]
+    st = str(raw or "").strip().upper()
+    if st == "SKIPPED":
+        return True
+    return not row_has_all_configured_indicators(row, indicators)
+
+
+def normalize_served_scrape_status(row: dict, indicators: Iterable[str]) -> dict:
+    """Fix legacy rows marked NO_DATA despite having indicator columns populated."""
+    out = dict(row)
+    st = str(out.get("Scrape_Status") or "").strip().upper()
+    if st != "NO_DATA":
+        return out
+    inds = [str(i).strip() for i in indicators or [] if str(i).strip()]
+    if inds and all(row_has_indicator_data(pd.Series(out), ind) for ind in inds):
+        out["Scrape_Status"] = "OK"
+        out["Scrape_Error"] = ""
+    return out
+
+
 def row_interval_complete(row, indicators: Iterable[str]) -> bool:
-    """Wiersz OK dla (ticker, interwa\u0142): SKIPPED = nie dotykamy; OK = wszystkie wska\u017aniki z konfiguracji."""
+    """Wiersz OK dla (ticker, interwa\u0142): SKIPPED = nie dotykamy; inaczej wszystkie wska\u017aniki."""
     if row is None:
         return False
     raw = row["Scrape_Status"] if "Scrape_Status" in row.index else None
@@ -115,12 +170,7 @@ def row_interval_complete(row, indicators: Iterable[str]) -> bool:
         st = ""
     if st == "SKIPPED":
         return True
-    if st and st not in ("OK",):
-        return False
-    for ind in indicators:
-        if not row_has_indicator_data(row, ind):
-            return False
-    return True
+    return row_has_all_configured_indicators(row, indicators)
 
 
 def load_results_dataframe(path: Optional[str]) -> Optional[pd.DataFrame]:
@@ -231,6 +281,33 @@ def _is_indicator_column(col: str) -> bool:
     return False
 
 
+def _indicator_source_columns(ind_name: str, source: Mapping[str, Any]) -> List[str]:
+    """Kolumny CSV nale\u017c\u0105ce do jednego wska\u017anika w ``source``."""
+    ind_name = (ind_name or "").strip()
+    if ind_name == "PCA":
+        return [c for c in source if str(c) in ("PCA_Values", "PCA_Value", "PCA_Color")]
+    if ind_name.lower() == "macd":
+        return [c for c in source if str(c).startswith("MacD_")]
+    prefix = f"{ind_name}_"
+    return [c for c in source if str(c).startswith(prefix)]
+
+
+def merge_indicator_into_row(
+    target: dict, source: Mapping[str, Any], ind_name: str
+) -> None:
+    """Kopiuje kolumny jednego wska\u017anika z ``source`` do ``target`` (in-place)."""
+    for col in _indicator_source_columns(ind_name, source):
+        val = source.get(col)
+        if val is None:
+            continue
+        try:
+            if pd.notna(val) and cell_nonempty(val):
+                target[col] = val
+        except Exception:
+            if cell_nonempty(val):
+                target[col] = val
+
+
 def merge_existing_row_into_row_data(
     row_data: dict, erow, *, skip_indicator_merge: bool = False
 ) -> None:
@@ -300,6 +377,110 @@ def tickers_with_no_data(df, indicators: Iterable[str]) -> List[str]:
         if all_rows_missing:
             out.append(t)
 
+    return out
+
+
+def _row_field(row: Any, key: str) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(key)
+    if isinstance(row, pd.Series):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
+def ticker_rows_show_no_data(rows: Iterable[Any]) -> bool:
+    """Czy wiersze jednego tickera kwalifikują się do banneru „Brak danych” (jak UI)."""
+    items = list(rows)
+    if not items:
+        return True
+    if any(
+        str(_row_field(r, "Scrape_Status") or "").strip().upper() == "SKIPPED"
+        for r in items
+    ):
+        return False
+    if any(
+        str(_row_field(r, "Scrape_Status") or "").strip().upper() == "NO_DATA"
+        for r in items
+    ):
+        return True
+    if all(_row_field(r, "All_Indicators_Missing") is True for r in items):
+        return True
+    return False
+
+
+def ticker_rows_need_refresh(
+    rows: Iterable[Any],
+    *,
+    latest_scrape_date: Optional[str] = None,
+    ticker_in_latest_csv: Optional[bool] = None,
+) -> bool:
+    """Czy ticker wymaga od\u015bwie\u017cenia (brak danych, cz\u0119\u015bciowe wska\u017aniki lub stale)."""
+    items = list(rows)
+    if ticker_rows_show_no_data(items):
+        return True
+    if ticker_in_latest_csv is False:
+        return True
+    if latest_scrape_date:
+        latest_day = str(latest_scrape_date).strip()[:10]
+        if latest_day:
+            for row in items:
+                lr = str(_row_field(row, "Last_Refresh") or "").strip()[:10]
+                if lr and lr < latest_day:
+                    return True
+    for row in items:
+        miss = _row_field(row, "Missing_Indicators")
+        if isinstance(miss, list) and miss:
+            return True
+    return False
+
+
+def config_tickers_with_no_data(
+    config_tickers: Iterable[str],
+    flat_rows: Iterable[Any],
+    *,
+    latest_scrape_date: Optional[str] = None,
+    tickers_in_latest_csv: Optional[Iterable[str]] = None,
+    include_stale_and_partial: bool = True,
+) -> List[str]:
+    """Zwraca tickery z configu wymagaj\u0105ce od\u015bwie\u017cenia (brak / cz\u0119\u015bciowe / stale)."""
+    grouped: Dict[str, List[Any]] = {}
+    for row in flat_rows:
+        ticker = str(_row_field(row, "Ticker") or "").strip()
+        if ticker:
+            grouped.setdefault(ticker, []).append(row)
+
+    latest_set: Optional[set] = None
+    if tickers_in_latest_csv is not None:
+        latest_set = {
+            str(t or "").strip().upper()
+            for t in tickers_in_latest_csv
+            if str(t or "").strip()
+        }
+
+    out: List[str] = []
+    seen: set = set()
+    for ticker in config_tickers:
+        t = str(ticker or "").strip()
+        if not t:
+            continue
+        t_u = t.upper()
+        if t_u in seen:
+            continue
+        rows = grouped.get(t, [])
+        if ticker_rows_show_no_data(rows):
+            out.append(t)
+            seen.add(t_u)
+            continue
+        if not include_stale_and_partial:
+            continue
+        in_latest = None if latest_set is None else t_u in latest_set
+        if ticker_rows_need_refresh(
+            rows,
+            latest_scrape_date=latest_scrape_date,
+            ticker_in_latest_csv=in_latest,
+        ):
+            out.append(t)
+            seen.add(t_u)
     return out
 
 
@@ -429,6 +610,173 @@ def parse_pca_number(raw: object) -> Tuple[Optional[float], Optional[str]]:
         return float(vp), color
     except (TypeError, ValueError):
         return None, color
+
+
+FUNDAMENTALS_COLUMNS: List[str] = [
+    "Ticker",
+    "Fund_PE",
+    "Fund_PB",
+    "Fund_EV_EBITDA",
+    "Fund_ROE",
+    "Fund_NetMargin",
+    "Fund_DE",
+    "Fund_FCF",
+    "Fund_Source",
+    "Fund_Updated_At",
+]
+
+
+def fundamentals_csv_path(results_dir: str = "results") -> str:
+    """Ścieżka do CSV z fundamentami w danym katalogu wyników."""
+    return os.path.join(results_dir, "fundamentals.csv")
+
+
+FUNDAMENTALS_CSV = fundamentals_csv_path()
+
+
+def _normalize_cell(value) -> str:
+    """Konwertuje wartość komórki do stringu nadającego się do CSV (None → "")."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float):
+        # Bez NaN-ów (już wyłapane wyżej). Tnij końcowe zera dla czytelności.
+        s = ("%g" % value) if value == int(value) is False else str(value)
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s
+    return str(value)
+
+
+def load_fundamentals_dataframe(
+    path: Optional[str] = None,
+) -> pd.DataFrame:
+    """Wczytuje plik z fundamentami; gdy nie istnieje, zwraca pusty DataFrame z kolumnami."""
+    p = path or FUNDAMENTALS_CSV
+    if not p or not os.path.exists(p):
+        return pd.DataFrame(columns=FUNDAMENTALS_COLUMNS)
+    try:
+        df = pd.read_csv(p, encoding="utf-8", on_bad_lines="skip")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Nie można odczytać fundamentals.csv (%s): %s", p, e)
+        return pd.DataFrame(columns=FUNDAMENTALS_COLUMNS)
+    for col in FUNDAMENTALS_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    extras = [c for c in df.columns if c not in FUNDAMENTALS_COLUMNS]
+    return df[FUNDAMENTALS_COLUMNS + extras]
+
+
+def save_fundamentals_row(
+    row: dict,
+    *,
+    path: Optional[str] = None,
+) -> None:
+    """Upsert pojedynczego wiersza fundamentów (klucz: ``Ticker``).
+
+    Tworzy plik z nagłówkami przy pierwszym wywołaniu. Wartości ``None`` są
+    zapisywane jako puste komórki (a nie ``"nan"``).
+    """
+    if not isinstance(row, dict):
+        raise TypeError("row musi być słownikiem")
+    ticker = str(row.get("Ticker") or "").strip()
+    if not ticker:
+        raise ValueError("row['Ticker'] jest wymagane")
+
+    target = path or FUNDAMENTALS_CSV
+    target_dir = os.path.dirname(os.path.abspath(target)) or "."
+    os.makedirs(target_dir, exist_ok=True)
+
+    df = load_fundamentals_dataframe(target)
+    if df is None or df.empty:
+        df = pd.DataFrame(columns=FUNDAMENTALS_COLUMNS)
+
+    payload = {col: _normalize_cell(row.get(col, "")) for col in FUNDAMENTALS_COLUMNS}
+    payload["Ticker"] = ticker
+
+    # Trzymamy wszystkie kolumny jako object — fundamentale często mają mixed
+    # typy (liczba, "N/A", "1.2B"), a pandas potrafi zrobić upcast/błąd dtype
+    # przy upsercie ``df.loc[mask, col] = "13"`` do kolumny float64.
+    df = df.astype(object) if not df.empty else df
+
+    if "Ticker" not in df.columns:
+        df["Ticker"] = ""
+    mask = df["Ticker"].astype(str).str.strip() == ticker
+    if mask.any():
+        for col, val in payload.items():
+            if col not in df.columns:
+                df[col] = ""
+            df.loc[mask, col] = val
+    else:
+        new_row_df = pd.DataFrame([payload])
+        for c in df.columns:
+            if c not in new_row_df.columns:
+                new_row_df[c] = ""
+        for c in new_row_df.columns:
+            if c not in df.columns:
+                df[c] = ""
+        df = pd.concat([df, new_row_df], ignore_index=True)
+
+    extras = [c for c in df.columns if c not in FUNDAMENTALS_COLUMNS]
+    df = df[FUNDAMENTALS_COLUMNS + extras]
+    df.to_csv(target, index=False, encoding="utf-8")
+
+
+def _parse_numeric_fund(v) -> object:
+    """Próba konwersji wartości z CSV do float. Zwraca raw string gdy się nie da."""
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip() if v is not None else ""
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return s
+
+
+def get_fundamentals_for_ticker(
+    ticker: str,
+    *,
+    path: Optional[str] = None,
+) -> Optional[dict]:
+    """Zwraca słownik fundamentów dla tickera albo ``None`` jeśli brak."""
+    t = str(ticker or "").strip()
+    if not t:
+        return None
+    df = load_fundamentals_dataframe(path)
+    if df is None or df.empty or "Ticker" not in df.columns:
+        return None
+    mask = df["Ticker"].astype(str).str.strip() == t
+    if not mask.any():
+        mask = df["Ticker"].astype(str).str.strip().str.upper() == t.upper()
+    if not mask.any():
+        return None
+    row = df.loc[mask].iloc[0]
+    out: dict = {}
+    for col in FUNDAMENTALS_COLUMNS:
+        if col not in row.index:
+            out[col] = None
+            continue
+        if col in ("Ticker", "Fund_Source", "Fund_Updated_At"):
+            try:
+                if pd.isna(row[col]):
+                    out[col] = None
+                    continue
+            except (TypeError, ValueError):
+                pass
+            s = str(row[col]).strip()
+            out[col] = s if s != "" else None
+        else:
+            out[col] = _parse_numeric_fund(row[col])
+    return out
 
 
 def record_skipped_ticker(current_run_file: str, ticker: str, reason: str) -> None:
