@@ -1,13 +1,13 @@
 # Trading Analyser
 
-Zestaw do automatycznego odczytu wskaźników z wykresów **TradingView** (np. PCA, HTS Panel, MacD) i przeglądania wyników w **przeglądarce**. Skrypt `tv_scraper.py` korzysta z **Playwright** i podłącza się do już uruchomionej przeglądarki (Brave / Chrome) w trybie zdalnego debugowania. Aplikacja **FastAPI** (`app.py`) serwuje API oraz statyczny panel z listą plików wynikowych, wykresami PCA i konfiguracją.
+Zestaw do automatycznego odczytu wskaźników z wykresów **TradingView** (PCA, HTS Panel, MacD) oraz **fundamentali** (P/E, P/B, EV/EBITDA, ROE, Net Margin, D/E, FCF) z przeglądaniem w **panelu web**. Skrypt `tv_scraper.py` korzysta z **Playwright** i podłącza się do już uruchomionej przeglądarki (Brave / Chrome) w trybie zdalnego debugowania (CDP). Aplikacja **FastAPI** (`app.py`) serwuje REST API i statyczny **dashboard** — zawsze wszystkie tickery z konfiguracji, wykres wielu metryk, odświeżanie per wskaźnik i konfiguracja scrapera.
 
 ## Wymagania
 
 - Python 3.10+ (w projekcie często używane jest środowisko wirtualne `venv`)
 - **Brave** lub **Chrome** uruchomiony z portem debugowania **9222**
 - Otwarta karta z **TradingView** (wykres), gdy działa scraper
-- Zależności: `pip install -r requirements.txt`
+- Zależności: `pip install -r requirements.txt` (w tym **yfinance** do fundamentów, **Playwright** do scrapera)
 
 ## Szybki start
 
@@ -102,6 +102,7 @@ Dashboard pokazuje **zawsze wszystkie tickery z konfiguracji** — bez wyboru da
 Dla każdego tickera generowana jest karta z ikonami akcji po prawej stronie nagłówka:
 
 - 🔄 **odśwież** — zleca ponowne pobranie techniki (`POST /api/scraper/run`) **oraz** fundamentów (`POST /api/fundamentals/refresh`) dla tego tickera.
+- ▼ **menu odświeżania** (obok 🔄) — sam wskaźnik: **PCA**, **HTS Panel** lub **MacD** (`POST /api/scraper/run` z `indicators`); szybsze niż pełny rescrape.
 - 🕘 **historia** — modal z wykresem historycznym wybranego wskaźnika (PCA, MacD Line/Histogram, Fund P/E, P/B, EV/EBITDA, ROE, FCF) dla interwału `1D` / `1W` / `1M` (fundamentale bez filtra interwału).
 - ✏️ **zmiana nazwy** — modal do zmiany symbolu tickera w konfiguracji.
 
@@ -118,7 +119,7 @@ Na górze widoku:
 - **Filtr interwału** — `1D` / `1W` / `1M` / wszystkie.
 - **Pasek wyszukiwania** — filtrowanie po tickerze / nazwie spółki.
 - **Sortowanie** — domyślnie „Problemy najpierw", plus PCA, MacD Line, P/E, ROE, FCF, consensus i ticker A→Z.
-- **Wykres dashboardu** — dropdown metryki (PCA, MacD, HTS, fundamentale); dla fundamentów ukryty jest przełącznik interwału.
+- **Wykres dashboardu** — dropdown metryki (PCA, MacD Line/Histogram, HTS Fast/Slow High, fundamentale); filtr interwału `1D` / `1W` / `1M` (ukryty dla metryk `Fund_*`). Gdy brak punktów dla wybranej metryki, panel pokazuje **komunikat pustego stanu**, ale **sterowanie (dropdown + interwał) pozostaje widoczne**.
 
 Diagnostyka braków wskaźników: `/api/results/{date_id}` i `/api/dashboard` zwracają `Missing_Indicators` oraz `All_Indicators_Missing`.
 
@@ -147,12 +148,14 @@ Ta operacja usuwa historię PCA/sygnałów dla danego symbolu. Jeśli chcesz tyl
 - **Auto-schedule** — codzienny przebieg o ustawionej godzinie (APScheduler `CronTrigger`).
 - **`run_on_startup`** — **domyślnie wyłączone** (patrz niżej sekcję o harmonogramie).
 - Przyciski **„Uruchom wszystkie"** i **„Zatrzymaj"** — Uruchom potwierdza akcją w własnym modalu (natywne `confirm()` bywa wyciszane przez przeglądarki po „nie pokazuj kolejnych okien dialogowych"). Stop zabija całą grupę procesów scrapera (SIGTERM → SIGKILL) + fallback przez `pgrep -f tv_scraper.py` dla osieroconych procesów po restarcie serwera.
-- **Pasek postępu scrapera** — odświeżany co ~1 s (`GET /api/scraper/status`), pokazuje bieżący ticker i fazę `ticker x/N · wsk. y/M`.
+- **Menu „Odśwież brak danych"** (▼) — pełny rescrape no-data tickerów albo tylko **PCA** / **HTS** / **MacD** (`no_data_only` + opcjonalne `indicators`).
+- **„Odśwież fundamentale"** — masowe `POST /api/fundamentals/refresh` z `{all:true}` dla wszystkich tickerów z configu.
+- **Pasek postępu scrapera** — odświeżany co ~1 s (`GET /api/scraper/status`), format **monotoniczny**: `15/78 · ticker 15/26 · wsk. 1/3 · PCA` (łączny licznik rośnie między fazami wskaźników; UI liczy procent z pierwszej frakcji `done/total`).
 - **Modal „Wznów / Od nowa" po crashu lub Stop** — gdy poprzedni „Uruchom wszystkie" nie zakończył się czysto (proces padł albo użytkownik kliknął Stop), zostaje plik `scraper_state.json` z listą przetworzonych par `(ticker, interwał)` i ścieżką do bieżącego CSV. Kolejny klik **„Uruchom wszystkie"** najpierw woła `GET /api/scraper/pending_run`; jeśli wykryje pending state, UI pokazuje modal z trzema przyciskami:
   - **Wznów** — `POST /api/scraper/run {fresh:false}`, scraper kontynuuje z tym samym `current_file` (np. wczorajszym CSV) i pomija pary już z `state["processed"]`.
   - **Zacznij od nowa** — `POST /api/scraper/run {fresh:true}`, backend kasuje `scraper_state.json` przed startem podprocesu, więc scraper utworzy świeży `tradingview_results_<DZIŚ>.csv`.
   - **Anuluj** — no-op.
-  Heurystyka: gdy state ma >1 h (`os.path.getmtime`), default focus pada na „Zacznij od nowa" (zwykle user zapomniał o starym runie); inaczej na „Wznów". Dla partial run (konkretne tickery) i dla `no_data_only` flaga `fresh` jest ignorowana — te tryby nie używają resume i nie ruszają state'u. Po zakończeniu runu UI bezwarunkowo przeładowuje aktywny dzień, a jeśli pojawił się nowszy plik (fresh start) — automatycznie na niego skacze.
+  Heurystyka: gdy state ma >1 h (`os.path.getmtime`), default focus pada na „Zacznij od nowa" (zwykle user zapomniał o starym runie); inaczej na „Wznów". Dla partial run (konkretne tickery / subset wskaźników) i dla `no_data_only` flaga `fresh` jest ignorowana — te tryby nie używają resume i nie ruszają state'u. Po zakończeniu runu UI przeładowuje **dashboard** (`GET /api/dashboard`).
 
 ### Watchlista (zakładka „Watchlist")
 
@@ -187,12 +190,15 @@ Dzięki temu, nawet jeśli scraper nie złapał nazwy z DOM-u (np. zmiany w TV),
 
 Niektóre tickery (np. polskie spółki z GPW) wymagają w TradingView prefixu giełdy — wpisanie samego `AMB` weźmie domyślnie pierwszy wynik (np. `MIL:AMB` z Mediolanu) zamiast `GPW:AMB`. W efekcie scraper widzi nie ten symbol co trzeba i wszystkie 3 interwały lądują jako **„Brak danych”**.
 
-Aby to naprawić, w toolbarze nad listą tickerów jest przycisk **„Napraw symbole”** (ikona lupy z plusem). Pojawia się tylko gdy w aktualnym pliku CSV są tickery bez `:` w nazwie z `Scrape_Status=NO_DATA` (lub wszystkie 3 interwały bez wskaźników). Po kliknięciu:
+Aby to naprawić, w toolbarze nad listą tickerów jest przycisk **„Napraw symbole”** (ikona lupy z plusem). Pojawia się, gdy w dashboardzie są tickery z configu oznaczone jako **„Brak danych"** (`GET /api/tickers/no_data`). Po kliknięciu:
 
-1. Backend (`GET /api/tickers/repair_no_data`) bierze listę no-data tickerów.
-2. Dla każdego z nich odpytuje **TV REST symbol-search** i filtruje wyniki po polu `exchange` zgodnie z `exchange_prefixes` z `scraper_config.json` (default `["GPW"]`).
-3. UI pokazuje propozycje `OLD → NEW (opis spółki)` z checkboxami (i radio gdy giełd jest więcej).
-4. Po zatwierdzeniu (`POST /api/tickers/repair_no_data`) renamy są zapisywane hurtem do `scraper_config.json` (z zachowaniem pozycji na liście) — i opcjonalnie scraper od razu rusza w trybie `no_data_only` dla nowych nazw (toggle „Po naprawie uruchom scraper…”).
+1. Backend (`GET /api/tickers/repair_no_data`) bierze listę no-data tickerów z configu.
+2. Dla każdego bez `:` w nazwie odpytuje **TV REST symbol-search** i filtruje wyniki po polu `exchange` zgodnie z `exchange_prefixes` z `scraper_config.json` (domyślnie `["GPW"]`; kolejność = priorytet giełd).
+3. UI pokazuje propozycje `OLD → NEW (opis spółki)` z checkboxami (radio gdy kilka giełd).
+4. Przy braku dopasowania: **„Edytuj ręcznie"** — pole na symbol, np. `SSE:601088`.
+5. Po zatwierdzeniu (`POST /api/tickers/repair_no_data`):
+   - **„Zapisz naprawy"** — tylko renamy w `scraper_config.json` (z zachowaniem kolejności); scraper **nie** startuje automatycznie.
+   - **„Zapisz i uruchom scraper"** — to samo + run `no_data_only` dla naprawionych symboli.
 
 Aby rozszerzyć na inne giełdy, dopisz prefiksy w configu (kolejność = priorytet):
 
@@ -213,9 +219,30 @@ Wyniki TV REST są cache'owane w `data/.company_names_cache.json` pod kluczem `@
 python tv_scraper.py
 ```
 
-Opcje: `--ticker A,B,C` (podzbiór), `--interval 1D`, `--indicator PCA` — patrz `python tv_scraper.py -h`.
+Opcje: `--ticker A,B,C` (podzbiór), `--interval 1D`, `--indicators PCA,MacD` (subset wskaźników) — patrz `python tv_scraper.py -h`.
 
-Konfiguracja domyślna jest w **`scraper_config.json`**: lista **tickers**, **intervals**, **indicators** oraz opcjonalnie **`auto_schedule`** (patrz niżej).
+Konfiguracja domyślna jest w **`scraper_config.json`**. Kluczowe sekcje:
+
+| Sekcja | Opis |
+|--------|------|
+| `tickers`, `intervals`, `indicators` | Lista symboli, interwały (`1D`/`1W`/`1M`), wskaźniki do scrapowania |
+| `indicator_search` | Mapowanie nazwy w configu → fraza wyszukiwania TV, np. `"MacD": "CM_Ult_MacD_MTF"` |
+| `fundamentals` | `enabled`, `cache_ttl_hours`, `tv_fallback` (GPW), lista pól yfinance |
+| `exchange_prefixes` | Giełdy do modalu „Napraw symbole", np. `["GPW", "NYSE"]` |
+| `auto_schedule` | Harmonogram codziennego runu (patrz niżej) |
+| `cdp_*` | Port CDP, auto-start Brave/Chrome, profil użytkownika |
+
+### Scraper — ulepszenia (CDP, merge, partial run)
+
+- **Reuse karty TradingView** — zamiast otwierać nową kartę, scraper przez CDP (`/json/list`) wybiera istniejącą stronę z `tradingview.com/chart` (lub inną podstronę TV) i na niej pracuje.
+- **Partial run** — `POST /api/scraper/run` z `tickers` i/lub `indicators` dopisuje tylko brakujące kolumny wskaźników do bieżącego CSV (`merge_indicator_into_row`), bez kasowania pozostałych pól.
+- **Merge między datami na dashboardzie** — `GET /api/dashboard` skanuje pliki `results/tradingview_results_*.csv` od najnowszego; jeśli dzisiejszy wiersz ma np. tylko MacD, starsze HTS/PCA są **uzupełniane ze starszych plików** per para (ticker, interwał).
+
+### Parsowanie MacD i HTS Panel
+
+- **MacD** — domyślnie szukany jest wskaźnik **`CM_Ult_MacD_MTF`** (override w `indicator_search.MacD`). Parser wybiera właściwą legendę, gdy na wykresie jest też generyczny „MACD". Trend z koloru linii MACD, fallback: MACD vs Signal.
+- **Liczby z TV** — obsługa separatorów PL/US, NBSP i **unicode minus** (`U+2212`, np. `−3,88`) w scraperze i w UI (wykresy MacD).
+- **HTS Panel** — parser czyta sloty wstęg z legendy (pomija wiersze „trend change"); akceptuje **częściowe wstęgi** (brak Slow High itd.) zamiast odrzucać cały wskaźnik.
 
 ## Wyniki
 
@@ -295,26 +322,37 @@ Możesz też wymusić ENV:
 - `TV_AUTO_START_CDP=0` — wyłącza auto-start CDP
 - `TV_AUTO_START_CDP=1` — włącza auto-start CDP
 
+## Skrypty pomocnicze (`scripts/`)
+
+| Skrypt | Opis |
+|--------|------|
+| `start_app.sh` | Uruchamia uvicorn (`app:app`) na porcie 8000 |
+| `start_browser_debug.sh [port]` | macOS: otwiera Brave (lub Chrome) z CDP na porcie **9222** (domyślnie); sprawdza `/json/version` |
+| `repair_results_csv.py` | Naprawa starych CSV bez kolumn `Scrape_Status` / `Scrape_Error` |
+| `get_dom.py` | Zrzut DOM TradingView do `data/tv_dom_dump.html` (debug parsowania) |
+| `macos-daily-scraper.example.plist` | Przykład **launchd** — codzienny `python tv_scraper.py` bez panelu |
+
+Pozostałe skrypty (`debug_tv_*.py`, `inspect_dom.py`, …) służą do lokalnego debugowania scrapera.
+
 ## Dane pomocnicze
 
 - **`data/`** — opcjonalnie eksport watchlisty (np. `Portfel_Watchlist_*.csv`); pliki CSV z tego katalogu są domyślnie ignorowane przez Git — nie commituj prywatnych list bez potrzeby.
 - Zrzuty DOM do debugowania zapisuj pod **`data/tv_dom_dump.html`** (ścieżka ignorowana w repozytorium); skrypt `scripts/get_dom.py` tworzy ten plik w `data/`.
-- **`scripts/repair_results_csv.py`** — naprawa starych plików wynikowych (patrz sekcja [Wyniki](#wyniki)).
-- **`scripts/macos-daily-scraper.example.plist`** — przykład **launchd** na macOS: codzienne `python tv_scraper.py` o wybranej godzinie (dostosuj ścieżki i `WorkingDirectory`, potem `launchctl load`).
 
 ## Testy
 
 ```bash
-python3 -m pytest tests/ -q
+PYTHONPATH=. pytest -q
 ```
 
-Testy jednostkowe nie wymagają uruchomionej przeglądarki. Skrypty integracyjne Playwright w `tests/` są wyłączone z domyślnego zbierania testów (patrz `tests/conftest.py`).
+Obecnie **273 testy** przechodzą (1 skipped). Testy jednostkowe nie wymagają uruchomionej przeglądarki. Skrypty integracyjne Playwright w `tests/` są wyłączone z domyślnego zbierania testów (patrz `tests/conftest.py`).
 
 ## Struktura modułów
 
-- **`tv_scraper.py`** — logika scrapowania (Playwright, TradingView, parsowanie legendy).
-- **`app.py`** — FastAPI: serwowanie `/api/*`, zarządzanie konfiguracją i procesem scrapera, harmonogram.
-- **`results_store.py`** — wspólny moduł I/O dla plików CSV z wynikami: stałe kolumn meta (`CSV_META_COLUMNS`), zapis `upsert` po (Ticker, Interval), odczyt odporny na uszkodzone wiersze, predykaty kompletności wiersza. Używany przez `tv_scraper.py`, `app.py` i `scripts/repair_results_csv.py`.
+- **`tv_scraper.py`** — logika scrapowania (Playwright, CDP, TradingView, parsowanie legendy MacD/HTS/PCA).
+- **`fundamentals.py`** — pobieranie fundamentów (yfinance + opcjonalny fallback TV dla GPW).
+- **`app.py`** — FastAPI: `/api/dashboard`, `/api/fundamentals`, scraper, konfiguracja, harmonogram.
+- **`results_store.py`** — wspólny moduł I/O dla plików CSV z wynikami: stałe kolumn meta (`CSV_META_COLUMNS`), zapis `upsert` po (Ticker, Interval), merge wskaźników, odczyt odporny na uszkodzone wiersze. Używany przez `tv_scraper.py`, `app.py` i `scripts/repair_results_csv.py`.
 - **`static/`** — panel web (HTML/CSS/JS).
 
 ## Logging
@@ -331,19 +369,46 @@ Gdy scraper jest uruchamiany przez API (`POST /api/scraper/run` lub auto-schedul
 
 ## REST API (skrót)
 
+### Dashboard i wyniki
+
+- `GET /api/dashboard` — wszystkie tickery z configu: merge wierszy technicznych z CSV + `Last_Refresh` + fundamentale + `Missing_Indicators`.
 - `GET /api/history` — lista plików wynikowych (data + liczba rekordów).
 - `GET /api/results/{date_id}` — wiersze z CSV dla danego dnia + per-row `Missing_Indicators` / `All_Indicators_Missing`.
-- `GET /api/ticker/{ticker}/history?interval=1D` — historia PCA dla tickera (dla modala wykresu historycznego).
-- `GET /api/config` / `POST /api/config` — pełna konfiguracja (tickery, interwały, wskaźniki, `auto_schedule`).
-- `POST /api/scraper/run` — uruchomienie scrapera, `body: {"tickers": ["LULU"]}` albo `[]` dla pełnego przebiegu. Zwraca `started` / `already_running` / `error`.
-- `POST /api/scraper/stop` — zatrzymanie (zabija grupę procesów + fallback przez `pgrep`).
-- `GET /api/scraper/status` — `status` (`idle` / `running` / `done` / `error`), `progress`, `current_ticker`, `pid`.
-- `POST /api/tickers/rename` — `body: {"old": "LULU.O", "new": "LULU"}`, fuzzy-match po bazowym symbolu.
-- `GET /api/tickers/{ticker}/delete_preview` / `DELETE /api/tickers/{ticker}` — preview i trwałe usunięcie tickera z configu oraz historycznych CSV.
+- `GET /api/ticker/{ticker}/history?interval=1D&metric=PCA` — szereg czasowy z historycznych CSV (domyślnie PCA; UI wysyła też `MacD_Line`, `MacD_Histogram`, `Fund_*` — obsługa rozszerzana po stronie backendu).
+
+### Fundamentale
+
+- `GET /api/fundamentals` — lista wszystkich wierszy z `results/fundamentals.csv`.
+- `GET /api/fundamentals/{ticker}` — jeden ticker.
+- `POST /api/fundamentals/refresh` — body: `{ "tickers": ["AAPL"] }` lub `{ "all": true }` (yfinance, cache w `data/.fundamentals_cache.json`).
+
+### Konfiguracja i tickery
+
+- `GET /api/config` / `PUT /api/config` — odczyt / zapis tickers, intervals, indicators, auto_schedule.
+- `GET /api/tickers/no_data` — tickery z configu z „Brak danych" na dashboardzie.
+- `GET /api/tickers/repair_no_data` / `POST /api/tickers/repair_no_data` — preview i bulk rename symboli giełdowych.
+- `POST /api/tickers/rename` — `{ "old": "LULU.O", "new": "LULU" }`, fuzzy-match po bazowym symbolu.
+- `GET /api/tickers/{ticker}/delete_preview` / `DELETE /api/tickers/{ticker}` — preview i trwałe usunięcie z configu + historycznych CSV.
+
+### Scraper
+
+- `POST /api/scraper/run` — uruchomienie scrapera. Body (wszystkie opcjonalne):
+  - `tickers`: `["LULU"]` lub `[]` / brak = wszystkie z configu
+  - `indicators`: `["PCA"]`, `["MacD"]`, `["HTS Panel"]` — subset wskaźników (partial run)
+  - `no_data_only`: `true` — tylko tickery bez danych na dashboardzie
+  - `fresh`: `true` — pełny run od nowa (kasuje `scraper_state.json`)
+  - Zwraca: `started` / `already_running` / `error` / `no_data_empty`
+- `POST /api/scraper/stop` — zatrzymanie (SIGTERM → SIGKILL + fallback `pgrep`).
+- `GET /api/scraper/status` — `status`, `progress` (format `done/total · ticker … · wsk. …`), `current_ticker`, `pid`.
+- `GET /api/scraper/pending_run` — niedokończony run do modalu Wznów / Od nowa.
+
+### Watchlista
+
 - `GET /api/watchlist` — dane z najnowszego `Portfel_Watchlist_*.csv` (jeśli jest).
+- `GET /api/watchlist/reload` — przeładowanie cache watchlisty.
 
 ## Jak to działa w skrócie
 
-1. Playwright łączy się z przeglądarką przez **CDP** (`localhost:9222`).
-2. Dla każdego tickera skrypt symuluje wpisywanie symbolu, zmianę interwału, dodaje kolejne wskaźniki z konfiguracji, czyta HTML legendy, parsuje wartości, usuwa wskaźnik i zapisuje wiersz do CSV.
-3. Panel web łączy wyniki z watchlistą (jeśli jest plik w `data/`) i wyświetla wykres PCA oraz status scrapera.
+1. Playwright łączy się z przeglądarką przez **CDP** (`localhost:9222`), preferując istniejącą kartę TradingView.
+2. Dla każdego tickera skrypt symuluje wpisywanie symbolu, zmianę interwału, dodaje wskaźniki z konfiguracji (z wyszukiwaniem np. `CM_Ult_MacD_MTF`), czyta HTML legendy, parsuje wartości i zapisuje wiersz do CSV (partial run merge'uje brakujące kolumny).
+3. Panel web ładuje **`GET /api/dashboard`** (merge CSV + fundamentale), pokazuje karty tickerów, wykres wybranej metryki, filtry strategii i status scrapera.
