@@ -27,6 +27,7 @@ def test_row_interval_complete_all_three():
         {
             "PCA_Values": "1",
             "HTS Panel_Trend": "Wzrostowy",
+            "MacD_Line": "0.5 (Czerwony)",
             "MacD_Trend": "Spadkowy",
             "Scrape_Status": "OK",
         }
@@ -45,6 +46,19 @@ def test_row_interval_complete_missing_macd():
     )
     inds = ["PCA", "HTS Panel", "MacD"]
     assert tv.row_interval_complete(row, inds) is False
+
+
+def test_row_interval_complete_no_data_with_all_indicators():
+    row = pd.Series(
+        {
+            "Scrape_Status": "NO_DATA",
+            "PCA_Values": "1",
+            "HTS Panel_Trend": "Wzrostowy",
+            "MacD_Line": "0.5 (Czerwony)",
+        }
+    )
+    inds = ["PCA", "HTS Panel", "MacD"]
+    assert tv.row_interval_complete(row, inds) is True
 
 
 def test_ticker_fully_done_skipped():

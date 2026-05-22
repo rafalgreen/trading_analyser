@@ -1,6 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Elements
-    const historyList = document.getElementById('history-list');
     const resultsGrid = document.getElementById('results-grid');
     const cardTemplate = document.getElementById('ticker-card-template');
     const loadingOverlay = document.getElementById('loading-overlay');
@@ -8,15 +7,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const errorText = document.getElementById('error-text');
     const currentDateTitle = document.getElementById('current-date-title');
     const recordCount = document.getElementById('record-count');
-    const freshnessEl = document.getElementById('data-freshness');
     const refreshBtn = document.getElementById('refresh-btn');
     const expandAllBtn = document.getElementById('expand-all-btn');
     const searchInput = document.getElementById('search-input');
     const sortSelect = document.getElementById('sort-select');
+    const intervalFilter = document.getElementById('interval-filter');
     const chartPanel = document.getElementById('chart-panel');
     const pcaChartCanvas = document.getElementById('pcaChart');
+    const chartEmptyEl = document.getElementById('chart-empty');
+    const chartEmptyTextEl = document.getElementById('chart-empty-text');
     const chartTitle = document.getElementById('chart-title');
     const chartIntervalToggle = document.getElementById('chart-interval-toggle');
+    const chartMetricSelect = document.getElementById('chart-metric-select');
     const wlFilterToolbar = document.getElementById('wl-filter-toolbar');
     const strategyDescriptionEl = document.getElementById('strategy-description');
     const strategyEmptyBannerEl = document.getElementById('strategy-empty-banner');
@@ -29,6 +31,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const UI_KEYS = {
         sortMode: 'ta_sort_mode',
         chartInterval: 'ta_chart_interval',
+        chartMetric: 'ta_chart_metric',
+        intervalFilter: 'ta_interval_filter',
         activeView: 'ta_active_view',
         collapsedCards: 'ta_collapsed_cards',
         signalStrategy: 'ta_signal_strategy',
@@ -51,13 +55,44 @@ document.addEventListener('DOMContentLoaded', () => {
         try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* quota */ }
     }
 
-    let currentDates = [];
-    let activeDateId = null;
-    let currentData = []; // Store raw rows for filtering
+    let currentData = [];
+    let configTickerCount = 0;
     let pcaChartInstance = null;
     let historyChartInstance = null;
 
-    const ALLOWED_SORT = new Set(['data-status', 'default', 'pca-desc', 'pca-asc', 'consensus-bullish', 'consensus-bearish', 'ticker-asc', 'ticker-desc']);
+    const METRIC_TO_FIELD = {
+        pca: 'PCA_Value',
+        macd_line: 'MacD_Line',
+        macd_hist: 'MacD_Histogram',
+        hts_fh: 'HTS Panel_Fast_High',
+        hts_sh: 'HTS Panel_Slow_High',
+        pe: 'Fund_PE',
+        pb: 'Fund_PB',
+        ev_ebitda: 'Fund_EV_EBITDA',
+        roe: 'Fund_ROE',
+        fcf: 'Fund_FCF',
+    };
+
+    const FUND_CHART_METRICS = new Set(['pe', 'pb', 'ev_ebitda', 'roe', 'fcf']);
+
+    const METRIC_LABELS = {
+        pca: 'PCA',
+        macd_line: 'MacD Line',
+        macd_hist: 'MacD Histogram',
+        hts_fh: 'HTS Fast High',
+        hts_sh: 'HTS Slow High',
+        pe: 'P/E',
+        pb: 'P/B',
+        ev_ebitda: 'EV/EBITDA',
+        roe: 'ROE',
+        fcf: 'FCF',
+    };
+
+    const ALLOWED_SORT = new Set([
+        'data-status', 'default', 'pca-desc', 'pca-asc',
+        'macd-desc', 'macd-asc', 'pe-desc', 'pe-asc', 'roe-desc', 'roe-asc', 'fcf-desc', 'fcf-asc',
+        'consensus-bullish', 'consensus-bearish', 'ticker-asc', 'ticker-desc',
+    ]);
     const ALLOWED_INTERVAL = new Set(['1D', '1W', '1M']);
     const ALLOWED_SIGNAL_INTERVALS = new Set(['D', 'W', 'M']);
     const BUY_SIGNALS = new Set(['buy', 'strong buy']);
@@ -82,8 +117,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'data-status'))
         ? loadPref(UI_KEYS.sortMode, 'data-status') : 'data-status';
-    let currentChartInterval = ALLOWED_INTERVAL.has(loadPref(UI_KEYS.chartInterval, '1D'))
-        ? loadPref(UI_KEYS.chartInterval, '1D') : '1D';
+    function sanitizeChartMetric(raw) {
+        const val = typeof raw === 'string' ? raw : 'pca';
+        if (!METRIC_TO_FIELD[val]) return 'pca';
+        if (chartMetricSelect && !chartMetricSelect.querySelector(`option[value="${val}"]`)) return 'pca';
+        return val;
+    }
+
+    function sanitizeChartInterval(raw) {
+        return ALLOWED_INTERVAL.has(raw) ? raw : '1D';
+    }
+
+    let currentChartInterval = sanitizeChartInterval(loadPref(UI_KEYS.chartInterval, '1D'));
+    let currentChartMetric = sanitizeChartMetric(loadPref(UI_KEYS.chartMetric, 'pca'));
+    if (currentChartMetric !== loadPref(UI_KEYS.chartMetric, 'pca')) {
+        savePref(UI_KEYS.chartMetric, currentChartMetric);
+    }
+    if (currentChartInterval !== loadPref(UI_KEYS.chartInterval, '1D')) {
+        savePref(UI_KEYS.chartInterval, currentChartInterval);
+    }
+    let currentIntervalFilter = loadPref(UI_KEYS.intervalFilter, 'All');
+    if (!['All', '1D', '1W', '1M'].includes(currentIntervalFilter)) currentIntervalFilter = 'All';
 
     const storedCollapsed = loadPref(UI_KEYS.collapsedCards, []);
     const collapsedCards = new Set(Array.isArray(storedCollapsed) ? storedCollapsed : []);
@@ -121,6 +175,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const rerunningTickers = new Set();
     let currentHistoryTicker = null;
     let currentHistoryInterval = '1D';
+    let currentHistoryMetric = 'PCA';
 
     function escapeHtml(str) {
         if (str == null || str === '') return '';
@@ -356,39 +411,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initialize App
     async function init() {
-        // Apply persisted sort + chart interval to controls before first render
         if (sortSelect) sortSelect.value = currentSortMode;
+        if (intervalFilter) intervalFilter.value = currentIntervalFilter;
+        if (chartMetricSelect) chartMetricSelect.value = currentChartMetric;
+        syncChartIntervalToggleVisibility();
+        updateChartTitle();
         if (chartIntervalToggle) {
             chartIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => {
                 b.classList.toggle('active', b.dataset.interval === currentChartInterval);
             });
         }
-        if (chartTitle) chartTitle.textContent = `Wartość PCA (${currentChartInterval}) dla tickerów`;
         syncWlFilterChipsUI();
 
-        await fetchHistory();
+        await fetchDashboard();
         const persistedView = loadPref(UI_KEYS.activeView, 'dashboard-view');
         if (persistedView === 'config-view') {
             switchView('config-view');
         }
-
-        if (currentDates.length > 0) {
-            selectDate(currentDates[0].id, currentDates[0].label);
-        } else {
-            showError("Brak dostępnych plików z danymi.");
-            hideLoading();
-        }
-
         startGlobalScraperPolling();
     }
 
     refreshBtn.addEventListener('click', () => {
         refreshBtn.classList.add('spinning');
-        fetchHistory().then(() => {
-            if (activeDateId) {
-                const dateObj = currentDates.find(d => d.id === activeDateId);
-                if(dateObj) selectDate(activeDateId, dateObj.label);
-            }
+        fetchDashboard().finally(() => {
             setTimeout(() => refreshBtn.classList.remove('spinning'), 500);
         });
     });
@@ -404,6 +449,33 @@ document.addEventListener('DOMContentLoaded', () => {
         savePref(UI_KEYS.sortMode, currentSortMode);
         const term = searchInput.value.toLowerCase().trim();
         filterAndRenderCards(term);
+    });
+
+    intervalFilter?.addEventListener('change', (e) => {
+        const val = e.target.value;
+        currentIntervalFilter = ['All', '1D', '1W', '1M'].includes(val) ? val : 'All';
+        savePref(UI_KEYS.intervalFilter, currentIntervalFilter);
+        if (currentIntervalFilter !== 'All' && ALLOWED_INTERVAL.has(currentIntervalFilter)) {
+            currentChartInterval = currentIntervalFilter;
+            savePref(UI_KEYS.chartInterval, currentChartInterval);
+            if (chartIntervalToggle) {
+                chartIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => {
+                    b.classList.toggle('active', b.dataset.interval === currentChartInterval);
+                });
+            }
+            updateChartTitle();
+        }
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+
+    chartMetricSelect?.addEventListener('change', (e) => {
+        const val = sanitizeChartMetric(e.target.value);
+        currentChartMetric = val;
+        if (chartMetricSelect.value !== val) chartMetricSelect.value = val;
+        savePref(UI_KEYS.chartMetric, currentChartMetric);
+        syncChartIntervalToggleVisibility();
+        updateChartTitle();
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
     });
 
     expandAllBtn?.addEventListener('click', () => toggleExpandAll());
@@ -438,11 +510,64 @@ document.addEventListener('DOMContentLoaded', () => {
         chartIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
 
-        chartTitle.textContent = `Wartość PCA (${interval}) dla tickerów`;
-
+        updateChartTitle();
         const term = searchInput.value.toLowerCase().trim();
         filterAndRenderCards(term);
     });
+
+    function syncChartIntervalToggleVisibility() {
+        if (!chartIntervalToggle) return;
+        const hide = FUND_CHART_METRICS.has(currentChartMetric);
+        chartIntervalToggle.style.display = hide ? 'none' : '';
+    }
+
+    function updateChartTitle() {
+        if (!chartTitle) return;
+        const label = METRIC_LABELS[currentChartMetric] || currentChartMetric;
+        if (FUND_CHART_METRICS.has(currentChartMetric)) {
+            chartTitle.textContent = `${label} dla tickerów`;
+        } else {
+            chartTitle.textContent = `${label} (${getEffectiveChartInterval()}) dla tickerów`;
+        }
+    }
+
+    function hasDashboardTickerData() {
+        return currentData.some(row => !isTickerHidden(row['Ticker']));
+    }
+
+    function getEffectiveChartInterval() {
+        if (currentIntervalFilter && currentIntervalFilter !== 'All') {
+            return currentIntervalFilter;
+        }
+        return currentChartInterval;
+    }
+
+    function syncChartIntervalToggleUI() {
+        if (!chartIntervalToggle) return;
+        chartIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.interval === currentChartInterval);
+        });
+    }
+
+    function setChartPanelVisible(visible) {
+        if (!chartPanel) return;
+        chartPanel.classList.toggle('hidden', !visible);
+    }
+
+    function showChartEmptyState(message) {
+        if (pcaChartInstance) {
+            pcaChartInstance.destroy();
+            pcaChartInstance = null;
+        }
+        if (pcaChartCanvas) pcaChartCanvas.style.display = 'none';
+        if (chartEmptyTextEl && message) chartEmptyTextEl.textContent = message;
+        if (chartEmptyEl) chartEmptyEl.classList.remove('hidden');
+    }
+
+    function hideChartEmptyState() {
+        if (chartEmptyEl) chartEmptyEl.classList.add('hidden');
+        if (pcaChartCanvas) pcaChartCanvas.style.display = '';
+    }
 
     wlFilterToolbar?.addEventListener('click', (e) => {
         const chip = e.target.closest('.filter-chip');
@@ -586,84 +711,99 @@ document.addEventListener('DOMContentLoaded', () => {
         return `${c.neutral}/${ALL_STRATEGY_IDS.length} neutral`;
     }
 
-    // Fetch History Dates
-    async function fetchHistory() {
-        try {
-            const res = await fetch('/api/history');
-            if (!res.ok) throw new Error("Nie udało się pobrać historii.");
-            const data = await res.json();
-            currentDates = data.dates;
-            renderHistoryList();
-        } catch (e) {
-            console.error(e);
-            showError("Błąd pobierania historii list CSV.");
-        }
-    }
-
-    function renderHistoryList() {
-        historyList.innerHTML = '';
-        if (currentDates.length === 0) {
-            historyList.innerHTML = '<p style="color:var(--text-muted); padding:10px;">Brak danych</p>';
-            return;
-        }
-
-        currentDates.forEach(date => {
-            const item = document.createElement('div');
-            item.className = 'history-item';
-            if (date.id === activeDateId) item.classList.add('active');
-            
-            item.innerHTML = `
-                <i class="ph ph-calendar-blank"></i>
-                <span>${escapeHtml(date.label)}</span>
-            `;
-            
-            item.addEventListener('click', () => selectDate(date.id, date.label));
-            historyList.appendChild(item);
+    function flattenDashboardTickers(tickerEntries) {
+        const rows = [];
+        (tickerEntries || []).forEach(entry => {
+            const ticker = entry.ticker || '';
+            const companyName = entry.company_name || ticker;
+            const exchange = entry.exchange || '';
+            const fundamentals = entry.fundamentals || {};
+            const intervals = entry.intervals || {};
+            Object.entries(intervals).forEach(([interval, bucket]) => {
+                const base = bucket?.row ? { ...bucket.row } : {
+                    Ticker: ticker,
+                    Company_Name: companyName,
+                    Exchange: exchange,
+                    Interval: interval,
+                    Scrape_Status: '',
+                };
+                base.Ticker = ticker;
+                base.Company_Name = base.Company_Name || companyName;
+                base.Exchange = base.Exchange || exchange;
+                base.Interval = base.Interval || interval;
+                base.In_Config = true;
+                base.Config_Match = ticker;
+                base.Config_Status = 'exact';
+                base.Config_Candidates = [];
+                if (bucket?.last_refresh) {
+                    base.Last_Refresh = bucket.last_refresh;
+                }
+                Object.assign(base, fundamentals);
+                rows.push(base);
+            });
         });
+        return rows;
     }
 
-    // Select a Date and Fetch Results
-    async function selectDate(dateId, label) {
-        activeDateId = dateId;
-        renderHistoryList(); // Update active class
-        
-        currentDateTitle.textContent = label;
-        resultsGrid.innerHTML = '';
+    async function fetchDashboard() {
         showLoading();
         hideError();
-
         try {
-            const res = await fetch(`/api/results/${dateId}`);
-            if (!res.ok) throw new Error("Brak danych dla wybranej daty.");
+            const res = await fetch('/api/dashboard');
+            if (!res.ok) throw new Error('Nie udało się pobrać dashboardu.');
             const data = await res.json();
-            
-            currentData = data.data;
+            currentData = Array.isArray(data.data)
+                ? data.data
+                : flattenDashboardTickers(data.tickers);
+            configTickerCount = Number.isFinite(Number(data.config_ticker_count))
+                ? Number(data.config_ticker_count)
+                : new Set(currentData.map(r => r['Ticker'] || '')).size;
             if (Array.isArray(data.signal_strategies) && data.signal_strategies.length) {
                 availableSignalStrategies = data.signal_strategies;
             }
-
-            updateFreshnessIndicator(dateId);
+            if (currentDateTitle) currentDateTitle.textContent = 'Dashboard';
             if (wlFilterToolbar) {
                 wlFilterToolbar.hidden = currentData.length === 0;
             }
             syncWlFilterChipsUI();
-
             searchInput.value = '';
             filterAndRenderCards('');
-            
             hideLoading();
         } catch (e) {
             console.error(e);
-            showError(e.message);
+            showError(e.message || 'Błąd pobierania dashboardu.');
             hideLoading();
         }
+    }
+
+    function parseRefreshTimestamp(raw) {
+        if (!raw) return NaN;
+        const s = String(raw).trim();
+        const withTime = s.match(/^(\d{4}-\d{2}-\d{2})[ _](\d{2}[:-]\d{2}[:-]\d{2})/);
+        if (withTime) {
+            return Date.parse(`${withTime[1]}T${withTime[2].replace(/-/g, ':')}`);
+        }
+        return Date.parse(`${s.slice(0, 10)}T12:00:00`);
+    }
+
+    function cardIsStale(rows) {
+        let newest = NaN;
+        (rows || []).forEach(r => {
+            const ts = parseRefreshTimestamp(r['Last_Refresh']);
+            if (Number.isFinite(ts)) newest = Number.isFinite(newest) ? Math.max(newest, ts) : ts;
+        });
+        if (!Number.isFinite(newest)) return true;
+        return (Date.now() - newest) / 3_600_000 > 24;
     }
 
     function filterAndRenderCards(searchTerm) {
         // Odfiltruj tickery ukryte po rename (zachowujemy wiersze w CSV, ale
         // w UI nie chcemy widzieć już starej nazwy).
         let filteredData = currentData.filter(row => !isTickerHidden(row['Ticker']));
-        const hiddenCount = currentData.length - filteredData.length;
+        if (currentIntervalFilter && currentIntervalFilter !== 'All') {
+            filteredData = filteredData.filter(row => (row['Interval'] || '') === currentIntervalFilter);
+        }
+        const hiddenCount = currentData.length - currentData.filter(row => !isTickerHidden(row['Ticker'])).length;
         const hiddenTickerCount = new Set(
             currentData
                 .filter(row => isTickerHidden(row['Ticker']))
@@ -715,9 +855,10 @@ document.addEventListener('DOMContentLoaded', () => {
         updateStrategyEmptyBanner(distinctTickers);
 
         recordCount.textContent = '';
+        const visibleTickers = new Set(filteredData.map(r => r['Ticker'] || '')).size;
+        const configTickers = configTickerCount || new Set(currentData.map(r => r['Ticker'] || '')).size;
         recordCount.appendChild(document.createTextNode(
-            `${distinctTickers} tickerów / ${filteredData.length} wierszy ` +
-            `(z ${totalDistinctTickers} tickerów / ${currentData.length} wierszy CSV)`
+            `${visibleTickers} tickerów / ${filteredData.length} wierszy (z ${configTickers} w konfiguracji)`
         ));
         if (hiddenCount > 0) {
             const hiddenInfo = hiddenTickerCount > 0
@@ -745,82 +886,119 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function updateFreshnessIndicator(dateId) {
-        if (!freshnessEl) return;
-        if (!dateId) { freshnessEl.hidden = true; return; }
-        const datePart = String(dateId).slice(0, 10);
-        const parsed = Date.parse(datePart + 'T00:00:00Z');
-        if (!Number.isFinite(parsed)) { freshnessEl.hidden = true; return; }
-        const deltaH = (Date.now() - parsed) / 3_600_000;
-        let cls = 'fresh', label = 'Aktualne', icon = 'ph-check-circle';
-        if (deltaH > 24) { cls = 'outdated'; label = 'Przeterminowane'; icon = 'ph-warning-circle'; }
-        else if (deltaH > 6) { cls = 'stale'; label = 'Wczorajsze'; icon = 'ph-clock'; }
-        freshnessEl.className = `data-freshness ${cls}`;
-        freshnessEl.hidden = false;
-        freshnessEl.title = `Dane z ${datePart}`;
-        freshnessEl.textContent = label;
+    function extractNumericField(row, fieldName) {
+        if (!row || !fieldName) return NaN;
+        let raw = row[fieldName];
+        if ((raw == null || raw === '') && fieldName === 'MacD_Line') {
+            raw = row['MacD_Fast_High'];
+        }
+        if ((raw == null || raw === '') && fieldName === 'MacD_Histogram') {
+            raw = row['MacD_Fast_Low'];
+        }
+        if (typeof raw === 'string' && /brak danych/i.test(raw)) return NaN;
+        if (fieldName === 'PCA_Value' || fieldName === 'PCA_Values') {
+            const { valText } = parsePCA(raw || row['PCA_Values'] || '');
+            return parsePolishDecimal(valText);
+        }
+        if (typeof raw === 'string' && raw.includes('(')) {
+            return parsePolishDecimal(String(raw).split('(')[0]);
+        }
+        return parsePolishDecimal(raw);
     }
-    
-    // Process and Render Chart — now uses currentChartInterval
+
+    function getGroupSortValue(rows, fieldName) {
+        const targetRow = rows.find(r => r['Interval'] === currentChartInterval) || rows[0];
+        if (!targetRow) return NaN;
+        return extractNumericField(targetRow, fieldName);
+    }
+
+    // Process and Render Chart
     function renderChart(dataRows) {
-        const filteredRows = dataRows.filter(r => r['Interval'] === currentChartInterval && r['PCA_Values']);
-        
-        if (filteredRows.length === 0) {
-            chartPanel.classList.add('hidden');
+        if (!hasDashboardTickerData()) {
+            setChartPanelVisible(false);
+            showChartEmptyState('');
             return;
         }
-        
-        chartPanel.classList.remove('hidden');
-        
-        // Parse and sort by PCA value descending
-        const chartData = filteredRows.map(row => {
-            const { valText, colorHex } = parsePCA(row['PCA_Values']);
-            const numVal = parsePolishDecimal(valText);
-            return {
-                ticker: row['Ticker'],
-                value: Number.isFinite(numVal) ? numVal : NaN,
-                color: colorHex || 'rgba(59, 130, 246, 0.8)'
-            };
-        }).filter(d => Number.isFinite(d.value)) // tylko poprawnie sparsowane liczby (nie ukrywaj całego wykresu przy 0)
-          .sort((a,b) => b.value - a.value);
+
+        setChartPanelVisible(true);
+
+        const field = METRIC_TO_FIELD[currentChartMetric] || 'PCA_Value';
+        const useFund = FUND_CHART_METRICS.has(currentChartMetric);
+        const chartInterval = getEffectiveChartInterval();
+        const filteredRows = dataRows.filter(r => {
+            if (useFund) return true;
+            return r['Interval'] === chartInterval;
+        });
+
+        const byTicker = new Map();
+        filteredRows.forEach(row => {
+            const t = row['Ticker'] || '';
+            if (!byTicker.has(t)) byTicker.set(t, row);
+        });
+
+        const chartData = [];
+        byTicker.forEach((row, ticker) => {
+            let numVal = NaN;
+            let color = null;
+            if (currentChartMetric === 'pca') {
+                const { valText, colorHex } = parsePCA(row['PCA_Values'] || row['PCA_Value'] || '');
+                numVal = parsePolishDecimal(valText);
+                color = colorHex;
+            } else {
+                numVal = extractNumericField(row, field);
+            }
+            if (!Number.isFinite(numVal)) return;
+            chartData.push({ ticker, value: numVal, color });
+        });
+
+        chartData.sort((a, b) => b.value - a.value);
+
+        const metricLabel = METRIC_LABELS[currentChartMetric] || currentChartMetric;
+        const intervalSuffix = useFund ? '' : ` (${chartInterval})`;
 
         if (chartData.length === 0) {
-            chartPanel.classList.add('hidden');
+            const emptyMsg = useFund
+                ? `Brak danych ${metricLabel} dla widocznych tickerów.`
+                : `Brak danych ${metricLabel} (${chartInterval}) dla widocznych tickerów.`;
+            showChartEmptyState(emptyMsg);
             return;
         }
 
-        const labels = chartData.map(d => d.ticker);
-        const data = chartData.map(d => d.value);
-        const bgColors = chartData.map(d => d.color);
+        hideChartEmptyState();
 
-        if (pcaChartInstance) {
-            pcaChartInstance.destroy();
-        }
+        const values = chartData.map(d => d.value);
+        const median = values.slice().sort((a, b) => a - b)[Math.floor(values.length / 2)] || 0;
+
+        const bgColors = chartData.map(d => {
+            if (currentChartMetric === 'pca' && d.color) return d.color;
+            if (d.value >= median) return 'rgba(16, 185, 129, 0.75)';
+            return 'rgba(239, 68, 68, 0.75)';
+        });
+
+        if (pcaChartInstance) pcaChartInstance.destroy();
 
         const ctx = pcaChartCanvas.getContext('2d');
         Chart.defaults.color = '#94a3b8';
         Chart.defaults.font.family = 'Inter';
-        
+
         pcaChartInstance = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: labels,
+                labels: chartData.map(d => d.ticker),
                 datasets: [{
-                    label: `PCA (${currentChartInterval})`,
-                    data: data,
+                    label: `${metricLabel}${intervalSuffix}`,
+                    data: chartData.map(d => d.value),
                     backgroundColor: bgColors,
                     borderRadius: 4,
                     borderWidth: 0,
-                    barPercentage: 0.6
-                }]
+                    barPercentage: 0.6,
+                }],
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
-                    legend: {
-                        display: false
-                    },
+                    legend: { display: false },
                     tooltip: {
                         backgroundColor: 'rgba(15, 17, 21, 0.9)',
                         titleColor: '#fff',
@@ -830,43 +1008,30 @@ document.addEventListener('DOMContentLoaded', () => {
                         padding: 12,
                         displayColors: false,
                         callbacks: {
-                            label: function(context) {
-                                return `PCA: ${context.parsed.y}`;
-                            }
-                        }
-                    }
+                            label: (context) => `${metricLabel}: ${context.parsed.y}`,
+                        },
+                    },
                 },
                 scales: {
                     y: {
-                        grid: {
-                            color: 'rgba(255, 255, 255, 0.05)',
-                        },
-                        border: {
-                            dash: [4, 4],
-                            display: false
-                        }
+                        grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                        border: { dash: [4, 4], display: false },
                     },
                     x: {
-                        grid: {
-                            display: false
-                        },
-                        border: {
-                            display: false
-                        },
-                        ticks: {
-                            maxRotation: 45,
-                            minRotation: 45
-                        }
-                    }
-                }
-            }
+                        grid: { display: false },
+                        border: { display: false },
+                        ticks: { maxRotation: 45, minRotation: 45 },
+                    },
+                },
+            },
         });
     }
 
-    /** Polskie / TV: "61,33", "1 234,56", "1 234,56" (NBSP) */
+    /** Polskie / TV: "61,33", "1 234,56", "1 234,56" (NBSP), "−3,88" (unicode minus) */
     function parsePolishDecimal(text) {
         if (text == null || text === '' || text === '--') return NaN;
         let s = String(text).trim().replace(/\u00a0/g, ' ').replace(/\s/g, '');
+        s = s.replace(/\u2212/g, '-');
         if (!s) return NaN;
         if (s.includes(',') && s.includes('.')) {
             s = s.replace(/\./g, '').replace(',', '.');
@@ -1133,7 +1298,7 @@ document.addEventListener('DOMContentLoaded', () => {
         resultsGrid.innerHTML = '';
         if (dataRows.length === 0) {
             const hint = currentData.length === 0
-                ? 'Brak danych dla wybranej daty.'
+                ? 'Brak danych w dashboardzie — uruchom scraper lub odśwież fundamentale.'
                 : 'Dostosuj filtr lub wyszukiwanie, aby zobaczyć wyniki.';
             resultsGrid.innerHTML = `
                 <div class="empty-state" style="grid-column: 1 / -1;">
@@ -1171,6 +1336,30 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'pca-asc':
                 sortedKeys.sort((a, b) => cmpPcaAsc(getGroupPCA(groupedData[a]), getGroupPCA(groupedData[b])));
                 break;
+            case 'macd-desc':
+                sortedKeys.sort((a, b) => cmpPcaDesc(getGroupSortValue(groupedData[a], 'MacD_Line'), getGroupSortValue(groupedData[b], 'MacD_Line')));
+                break;
+            case 'macd-asc':
+                sortedKeys.sort((a, b) => cmpPcaAsc(getGroupSortValue(groupedData[a], 'MacD_Line'), getGroupSortValue(groupedData[b], 'MacD_Line')));
+                break;
+            case 'pe-desc':
+                sortedKeys.sort((a, b) => cmpPcaDesc(getGroupSortValue(groupedData[a], 'Fund_PE'), getGroupSortValue(groupedData[b], 'Fund_PE')));
+                break;
+            case 'pe-asc':
+                sortedKeys.sort((a, b) => cmpPcaAsc(getGroupSortValue(groupedData[a], 'Fund_PE'), getGroupSortValue(groupedData[b], 'Fund_PE')));
+                break;
+            case 'roe-desc':
+                sortedKeys.sort((a, b) => cmpPcaDesc(getGroupSortValue(groupedData[a], 'Fund_ROE'), getGroupSortValue(groupedData[b], 'Fund_ROE')));
+                break;
+            case 'roe-asc':
+                sortedKeys.sort((a, b) => cmpPcaAsc(getGroupSortValue(groupedData[a], 'Fund_ROE'), getGroupSortValue(groupedData[b], 'Fund_ROE')));
+                break;
+            case 'fcf-desc':
+                sortedKeys.sort((a, b) => cmpPcaDesc(getGroupSortValue(groupedData[a], 'Fund_FCF'), getGroupSortValue(groupedData[b], 'Fund_FCF')));
+                break;
+            case 'fcf-asc':
+                sortedKeys.sort((a, b) => cmpPcaAsc(getGroupSortValue(groupedData[a], 'Fund_FCF'), getGroupSortValue(groupedData[b], 'Fund_FCF')));
+                break;
             case 'consensus-bullish':
                 sortedKeys.sort((a, b) => cmpConsensusGroups(a, b, groupedData, 'bullish'));
                 break;
@@ -1199,6 +1388,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const cardClone = cardTemplate.content.cloneNode(true);
             const cardEl = cardClone.querySelector('.ticker-card');
             cardEl.dataset.ticker = ticker;
+            if (cardIsStale(rows)) {
+                cardEl.classList.add('card-stale');
+            }
 
             cardClone.querySelector('.ticker-name').textContent = ticker;
             const companyEl = cardClone.querySelector('.company-name');
@@ -1232,19 +1424,28 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const rescrapeBtn = cardClone.querySelector('.card-rescrape-btn');
+            const rescrapeMenuBtn = cardClone.querySelector('.card-rescrape-menu-btn');
+            const rescrapeMenu = cardClone.querySelector('.card-rescrape-menu');
             const historyBtn = cardClone.querySelector('.card-history-btn');
             const renameBtn = cardClone.querySelector('.card-rename-btn');
             const deleteBtn = cardClone.querySelector('.card-delete-btn');
             if (rescrapeBtn) {
                 if (rerunningTickers.has(ticker)) {
-                    rescrapeBtn.classList.add('spinning');
-                    rescrapeBtn.disabled = true;
+                    cardClone.querySelectorAll('.card-rescrape-wrap .card-action-btn').forEach(btn => {
+                        btn.classList.add('spinning');
+                        btn.disabled = true;
+                    });
                 }
                 rescrapeBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    requestRescrapeTicker(ticker, rescrapeBtn);
+                    requestRescrapeTicker(ticker, rescrapeBtn, { indicators: '' });
                 });
             }
+            wireDropdownMenu(rescrapeMenuBtn, rescrapeMenu, (item) => {
+                requestRescrapeTicker(ticker, rescrapeBtn, {
+                    indicators: item.dataset.rescrapeIndicators || '',
+                });
+            });
             if (historyBtn) {
                 historyBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -1303,6 +1504,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 cardEl.classList.add('ticker-config-stale');
                 addConfigIssueBanner(summaryContainer, ticker, configIssue);
             }
+
+            const fundRow = rows.find(r => r['Fund_PE'] || r['Fund_Source']) || rows[0];
+            const setFund = (sel, val) => {
+                const el = cardClone.querySelector(sel);
+                if (el) el.textContent = (val && String(val).trim() && String(val).toUpperCase() !== 'N/A') ? val : '—';
+            };
+            if (fundRow) {
+                setFund('.fund-pe', fundRow['Fund_PE']);
+                setFund('.fund-pb', fundRow['Fund_PB']);
+                setFund('.fund-ev', fundRow['Fund_EV_EBITDA']);
+                setFund('.fund-roe', fundRow['Fund_ROE']);
+                setFund('.fund-margin', fundRow['Fund_NetMargin']);
+                setFund('.fund-de', fundRow['Fund_DE']);
+                setFund('.fund-fcf', fundRow['Fund_FCF']);
+                const fundUpdated = cardClone.querySelector('.fund-updated-at');
+                if (fundUpdated && fundRow['Fund_Updated_At']) {
+                    fundUpdated.hidden = false;
+                    fundUpdated.textContent = `Fundamentale: ${fundRow['Fund_Updated_At']} · ${fundRow['Fund_Source'] || ''}`;
+                }
+            }
             
             const badgesContainer = cardClone.querySelector('.watchlist-badges');
             const dRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1D') || rows[0];
@@ -1352,6 +1573,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const colClone = columnTemplate.content.cloneNode(true);
                 
                 colClone.querySelector('.interval-badge').textContent = row['Interval'] || '1D';
+                const lastRefreshEl = colClone.querySelector('[data-role="last-refresh"]');
+                if (lastRefreshEl) {
+                    const lr = row['Last_Refresh'] || '';
+                    lastRefreshEl.textContent = lr ? `Ostatnio: ${lr}` : '';
+                    lastRefreshEl.title = lr ? `Dane techniczne z ${lr}` : '';
+                }
 
                 // Per-interval brakujące wskaźniki — adnotacja z backendu.
                 const missing = Array.isArray(row['Missing_Indicators'])
@@ -1650,6 +1877,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnRunNoData = document.getElementById('btn-run-scraper-no-data');
     const btnRunSelected = document.getElementById('btn-run-scraper-selected');
     const btnStopScraper = document.getElementById('btn-stop-scraper');
+    const btnRefreshFundamentalsAll = document.getElementById('btn-refresh-fundamentals-all');
 
     function switchView(targetId) {
         navLinks.forEach(l => {
@@ -1668,7 +1896,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 clearInterval(statusInterval);
                 statusInterval = null;
             }
-            fetchHistory();
+            fetchDashboard();
         }
     }
 
@@ -1842,13 +2070,91 @@ document.addEventListener('DOMContentLoaded', () => {
     let previousScraperStatus = 'idle';
 
     function parseScraperProgress(progressStr) {
-        // progressStr might be "15/175"
-        if (!progressStr || !progressStr.includes('/')) return 0;
-        const parts = progressStr.split('/');
-        const current = parseInt(parts[0], 10);
-        const total = parseInt(parts[1], 10);
-        if (total === 0) return 0;
+        // "45/78 · ticker 15/26 · wsk. 2/3" — pierwsza para to postęp łączny
+        if (!progressStr || typeof progressStr !== 'string') return 0;
+        const m = progressStr.match(/^(\d+)\s*\/\s*(\d+)/);
+        if (!m) return 0;
+        const current = parseInt(m[1], 10);
+        const total = parseInt(m[2], 10);
+        if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 0) return 0;
         return (current / total) * 100;
+    }
+
+    function formatScraperProgressLabel(progressStr, currentTicker, currentIndicator) {
+        if (currentIndicator && currentTicker) {
+            return `${currentTicker} · ${currentIndicator}`;
+        }
+        if (!progressStr) return currentTicker ? `(${currentTicker})` : '';
+        const detail = progressStr.includes('·')
+            ? progressStr.split('·').slice(1).join('·').trim()
+            : '';
+        if (currentTicker && detail) {
+            return `${currentTicker} (${detail})`;
+        }
+        if (currentTicker) return currentTicker;
+        return progressStr;
+    }
+
+    function formatScraperStartToast(tickers, indicators) {
+        const indList = Array.isArray(indicators)
+            ? indicators.filter(Boolean)
+            : (indicators ? [indicators] : []);
+        const tickerLabel = Array.isArray(tickers) && tickers.length === 1
+            ? tickers[0]
+            : (Array.isArray(tickers) && tickers.length > 1
+                ? `${tickers.length} tickerów`
+                : 'wszystkie tickery');
+        if (indList.length === 1) {
+            return `Uruchomiono scraper: ${indList[0]} dla ${tickerLabel}`;
+        }
+        if (indList.length > 1) {
+            return `Uruchomiono scraper: ${indList.join(', ')} dla ${tickerLabel}`;
+        }
+        return `Uruchomiono scraper dla ${tickerLabel}`;
+    }
+
+    function parseIndicatorSelection(raw) {
+        const token = String(raw || '').trim();
+        if (!token) return [];
+        return token.split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    function wireDropdownMenu(toggleBtn, menuEl, onSelect) {
+        if (!toggleBtn || !menuEl || toggleBtn.dataset.menuWired === '1') return;
+        toggleBtn.dataset.menuWired = '1';
+        const close = () => {
+            menuEl.classList.add('hidden');
+            toggleBtn.setAttribute('aria-expanded', 'false');
+        };
+        toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const open = menuEl.classList.contains('hidden');
+            document.querySelectorAll('.card-rescrape-menu:not(.hidden), .scraper-dropdown-menu:not(.hidden)')
+                .forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('[aria-haspopup="true"][aria-expanded="true"]')
+                .forEach(el => el.setAttribute('aria-expanded', 'false'));
+            if (open) {
+                menuEl.classList.remove('hidden');
+                toggleBtn.setAttribute('aria-expanded', 'true');
+            }
+        });
+        menuEl.querySelectorAll('[role="menuitem"]').forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                close();
+                onSelect(item);
+            });
+        });
+    }
+
+    if (!window.__dropdownMenuCloseBound) {
+        window.__dropdownMenuCloseBound = true;
+        document.addEventListener('click', () => {
+            document.querySelectorAll('.card-rescrape-menu:not(.hidden), .scraper-dropdown-menu:not(.hidden)')
+                .forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('[aria-haspopup="true"][aria-expanded="true"]')
+                .forEach(el => el.setAttribute('aria-expanded', 'false'));
+        });
     }
 
     async function pollScraperStatus() {
@@ -1861,7 +2167,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const data = await res.json();
 
                     if (previousScraperStatus === 'running' && data.status === 'done') {
-                        fetchHistory();
+                        fetchDashboard();
                     }
                     previousScraperStatus = data.status;
 
@@ -1877,7 +2183,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         btnStopScraper.classList.remove('hidden');
                         
                         progressText.textContent = data.progress || "Uruchamianie...";
-                        currentTickerLabel.textContent = data.current_ticker || "";
+                        currentTickerLabel.textContent = formatScraperProgressLabel(
+                            data.progress,
+                            data.current_ticker || "",
+                            data.current_indicator || ""
+                        );
                         
                         const pct = parseScraperProgress(data.progress);
                         progressFill.style.width = pct + '%';
@@ -1918,6 +2228,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const payload = { tickers: tickersOverride };
             if (options?.noDataOnly) payload.no_data_only = true;
             if (options?.fresh) payload.fresh = true;
+            const indicators = parseIndicatorSelection(options?.indicators);
+            if (indicators.length) payload.indicators = indicators;
             const res = await fetch('/api/scraper/run', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1925,12 +2237,37 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const data = await res.json();
             if (data.status === 'started' || data.status === 'already_running') {
+                const toastIndicators = data.indicators?.length
+                    ? data.indicators
+                    : indicators;
+                const toastTickers = data.tickers?.length
+                    ? data.tickers
+                    : tickersOverride;
+                if (options?.noDataOnly && Number.isFinite(Number(data.count))) {
+                    showToast({
+                        type: 'success',
+                        title: 'Odświeżanie Brak Danych',
+                        message: toastIndicators.length
+                            ? `${formatScraperStartToast(toastTickers.length ? toastTickers : [''], toastIndicators)} (${data.count} tickerów).`
+                            : `Uruchomiono scraper dla ${data.count} tickerów z „Brak danych”.`,
+                    });
+                } else if (toastIndicators.length || (toastTickers && toastTickers.length)) {
+                    showToast({
+                        type: 'success',
+                        title: 'Scraper',
+                        message: formatScraperStartToast(
+                            toastTickers?.length ? toastTickers : [],
+                            toastIndicators,
+                        ),
+                    });
+                }
                 pollScraperStatus();
             } else if (data.status === 'no_data_empty') {
+                const count = Number.isFinite(Number(data.count)) ? Number(data.count) : 0;
                 showToast({
                     type: 'info',
                     title: 'Brak tickerów',
-                    message: data.message || 'Nie znaleziono tickerów z Brak Danych do odświeżenia.',
+                    message: data.message || `Nie znaleziono tickerów z „Brak danych” do odświeżenia (${count}).`,
                 });
             } else {
                 alert("Błąd: " + data.message);
@@ -1968,14 +2305,57 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     btnRunNoData?.addEventListener('click', async () => {
+        await runNoDataScrape([]);
+    });
+
+    const btnRunNoDataMenu = document.getElementById('btn-run-scraper-no-data-menu');
+    const scraperNoDataMenu = document.getElementById('scraper-no-data-menu');
+    wireDropdownMenu(btnRunNoDataMenu, scraperNoDataMenu, async (item) => {
+        const indicators = parseIndicatorSelection(item.dataset.noDataIndicators);
+        await runNoDataScrape(indicators);
+    });
+
+    async function runNoDataScrape(indicators) {
+        let previewCount = null;
+        try {
+            const previewRes = await fetch('/api/tickers/no_data');
+            if (previewRes.ok) {
+                const preview = await previewRes.json();
+                if (Number.isFinite(Number(preview.count))) {
+                    previewCount = Number(preview.count);
+                }
+            }
+        } catch (e) { /* fallback — confirm bez licznika */ }
+
+        const indHint = indicators.length === 1
+            ? ` (tylko ${indicators[0]})`
+            : (indicators.length > 1 ? ` (${indicators.join(', ')})` : '');
+        const countHint = previewCount === null
+            ? 'Tickery zostaną wybrane według stanu dashboardu (Brak danych / brak wierszy w CSV).'
+            : (previewCount === 0
+                ? 'Na dashboardzie nie ma obecnie tickerów z „Brak danych”.'
+                : `Znaleziono ${previewCount} tickerów z „Brak danych” na dashboardzie.`);
+
         const ok = await confirmDialog({
-            title: 'Odświeżyć tylko tickery z „Brak Danych”?',
-            message: 'Uruchomione zostaną tylko tickery oznaczone jako Brak Danych / NO_DATA w najnowszym pliku wynikowym.',
-            confirmLabel: 'Odśwież',
+            title: `Odświeżyć tylko tickery z „Brak Danych”${indHint}?`,
+            message: countHint,
+            confirmLabel: previewCount === 0 ? 'Sprawdź ponownie' : 'Odśwież',
             cancelLabel: 'Anuluj',
         });
-        if (ok) startScraper([], { noDataOnly: true });
-    });
+        if (!ok) return;
+        if (previewCount === 0) {
+            showToast({
+                type: 'info',
+                title: 'Brak tickerów',
+                message: 'Na dashboardzie nie ma tickerów z „Brak danych” do odświeżenia (0).',
+            });
+            return;
+        }
+        startScraper([], {
+            noDataOnly: true,
+            indicators: indicators.length ? indicators.join(',') : undefined,
+        });
+    }
 
     btnRunSelected.addEventListener('click', () => {
         const cbs = document.querySelectorAll('.ticker-select-cb:checked');
@@ -1985,6 +2365,46 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         startScraper(selectedTickers);
+    });
+
+    btnRefreshFundamentalsAll?.addEventListener('click', async () => {
+        const btn = btnRefreshFundamentalsAll;
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ph ph-spinner"></i> Pobieranie fundamentów…';
+        try {
+            const res = await fetch('/api/fundamentals/refresh', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ all: true }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.detail || data.message || 'Nie udało się odświeżyć fundamentów.');
+            }
+            const withData = data.with_data ?? 0;
+            const count = data.count ?? 0;
+            const toastType = data.status === 'partial' ? 'warning' : 'success';
+            showToast({
+                type: toastType,
+                title: 'Fundamentale',
+                message: data.message || (
+                    withData === count
+                        ? `Zaktualizowano ${withData} tickerów.`
+                        : `Przetworzono ${count}, z danymi ${withData}.`
+                ),
+            });
+            await fetchDashboard();
+        } catch (e) {
+            showToast({
+                type: 'error',
+                title: 'Fundamentale',
+                message: String(e.message || e),
+            });
+        } finally {
+            btn.innerHTML = original;
+            btn.disabled = false;
+        }
     });
 
     btnStopScraper.addEventListener('click', async () => {
@@ -2038,25 +2458,63 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     // PER-TICKER RE-SCRAPE
     // ==========================================
-    async function requestRescrapeTicker(ticker, btnEl) {
+    async function waitForScraperCompletion(timeoutMs = 600_000) {
+        const deadline = Date.now() + timeoutMs;
+        let lastStatus = 'running';
+        while (Date.now() < deadline) {
+            const res = await fetch('/api/scraper/status');
+            if (!res.ok) break;
+            const data = await res.json();
+            lastStatus = data?.status || 'idle';
+            if (lastStatus !== 'running') {
+                return data;
+            }
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        return { status: lastStatus };
+    }
+
+    async function requestRescrapeTicker(ticker, btnEl, options = {}) {
         if (!ticker || rerunningTickers.has(ticker)) return;
+        const indicators = parseIndicatorSelection(options?.indicators);
+        const indicatorOnly = indicators.length === 1;
         rerunningTickers.add(ticker);
         if (btnEl) {
             btnEl.classList.add('spinning');
             btnEl.disabled = true;
         }
+        const wrap = btnEl?.closest('.card-rescrape-wrap');
+        if (wrap) {
+            wrap.querySelectorAll('.card-action-btn').forEach(b => {
+                b.classList.add('spinning');
+                b.disabled = true;
+            });
+        }
         try {
+            const payload = { tickers: [ticker] };
+            if (indicators.length) payload.indicators = indicators;
             const res = await fetch('/api/scraper/run', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tickers: [ticker] }),
+                body: JSON.stringify(payload),
             });
             const data = await res.json();
             if (data.status === 'started') {
-                showToast({ type: 'info', title: 'Pobieranie', message: `${ticker}: zlecono ponowne pobranie.` });
+                startGlobalScraperPolling();
+                const startMsg = formatScraperStartToast([ticker], indicators);
+                showToast({ type: 'info', title: 'Pobieranie', message: startMsg });
+                const finalStatus = await waitForScraperCompletion();
+                if (finalStatus?.status === 'error') {
+                    showToast({
+                        type: 'error',
+                        title: 'Błąd scrapera',
+                        message: finalStatus.error || `Nie udało się pobrać techniki dla ${ticker}.`,
+                        duration: 10000,
+                    });
+                } else if (finalStatus?.status === 'stopped') {
+                    showToast({ type: 'info', title: 'Scraper zatrzymany', message: `${ticker}: pobieranie przerwane.` });
+                }
             } else if (data.status === 'already_running') {
-                // Scraper już coś robi — najprawdopodobniej pełny run. Pokaż
-                // użytkownikowi co leci i zaproponuj zatrzymanie.
                 let running = '';
                 try {
                     const st = await fetch('/api/scraper/status').then(r => r.json());
@@ -2071,18 +2529,32 @@ document.addEventListener('DOMContentLoaded', () => {
                         `Trwa inny pobór danych${running}. ` +
                         `Aby uruchomić tylko dla ${ticker}, kliknij najpierw „Zatrzymaj" w Konfiguracji.`,
                 });
+                return;
             } else {
                 showToast({ type: 'error', title: 'Błąd', message: data.message || 'Nie udało się uruchomić pobierania.' });
+                return;
             }
+
+            try {
+                if (!indicatorOnly) {
+                    await fetch('/api/fundamentals/refresh', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tickers: [ticker] }),
+                    });
+                }
+            } catch (_) { /* fundamentals optional */ }
+
+            await fetchDashboard();
+            const doneMsg = indicatorOnly
+                ? `${ticker}: zaktualizowano ${indicators[0]}.`
+                : `${ticker}: dane techniczne i fundamentale zaktualizowane.`;
+            showToast({ type: 'success', title: 'Odświeżono', message: doneMsg });
         } catch (e) {
             showToast({ type: 'error', title: 'Błąd połączenia', message: String(e.message || e) });
         } finally {
-            // Spinner gaśnie po zakończeniu scrapera (globalny polling) lub po 60s jako bezpiecznik
-            setTimeout(() => {
-                rerunningTickers.delete(ticker);
-                const stillBtn = document.querySelector(`.ticker-card[data-ticker="${cssEscape(ticker)}"] .card-rescrape-btn`);
-                if (stillBtn) { stillBtn.classList.remove('spinning'); stillBtn.disabled = false; }
-            }, 60_000);
+            rerunningTickers.delete(ticker);
+            clearRescrapeSpinner(ticker);
         }
     }
 
@@ -2093,8 +2565,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function clearRescrapeSpinner(ticker) {
         rerunningTickers.delete(ticker);
-        const btn = document.querySelector(`.ticker-card[data-ticker="${cssEscape(ticker)}"] .card-rescrape-btn`);
-        if (btn) { btn.classList.remove('spinning'); btn.disabled = false; }
+        const card = document.querySelector(`.ticker-card[data-ticker="${cssEscape(ticker)}"]`);
+        if (!card) return;
+        card.querySelectorAll('.card-rescrape-wrap .card-action-btn').forEach(btn => {
+            btn.classList.remove('spinning');
+            btn.disabled = false;
+        });
     }
 
     // ==========================================
@@ -2105,15 +2581,36 @@ document.addEventListener('DOMContentLoaded', () => {
     const historyModalSubtitle = document.getElementById('ticker-history-subtitle');
     const historyModalClose = document.getElementById('ticker-history-close');
     const historyIntervalToggle = document.getElementById('ticker-history-interval-toggle');
+    const historyMetricSelect = document.getElementById('ticker-history-metric');
     const historyCanvas = document.getElementById('ticker-history-chart');
     const historyEmptyEl = document.getElementById('ticker-history-empty');
+
+    const HISTORY_METRIC_LABELS = {
+        PCA: 'PCA',
+        MacD_Line: 'MacD Line',
+        MacD_Histogram: 'MacD Histogram',
+        Fund_PE: 'Fund P/E',
+        Fund_PB: 'Fund P/B',
+        Fund_EV_EBITDA: 'Fund EV/EBITDA',
+        Fund_ROE: 'Fund ROE',
+        Fund_FCF: 'Fund FCF',
+    };
+
+    function syncHistoryIntervalVisibility() {
+        if (!historyIntervalToggle) return;
+        const hide = String(currentHistoryMetric || '').startsWith('Fund_');
+        historyIntervalToggle.style.display = hide ? 'none' : '';
+    }
 
     function openHistoryModal(ticker) {
         if (!historyModal || !ticker) return;
         currentHistoryTicker = ticker;
         currentHistoryInterval = ALLOWED_INTERVAL.has(currentChartInterval) ? currentChartInterval : '1D';
-        historyModalTitle.textContent = `Historia PCA — ${ticker}`;
+        currentHistoryMetric = historyMetricSelect?.value || 'PCA';
+        syncHistoryIntervalVisibility();
+        historyModalTitle.textContent = `Historia — ${ticker}`;
         historyModalSubtitle.textContent = 'Ładowanie…';
+        if (historyMetricSelect) historyMetricSelect.value = currentHistoryMetric;
         if (historyIntervalToggle) {
             historyIntervalToggle.querySelectorAll('.interval-toggle-btn').forEach(b => {
                 b.classList.toggle('active', b.dataset.interval === currentHistoryInterval);
@@ -2140,6 +2637,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.target === historyModal) closeHistoryModal();
     });
 
+    historyMetricSelect?.addEventListener('change', (e) => {
+        currentHistoryMetric = e.target.value || 'PCA';
+        syncHistoryIntervalVisibility();
+        fetchTickerHistory();
+    });
+
     historyIntervalToggle?.addEventListener('click', (e) => {
         const btn = e.target.closest('.interval-toggle-btn');
         if (!btn) return;
@@ -2155,10 +2658,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!currentHistoryTicker) return;
         historyEmptyEl?.classList.add('hidden');
         try {
-            const res = await fetch(`/api/ticker/${encodeURIComponent(currentHistoryTicker)}/history?interval=${encodeURIComponent(currentHistoryInterval)}`);
+            const res = await fetch(
+                `/api/ticker/${encodeURIComponent(currentHistoryTicker)}/history?interval=${encodeURIComponent(currentHistoryInterval)}&metric=${encodeURIComponent(currentHistoryMetric)}`
+            );
             if (!res.ok) throw new Error('Błąd pobierania historii');
             const data = await res.json();
-            renderHistoryChart(data.history || []);
+            renderHistoryChart(data.history || [], data.metric || currentHistoryMetric);
         } catch (e) {
             console.error(e);
             if (historyModalSubtitle) historyModalSubtitle.textContent = 'Błąd pobierania historii';
@@ -2166,16 +2671,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function renderHistoryChart(points) {
+    function renderHistoryChart(points, metricKey) {
         if (historyChartInstance) {
             historyChartInstance.destroy();
             historyChartInstance = null;
         }
+        const metric = metricKey || currentHistoryMetric || 'PCA';
+        const metricLabel = HISTORY_METRIC_LABELS[metric] || metric;
         const clean = points.filter(p => Number.isFinite(p.value));
         if (historyModalSubtitle) {
+            const ivLabel = String(metric).startsWith('Fund_') ? '' : ` · interwał ${currentHistoryInterval}`;
             historyModalSubtitle.textContent = clean.length === 0
                 ? 'Brak punktów danych'
-                : `${clean.length} punktów — interwał ${currentHistoryInterval}`;
+                : `${clean.length} punktów — ${metricLabel}${ivLabel}`;
         }
         if (clean.length === 0) {
             historyEmptyEl?.classList.remove('hidden');
@@ -2195,7 +2703,7 @@ document.addEventListener('DOMContentLoaded', () => {
             data: {
                 labels,
                 datasets: [{
-                    label: `PCA (${currentHistoryInterval})`,
+                    label: `${metricLabel}${String(metric).startsWith('Fund_') ? '' : ` (${currentHistoryInterval})`}`,
                     data: values,
                     borderColor: 'rgba(59, 130, 246, 0.8)',
                     backgroundColor: 'rgba(59, 130, 246, 0.12)',
@@ -2220,7 +2728,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         borderWidth: 1,
                         padding: 10,
                         callbacks: {
-                            label: (c) => `PCA: ${c.parsed.y}`,
+                            label: (c) => `${metricLabel}: ${c.parsed.y}`,
                         },
                     },
                 },
@@ -2270,9 +2778,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const status = data?.status || 'idle';
         if (status === 'running') {
             const pct = parseScraperProgress(data.progress);
-            const cur = data.current_ticker ? ` — ${data.current_ticker}` : '';
+            const overall = data.progress ? data.progress.split('·')[0].trim() : '';
+            const detail = formatScraperProgressLabel(
+                data.progress,
+                data.current_ticker || '',
+                data.current_indicator || '',
+            );
+            const parts = [];
+            if (overall) parts.push(overall);
+            if (detail) parts.push(detail);
             setGlobalBanner(true, {
-                text: `Scraper w toku${cur} ${data.progress ? '(' + data.progress + ')' : ''}`.trim(),
+                text: `Scraper w toku${parts.length ? ' — ' + parts.join(' · ') : ''}`,
                 progressPct: pct,
             });
         } else {
@@ -2321,24 +2837,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function autoReloadAfterScrape() {
-        const previousActive = activeDateId;
-        fetchHistory().then(() => {
-            if (!Array.isArray(currentDates) || currentDates.length === 0) return;
-
-            const newest = currentDates[0];
-            // Jeśli pojawił się nowszy plik niż ten, który użytkownik miał wybrany
-            // (np. fresh start utworzył dzisiejszy CSV), automatycznie na niego skacz.
-            if (newest && newest.id !== previousActive) {
-                selectDate(newest.id, newest.label);
-                return;
-            }
-            // Inaczej — reload aktualnie wybranego, niezależnie od tego czy
-            // ma dzisiejszą datę czy nie (resume mógł dopisać do wczorajszego).
-            if (previousActive) {
-                const obj = currentDates.find(d => d.id === previousActive);
-                if (obj) selectDate(previousActive, obj.label);
-            }
-        });
+        fetchDashboard();
     }
 
     // ==========================================
@@ -2543,13 +3042,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 message: `${ticker}: usunięto ${Number(data.rows_removed || 0)} wierszy z ${Number(data.files_modified || 0)} plików.`,
             });
             closeDeleteTickerModal();
-            await fetchHistory();
-            const current = currentDates.find(d => d.id === activeDateId) || currentDates[0];
-            if (current) {
-                await selectDate(current.id, current.label);
-            } else {
-                filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
-            }
+            await fetchDashboard();
+            filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
         } catch (err) {
             setDeleteError(String(err?.message || err || 'Nie udało się usunąć tickera.'));
             deleteConfirmBtn.disabled = false;
@@ -2752,11 +3246,41 @@ document.addEventListener('DOMContentLoaded', () => {
     const repairClose = document.getElementById('repair-symbols-close');
     const repairCancel = document.getElementById('repair-symbols-cancel');
     const repairSubmit = document.getElementById('repair-symbols-submit');
+    const repairSubmitRerun = document.getElementById('repair-symbols-submit-rerun');
     const repairListEl = document.getElementById('repair-symbols-list');
     const repairLoading = document.getElementById('repair-symbols-loading');
     const repairEmpty = document.getElementById('repair-symbols-empty');
     const repairError = document.getElementById('repair-symbols-error');
-    const repairRerun = document.getElementById('repair-symbols-rerun');
+
+    const TICKER_RE_REPAIR = /^[A-Z0-9._:-]{1,24}$/;
+
+    function repairRowHasSelection(row) {
+        if (!row) return false;
+        const cb = row.querySelector('input[type="checkbox"]');
+        if (!cb || !cb.checked) return false;
+        if (row.classList.contains('has-match') || row.classList.contains('has-other-match')) {
+            const oldT = row.dataset.old;
+            const radio = row.querySelector('input[type="radio"]:checked');
+            const newT = radio
+                ? radio.value
+                : (row.querySelector('.repair-new')?.textContent || '');
+            return !!(oldT && newT);
+        }
+        if (row.classList.contains('no-match')) {
+            const manual = row.querySelector('.repair-manual-input');
+            const val = (manual?.value || '').trim().toUpperCase();
+            return !!(row.dataset.old && val && TICKER_RE_REPAIR.test(val));
+        }
+        return false;
+    }
+
+    function syncRepairSubmitButtons() {
+        if (!repairListEl) return;
+        const anySelected = Array.from(repairListEl.querySelectorAll('.repair-row'))
+            .some(repairRowHasSelection);
+        if (repairSubmit) repairSubmit.disabled = !anySelected;
+        if (repairSubmitRerun) repairSubmitRerun.disabled = !anySelected;
+    }
 
     function rowIsNoData(row) {
         if (!row) return false;
@@ -2820,14 +3344,56 @@ document.addEventListener('DOMContentLoaded', () => {
         if (repairEmpty) repairEmpty.hidden = true;
         if (repairLoading) repairLoading.hidden = false;
         if (repairSubmit) repairSubmit.disabled = true;
+        if (repairSubmitRerun) repairSubmitRerun.disabled = true;
         loadRepairPreview();
+    }
+
+    function buildRepairCandidateRadios(item, idx, newEl, candListClass) {
+        const candList = document.createElement('div');
+        candList.className = candListClass || 'repair-row-candidates';
+        const allCands = [
+            ...(item.candidates || []),
+            ...(item.other_candidates || []),
+        ];
+        allCands.forEach((c, ci) => {
+            const lbl = document.createElement('label');
+            lbl.className = 'repair-candidate';
+            const radio = document.createElement('input');
+            radio.type = 'radio';
+            radio.name = `repair-cand-${idx}`;
+            radio.value = c.new;
+            if (ci === 0) radio.checked = true;
+            radio.addEventListener('change', () => {
+                if (newEl) newEl.textContent = c.new;
+                syncRepairSubmitButtons();
+            });
+            lbl.appendChild(radio);
+            const exch = document.createElement('span');
+            exch.className = 'repair-exchange';
+            exch.textContent = c.exchange || '';
+            lbl.appendChild(exch);
+            lbl.appendChild(document.createTextNode(`${c.new} · ${c.description || '—'}`));
+            candList.appendChild(lbl);
+        });
+        return candList;
     }
 
     function renderRepairList(items) {
         if (!repairListEl) return;
         repairListEl.innerHTML = '';
-        const usable = (items || []).filter(i => Array.isArray(i.candidates) && i.candidates.length > 0);
-        const skipped = (items || []).filter(i => !Array.isArray(i.candidates) || i.candidates.length === 0);
+        const usable = (items || []).filter(
+            i => Array.isArray(i.candidates) && i.candidates.length > 0
+        );
+        const otherOnly = (items || []).filter(
+            i => (!i.candidates || i.candidates.length === 0)
+                && Array.isArray(i.other_candidates)
+                && i.other_candidates.length > 0
+        );
+        const skipped = (items || []).filter(
+            i => (!i.candidates || i.candidates.length === 0)
+                && (!i.other_candidates || i.other_candidates.length === 0)
+                && !i.skipped
+        );
 
         usable.forEach((item, idx) => {
             const row = document.createElement('div');
@@ -2839,6 +3405,7 @@ document.addEventListener('DOMContentLoaded', () => {
             cb.checked = true;
             cb.id = `repair-cb-${idx}`;
             cb.setAttribute('aria-label', `Zastosuj rename dla ${item.old}`);
+            cb.addEventListener('change', syncRepairSubmitButtons);
             row.appendChild(cb);
 
             const body = document.createElement('div');
@@ -2870,41 +3437,89 @@ document.addEventListener('DOMContentLoaded', () => {
                 meta.appendChild(document.createTextNode(item.candidates[0].description || '—'));
                 body.appendChild(meta);
             } else {
-                const candList = document.createElement('div');
-                candList.className = 'repair-row-candidates';
-                item.candidates.forEach((c, ci) => {
-                    const lbl = document.createElement('label');
-                    lbl.className = 'repair-candidate';
-                    const radio = document.createElement('input');
-                    radio.type = 'radio';
-                    radio.name = `repair-cand-${idx}`;
-                    radio.value = c.new;
-                    if (ci === 0) radio.checked = true;
-                    radio.addEventListener('change', () => {
-                        newEl.textContent = c.new;
-                    });
-                    lbl.appendChild(radio);
-                    const exch = document.createElement('span');
-                    exch.className = 'repair-exchange';
-                    exch.textContent = c.exchange || '';
-                    lbl.appendChild(exch);
-                    lbl.appendChild(document.createTextNode(`${c.new} · ${c.description || '—'}`));
-                    candList.appendChild(lbl);
-                });
-                body.appendChild(candList);
+                body.appendChild(buildRepairCandidateRadios(item, idx, newEl));
             }
 
             row.appendChild(body);
             repairListEl.appendChild(row);
         });
 
-        skipped.forEach(item => {
+        otherOnly.forEach((item, idx) => {
+            const rowIdx = usable.length + idx;
+            const row = document.createElement('div');
+            row.className = 'repair-row has-other-match';
+            row.dataset.old = item.old;
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = false;
+            cb.id = `repair-cb-other-${rowIdx}`;
+            cb.setAttribute('aria-label', `Zastosuj rename dla ${item.old}`);
+            cb.addEventListener('change', syncRepairSubmitButtons);
+            row.appendChild(cb);
+
+            const body = document.createElement('div');
+            body.className = 'repair-row-body';
+
+            const title = document.createElement('div');
+            title.className = 'repair-row-title';
+            const oldEl = document.createElement('span');
+            oldEl.className = 'repair-old';
+            oldEl.textContent = item.old;
+            title.appendChild(oldEl);
+            const arrow = document.createElement('span');
+            arrow.className = 'repair-arrow';
+            arrow.textContent = '→';
+            title.appendChild(arrow);
+            const newEl = document.createElement('span');
+            newEl.className = 'repair-new';
+            newEl.textContent = item.other_candidates[0].new;
+            title.appendChild(newEl);
+            body.appendChild(title);
+
+            const meta = document.createElement('div');
+            meta.className = 'repair-row-meta repair-row-note';
+            meta.textContent = item.note || 'Dopasowanie poza skonfigurowanymi giełdami';
+            body.appendChild(meta);
+
+            body.appendChild(buildRepairCandidateRadios(
+                { candidates: [], other_candidates: item.other_candidates },
+                rowIdx,
+                newEl,
+            ));
+
+            const manualWrap = document.createElement('div');
+            manualWrap.className = 'repair-manual-wrap';
+            const manualInput = document.createElement('input');
+            manualInput.type = 'text';
+            manualInput.className = 'repair-manual-input';
+            manualInput.placeholder = 'Lub wpisz ręcznie, np. GPW:SYMBOL';
+            manualInput.spellcheck = false;
+            manualInput.addEventListener('input', () => {
+                const val = manualInput.value.trim().toUpperCase();
+                if (val && TICKER_RE_REPAIR.test(val)) {
+                    newEl.textContent = val;
+                    cb.checked = true;
+                    row.querySelectorAll('input[type="radio"]').forEach(r => { r.checked = false; });
+                }
+                syncRepairSubmitButtons();
+            });
+            manualWrap.appendChild(manualInput);
+            body.appendChild(manualWrap);
+
+            row.appendChild(body);
+            repairListEl.appendChild(row);
+        });
+
+        skipped.forEach((item, idx) => {
             const row = document.createElement('div');
             row.className = 'repair-row no-match';
+            row.dataset.old = item.old;
 
             const cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.disabled = true;
+            cb.addEventListener('change', syncRepairSubmitButtons);
             row.appendChild(cb);
 
             const body = document.createElement('div');
@@ -2914,10 +3529,54 @@ document.addEventListener('DOMContentLoaded', () => {
             title.textContent = item.old;
             body.appendChild(title);
             const meta = document.createElement('div');
-            meta.className = 'repair-row-meta';
+            meta.className = 'repair-row-meta repair-row-note';
             meta.textContent = item.note || 'Brak match-a';
             body.appendChild(meta);
 
+            const manualWrap = document.createElement('div');
+            manualWrap.className = 'repair-manual-wrap';
+            const manualInput = document.createElement('input');
+            manualInput.type = 'text';
+            manualInput.className = 'repair-manual-input';
+            manualInput.placeholder = 'Wpisz poprawny symbol, np. SSE:601088';
+            manualInput.spellcheck = false;
+            manualInput.addEventListener('input', () => {
+                const val = manualInput.value.trim().toUpperCase();
+                const valid = !!(val && TICKER_RE_REPAIR.test(val));
+                cb.disabled = !valid;
+                if (valid) cb.checked = true;
+                syncRepairSubmitButtons();
+            });
+            manualWrap.appendChild(manualInput);
+
+            const editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.className = 'btn btn-link repair-edit-btn';
+            editBtn.textContent = 'Edytuj ręcznie';
+            editBtn.addEventListener('click', () => {
+                closeRepairModal();
+                openRenameModal(item.old);
+            });
+            manualWrap.appendChild(editBtn);
+            body.appendChild(manualWrap);
+
+            row.appendChild(body);
+            repairListEl.appendChild(row);
+        });
+
+        (items || []).filter(i => i.skipped).forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'repair-row no-match skipped';
+            const body = document.createElement('div');
+            body.className = 'repair-row-body';
+            const title = document.createElement('div');
+            title.className = 'repair-row-title';
+            title.textContent = item.old;
+            body.appendChild(title);
+            const meta = document.createElement('div');
+            meta.className = 'repair-row-meta';
+            meta.textContent = item.note || 'Pominięto';
+            body.appendChild(meta);
             row.appendChild(body);
             repairListEl.appendChild(row);
         });
@@ -2926,16 +3585,94 @@ document.addEventListener('DOMContentLoaded', () => {
             repairListEl.hidden = false;
         }
         if (repairEmpty) {
-            repairEmpty.hidden = usable.length > 0 || skipped.length > 0;
+            repairEmpty.hidden = repairListEl.children.length > 0;
         }
-        if (repairSubmit) repairSubmit.disabled = usable.length === 0;
+        syncRepairSubmitButtons();
+    }
+
+    function collectRepairRenames() {
+        if (!repairListEl) return [];
+        const renames = [];
+        repairListEl.querySelectorAll('.repair-row.has-match, .repair-row.has-other-match').forEach(row => {
+            if (!repairRowHasSelection(row)) return;
+            const oldT = row.dataset.old;
+            const radio = row.querySelector('input[type="radio"]:checked');
+            const manual = row.querySelector('.repair-manual-input');
+            const manualVal = (manual?.value || '').trim().toUpperCase();
+            let newT = '';
+            if (manualVal && TICKER_RE_REPAIR.test(manualVal)) {
+                newT = manualVal;
+            } else if (radio) {
+                newT = radio.value;
+            } else {
+                newT = row.querySelector('.repair-new')?.textContent || '';
+            }
+            if (oldT && newT) renames.push({ old: oldT, new: newT.trim().toUpperCase() });
+        });
+        repairListEl.querySelectorAll('.repair-row.no-match:not(.skipped)').forEach(row => {
+            if (!repairRowHasSelection(row)) return;
+            const oldT = row.dataset.old;
+            const manualVal = (row.querySelector('.repair-manual-input')?.value || '').trim().toUpperCase();
+            if (oldT && manualVal) renames.push({ old: oldT, new: manualVal });
+        });
+        return renames;
+    }
+
+    async function submitRepairRenames(rerun) {
+        const renames = collectRepairRenames();
+        if (renames.length === 0) {
+            setRepairError('Zaznacz co najmniej jedną propozycję lub wpisz symbol ręcznie.');
+            return;
+        }
+        setRepairError('');
+        if (repairSubmit) repairSubmit.disabled = true;
+        if (repairSubmitRerun) repairSubmitRerun.disabled = true;
+        try {
+            const body = {
+                renames,
+                rerun: !!rerun,
+                date_id: null,
+            };
+            const res = await fetch('/api/tickers/repair_no_data', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                const detail = data?.detail || `HTTP ${res.status}`;
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+
+            const appliedCount = (data.applied || []).length;
+            const errorCount = (data.errors || []).length;
+            renames.forEach(({ old, new: newT }) => {
+                markTickerRenamed(old, newT);
+            });
+            if (appliedCount > 0) {
+                if (rerun) {
+                    showToast(`Naprawiono ${appliedCount} symbol(i). Scraper uruchomiony.`, 'success');
+                } else {
+                    showToast(`Zapisano ${appliedCount} symbol(i). Uruchom scraper ręcznie, gdy gotowe.`, 'success');
+                }
+            }
+            if (errorCount > 0) {
+                showToast(`Nie udało się naprawić ${errorCount} symbol(i).`, 'error');
+            }
+            if (rerun && data.scraper && data.scraper.status && data.scraper.status === 'no_data_empty') {
+                showToast('Brak no-data tickerów do scrapera po renamie.', 'info');
+            }
+            closeRepairModal();
+            await fetchDashboard();
+        } catch (err) {
+            setRepairError(String(err?.message || err || 'Błąd zapisu'));
+            syncRepairSubmitButtons();
+        }
     }
 
     async function loadRepairPreview() {
         try {
-            const url = activeDateId
-                ? `/api/tickers/repair_no_data?date_id=${encodeURIComponent(activeDateId)}`
-                : '/api/tickers/repair_no_data';
+            const url = '/api/tickers/repair_no_data';
             const res = await fetch(url);
             if (!res.ok) {
                 const txt = await res.text();
@@ -2959,63 +3696,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.target === repairModal) closeRepairModal();
     });
 
-    repairSubmit?.addEventListener('click', async () => {
-        if (!repairListEl) return;
-        const renames = [];
-        repairListEl.querySelectorAll('.repair-row.has-match').forEach(row => {
-            const cb = row.querySelector('input[type="checkbox"]');
-            if (!cb || !cb.checked) return;
-            const oldT = row.dataset.old;
-            const radio = row.querySelector('input[type="radio"]:checked');
-            const newT = radio ? radio.value : (row.querySelector('.repair-new')?.textContent || '');
-            if (oldT && newT) renames.push({ old: oldT, new: newT });
-        });
-        if (renames.length === 0) {
-            setRepairError('Zaznacz co najmniej jedną propozycję.');
-            return;
-        }
-        setRepairError('');
-        repairSubmit.disabled = true;
-        try {
-            const body = {
-                renames,
-                rerun: !!repairRerun?.checked,
-                date_id: activeDateId || null,
-            };
-            const res = await fetch('/api/tickers/repair_no_data', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                const detail = data?.detail || `HTTP ${res.status}`;
-                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
-            }
-
-            const appliedCount = (data.applied || []).length;
-            const errorCount = (data.errors || []).length;
-            renames.forEach(({ old, new: newT }) => {
-                markTickerRenamed(old, newT);
-            });
-            if (appliedCount > 0) {
-                showToast(`Naprawiono ${appliedCount} symbol(i).`, 'success');
-            }
-            if (errorCount > 0) {
-                showToast(`Nie udało się naprawić ${errorCount} symbol(i).`, 'error');
-            }
-            if (data.scraper && data.scraper.status && data.scraper.status !== 'no_data_empty') {
-                showToast('Scraper uruchomiony dla naprawionych tickerów.', 'info');
-            }
-            closeRepairModal();
-            await fetchHistory();
-            const obj = currentDates.find(d => d.id === activeDateId);
-            if (obj) selectDate(activeDateId, obj.label);
-        } catch (err) {
-            setRepairError(String(err?.message || err || 'Błąd zapisu'));
-            repairSubmit.disabled = false;
-        }
-    });
+    repairSubmit?.addEventListener('click', () => submitRepairRenames(false));
+    repairSubmitRerun?.addEventListener('click', () => submitRepairRenames(true));
 
     // Start
     init();

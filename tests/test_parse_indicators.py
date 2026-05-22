@@ -685,6 +685,51 @@ def test_hts_preserves_empty_slots_before_later_zeroes():
     assert r["HTS Panel_Cross"] == "Brak Crossa"
 
 
+def test_hts_labeled_slow_zero_treated_as_missing():
+    """GPW:TXT 1M — etykiety Slow z placeholderem 0.0000 nie wolno trafić do CSV."""
+    from tv_scraper import parse_indicators
+
+    html = f"""
+    <div data-qa-id="legend-source-item">
+      <div data-qa-id="title-wrapper legend-source-title">HTS PANEL v3.0.2</div>
+      <div data-qa-id="legend-source-values">
+        {_labeled_value_item("Fast High", "81,37", "rgb(0, 188, 212)")}
+        {_labeled_value_item("Fast Low", "75,20", "rgb(0, 188, 212)")}
+        {_labeled_value_item("Slow High", "0.0000", "rgb(242, 54, 69)")}
+        <div class="valueItem"><div class="valueTitle">Slow Low</div><div class="valueValue">∅</div></div>
+        {_labeled_value_item("TREND Change", "2,5", "rgb(0, 255, 0)")}
+      </div>
+    </div>
+    """
+    r = parse_indicators(html, ["HTS Panel"])
+    assert r["HTS Panel_Fast_High"].startswith("81,37")
+    assert r["HTS Panel_Fast_Low"].startswith("75,20")
+    assert r.get("HTS Panel_Slow_High") is None
+    assert r.get("HTS Panel_Slow_Low") is None
+    assert r["HTS Panel_Trend"] == "Brak trendu"
+    assert "2,5" in r["HTS Panel_Trend_Change"]
+
+
+def test_macd_gpw_txt_1w_unicode_minus_wzrostowy():
+    """GPW:TXT 1W — ujemny MACD nad Signal, zielona linia → Wzrostowy."""
+    from tv_scraper import parse_indicators
+
+    html = f"""
+    <div data-qa-id="legend-source-item">
+      <div data-qa-id="title-wrapper legend-source-title">CM_Ult_MacD_MTF</div>
+      <div data-qa-id="legend-source-values">
+        {_labeled_value_item("MACD", "−1,839", "rgb(0, 255, 0)")}
+        {_labeled_value_item("Signal", "−3,066", "rgb(255, 235, 59)")}
+      </div>
+    </div>
+    """
+    r = parse_indicators(html, ["MacD"])
+    assert r["MacD_Line"].startswith("−1,839")
+    assert r["MacD_Signal"].startswith("−3,066")
+    assert r["MacD_Trend"] == "Wzrostowy"
+    assert "Zielony" in r["MacD_Line"]
+
+
 def test_macd_uses_value_title_color_for_trend():
     from tv_scraper import parse_indicators
 
@@ -737,4 +782,105 @@ def test_macd_falls_back_to_signal_compare_when_color_missing():
     </div>
     """
     r = parse_indicators(html, ["MacD"])
+    assert r["MacD_Trend"] == "Spadkowy"
+
+
+def test_macd_title_score_prefers_cm_ult_mtf():
+    from tv_scraper import _macd_title_score
+
+    assert _macd_title_score("CM_Ult_MacD_MTF 60 12 26") == 3
+    assert _macd_title_score("MACD 12 26 close") == 1
+    assert _macd_title_score("Moving Average") == 0
+
+
+def test_verify_indicator_present_retries(monkeypatch):
+    """`_verify_indicator_present` retries until legenda zwróci True."""
+    from tv_scraper import _verify_indicator_present
+
+    states = [False, False, True]
+    calls: list = []
+
+    def fake_has(_page, name):
+        calls.append(name)
+        return states.pop(0) if states else False
+
+    monkeypatch.setattr("tv_scraper._page_legend_has_indicator", fake_has)
+    monkeypatch.setattr("tv_scraper.time.sleep", lambda _s: None)
+
+    assert _verify_indicator_present(None, "MacD", attempts=3, delay_s=0) is True
+    assert calls == ["MacD", "MacD", "MacD"]
+
+
+def test_verify_indicator_present_returns_false_when_never_appears(monkeypatch):
+    from tv_scraper import _verify_indicator_present
+
+    monkeypatch.setattr(
+        "tv_scraper._page_legend_has_indicator", lambda _p, _n: False
+    )
+    monkeypatch.setattr("tv_scraper.time.sleep", lambda _s: None)
+
+    assert _verify_indicator_present(None, "MacD", attempts=3, delay_s=0) is False
+
+
+def test_macd_scoring_picks_cm_ult_with_both_legend_items_visible():
+    """Dwa wpisy legendy jednocześnie: generic MACD i CM_Ult_MacD_MTF (12, 26, 9, ...).
+
+    Scoring (``_macd_title_score`` w ``parse_indicators``) musi wybrać CM_Ult.
+    """
+    from tv_scraper import parse_indicators
+
+    html = """
+    <div data-qa-id="legend-source-item">
+      <div data-qa-id="title-wrapper legend-source-title">MACD 12 26 close</div>
+      <div data-qa-id="legend-source-values">
+        <div class="valueItem">
+          <div class="valueTitle">MACD</div>
+          <div class="valueValue" style="color: rgb(242, 54, 69);">0.1111</div>
+        </div>
+        <div class="valueItem">
+          <div class="valueTitle">Signal</div>
+          <div class="valueValue" style="color: rgb(255, 235, 59);">0.2222</div>
+        </div>
+      </div>
+    </div>
+    <div data-qa-id="legend-source-item">
+      <div data-qa-id="title-wrapper legend-source-title">CM_Ult_MacD_MTF (12, 26, 9, close)</div>
+      <div data-qa-id="legend-source-values">
+        <div class="valueItem">
+          <div class="valueTitle">MACD</div>
+          <div class="valueValue" style="color: rgb(0, 255, 0);">0.9999</div>
+        </div>
+        <div class="valueItem">
+          <div class="valueTitle">Signal</div>
+          <div class="valueValue" style="color: rgb(255, 235, 59);">0.5555</div>
+        </div>
+      </div>
+    </div>
+    """
+    r = parse_indicators(html, ["MacD"])
+    assert r["MacD_Line"].startswith("0.9999")
+    assert "0.1111" not in r["MacD_Line"]
+
+
+def test_macd_generic_only_still_parses_score_1_path():
+    """Tylko wbudowany ``MACD`` (score=1) — parsowanie i tak ma wypełnić MacD_Line."""
+    from tv_scraper import parse_indicators
+
+    html = """
+    <div data-qa-id="legend-source-item">
+      <div data-qa-id="title-wrapper legend-source-title">MACD 12 26 close</div>
+      <div data-qa-id="legend-source-values">
+        <div class="valueItem">
+          <div class="valueTitle">MACD</div>
+          <div class="valueValue" style="color: rgb(242, 54, 69);">0.5</div>
+        </div>
+        <div class="valueItem">
+          <div class="valueTitle">Signal</div>
+          <div class="valueValue" style="color: rgb(255, 235, 59);">0.7</div>
+        </div>
+      </div>
+    </div>
+    """
+    r = parse_indicators(html, ["MacD"])
+    assert r.get("MacD_Line", "").startswith("0.5")
     assert r["MacD_Trend"] == "Spadkowy"

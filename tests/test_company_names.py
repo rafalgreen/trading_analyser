@@ -208,6 +208,43 @@ def test_lookup_symbol_match_caches_result(tmp_path, monkeypatch):
     mocked2.assert_not_called()
 
 
+def test_fetch_symbol_matches_returns_all_exchanges(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {"symbol": "601088", "exchange": "SSE", "description": "China Railway"},
+            {"symbol": "601088", "exchange": "GPW", "description": "Wrong"},
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ):
+        matches = cn.fetch_symbol_matches("601088")
+
+    assert len(matches) == 2
+    assert matches[0]["symbol"] == "SSE:601088"
+    assert matches[1]["symbol"] == "GPW:601088"
+
+
+def test_fetch_symbol_matches_caches_with_lookup_symbol_match(tmp_path, monkeypatch):
+    cn = _isolated_company_names(tmp_path, monkeypatch)
+    payload = {
+        "symbols": [
+            {"symbol": "ATC", "exchange": "GPW", "description": "Arctic Paper SA"},
+        ]
+    }
+    with patch.object(
+        cn.urllib.request, "urlopen", return_value=_fake_response(payload)
+    ) as mocked:
+        cn.lookup_symbol_match("ATC", ["GPW"])
+    assert mocked.call_count == 1
+
+    with patch.object(cn.urllib.request, "urlopen") as mocked2:
+        all_m = cn.fetch_symbol_matches("ATC")
+    assert all_m[0]["symbol"] == "GPW:ATC"
+    mocked2.assert_not_called()
+
+
 def test_lookup_symbol_match_empty_exchanges_returns_empty(tmp_path, monkeypatch):
     cn = _isolated_company_names(tmp_path, monkeypatch)
     with patch.object(cn.urllib.request, "urlopen") as mocked:

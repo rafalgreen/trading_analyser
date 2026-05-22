@@ -4,8 +4,9 @@ import os
 import json
 import argparse
 import logging
+import urllib.request
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 from playwright.sync_api import sync_playwright
@@ -14,14 +15,17 @@ from bs4 import BeautifulSoup
 from results_store import (
     CSV_META_COLUMNS,
     apply_final_scrape_status,
+    cell_nonempty,
     ensure_meta_columns as _ensure_meta_columns,
     get_row_for_ticker_interval,
     load_results_dataframe,
     merge_existing_row_into_row_data,
+    merge_indicator_into_row,
     order_result_columns as _order_result_columns,
     record_skipped_ticker,
     row_has_indicator_data,
     row_interval_complete,
+    save_fundamentals_row,
     save_results_row,
     ticker_fully_done_in_csv,
     ticker_marked_skipped_for_day,
@@ -57,6 +61,94 @@ def resolve_cdp_port(
             if 1 <= p <= 65535:
                 return p
     return 9222
+
+
+def is_tradingview_chart_url(url: str) -> bool:
+    """Czy URL wygląda na kartę wykresu / aplikacji TradingView (do reuse przez CDP)."""
+    u = (url or "").strip().lower()
+    if "tradingview.com" not in u:
+        return False
+    if "/chart" in u:
+        return True
+    if re.search(
+        r"tradingview\.com/(?:symbols?|watchlists|markets|ideas|script)",
+        u,
+    ):
+        return True
+    # Dowolna inna podstrona tradingview.com (zgodnie z dawnym _find_tv_page)
+    return bool(re.search(r"https?://(?:[\w.-]+\.)?tradingview\.com/", u))
+
+
+def _target_url(target: Any) -> str:
+    if isinstance(target, dict):
+        return str(target.get("url") or "")
+    return str(getattr(target, "url", None) or "")
+
+
+def _target_title(target: Any) -> str:
+    if isinstance(target, dict):
+        return str(target.get("title") or "")
+    try:
+        return str(getattr(target, "title", lambda: "")() or "")
+    except Exception:
+        return ""
+
+
+def pick_tradingview_chart_page(
+    targets: Iterable[Any],
+) -> Optional[Any]:
+    """Wybiera najlepszą kartę TradingView z listy stron Playwright lub wpisów ``/json/list``.
+
+    Priorytet: URL z ``/chart``, potem inne ``tradingview.com``, na końcu tytuł
+    zawierający „TradingView”.
+    """
+    chart_hits: List[Any] = []
+    other_tv: List[Any] = []
+    title_hits: List[Any] = []
+    for target in targets:
+        url = _target_url(target)
+        if is_tradingview_chart_url(url):
+            if "/chart" in url.lower():
+                chart_hits.append(target)
+            else:
+                other_tv.append(target)
+            continue
+        if "TradingView" in _target_title(target):
+            title_hits.append(target)
+    if chart_hits:
+        return chart_hits[0]
+    if other_tv:
+        return other_tv[0]
+    if title_hits:
+        return title_hits[0]
+    return None
+
+
+def cdp_list_targets(
+    port: int, host: str = "127.0.0.1", timeout_s: float = 2.0
+) -> List[Dict[str, Any]]:
+    """Zwraca listę celów CDP (karty, service workers…) z ``/json/list``."""
+    url = f"http://{host}:{int(port)}/json/list"
+    with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data if isinstance(data, list) else []
+
+
+def cdp_find_tradingview_chart_url(
+    port: int, host: str = "127.0.0.1", timeout_s: float = 2.0
+) -> Optional[str]:
+    """URL pierwszej karty typu ``page`` z wykresem TradingView, albo ``None``."""
+    pages = [
+        t
+        for t in cdp_list_targets(port, host=host, timeout_s=timeout_s)
+        if str(t.get("type") or "") == "page"
+    ]
+    picked = pick_tradingview_chart_page(pages)
+    if picked is None:
+        return None
+    url = _target_url(picked)
+    return url or None
+
 
 SLEEP_AFTER_INDICATOR_MODAL_S = 2
 SLEEP_AFTER_INDICATOR_QUERY_S = 3
@@ -284,6 +376,65 @@ def _format_duration(seconds: float) -> str:
     return f"{h}h {m}m {s}s"
 
 
+def _format_scraper_progress(
+    ticker_idx: int,
+    n_tickers: int,
+    ind_idx: int,
+    n_inds: int,
+    ind_name: str = "",
+) -> str:
+    """Postęp łączny (monotoniczny) + szczegóły fazy wskaźnika i tickera."""
+    n_tickers = max(int(n_tickers), 1)
+    n_inds = max(int(n_inds), 1)
+    ticker_idx = max(int(ticker_idx), 0)
+    ind_idx = max(int(ind_idx), 0)
+    overall_done = ind_idx * n_tickers + ticker_idx + 1
+    overall_total = n_tickers * n_inds
+    parts = [
+        f"{overall_done}/{overall_total}",
+        f"ticker {ticker_idx + 1}/{n_tickers}",
+        f"wsk. {ind_idx + 1}/{n_inds}",
+    ]
+    if ind_name:
+        parts.append(str(ind_name))
+    return " · ".join(parts)
+
+
+def resolve_run_indicators(
+    config_indicators: List[str],
+    cli_indicators: Optional[str] = None,
+    cli_indicator: Optional[str] = None,
+) -> tuple[List[str], List[str], bool]:
+    """Zwraca (indicators_to_run, all_config_indicators, is_indicator_subset)."""
+    all_inds = [str(i).strip() for i in config_indicators or [] if str(i).strip()]
+    if not all_inds:
+        all_inds = ["PCA", "HTS Panel", "MacD"]
+
+    raw = (cli_indicators or os.environ.get("TV_SCRAPER_INDICATORS") or "").strip()
+    if not raw and cli_indicator:
+        raw = str(cli_indicator).strip()
+
+    if not raw:
+        return all_inds, all_inds, False
+
+    cfg_map = {i.casefold(): i for i in all_inds}
+    selected: List[str] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        canon = cfg_map.get(token.casefold())
+        if not canon:
+            raise ValueError(
+                f"Nieznany wskaźnik: {token}. Dozwolone: {', '.join(all_inds)}."
+            )
+        if canon not in selected:
+            selected.append(canon)
+    if not selected:
+        raise ValueError("Lista wskaźników nie może być pusta.")
+    return selected, all_inds, len(selected) < len(all_inds) or selected != all_inds
+
+
 def write_scraper_status(
     status,
     progress="",
@@ -291,12 +442,14 @@ def write_scraper_status(
     error="",
     duration_seconds=None,
     duration_human=None,
+    current_indicator="",
 ):
     """Write scraper status to JSON file for web UI polling."""
     data = {
         "status": status,
         "progress": progress,
         "current_ticker": current_ticker,
+        "current_indicator": current_indicator,
         "error": error,
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -752,6 +905,22 @@ def _wait_for_legend_indicator_ready(
     )
 
 
+def _verify_indicator_present(
+    target_page, ind_name: str, attempts: int = 3, delay_s: float = 1.0
+) -> bool:
+    """Czy ``_page_legend_has_indicator`` zwraca ``True`` w ramach ``attempts`` prób.
+
+    Używane po dodaniu wskaźnika, by potwierdzić że TradingView faktycznie
+    dorzucił blok do legendy (nie tylko otworzył modal i zamknął).
+    """
+    for attempt in range(attempts):
+        if _page_legend_has_indicator(target_page, ind_name):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay_s)
+    return False
+
+
 def _macd_title_score(title_text: str) -> int:
     """Wyższy wynik = lepsze dopasowanie do CM_Ult_MacD_MTF."""
     tl = (title_text or "").lower()
@@ -880,6 +1049,36 @@ def _entry_by_label_pattern(entries: list, *patterns: str) -> Optional[dict]:
 
 def _entry_has_value(entry: Optional[dict]) -> bool:
     return bool(entry) and not entry.get("missing") and bool(str(entry.get("text", "")).strip())
+
+
+def _hts_band_slots(entries: list) -> list:
+    """HTS ribbon slots from legend, excluding trend-change rows."""
+    return [
+        e
+        for e in entries
+        if "trend" not in _normalize_legend_label(e.get("label", ""))
+    ]
+
+
+def _hts_slow_is_placeholder(
+    entry: Optional[dict], fh: Optional[float], fl: Optional[float]
+) -> bool:
+    """Slow slot ``0`` / ``0.0000`` with price-scale Fast bands is an empty placeholder."""
+    if not entry or entry.get("missing"):
+        return True
+    val = _to_float(entry.get("text"))
+    if val is None:
+        return True
+    if val != 0:
+        return False
+    fast = [x for x in (fh, fl) if x is not None]
+    return bool(fast) and all(abs(x) > 0.05 for x in fast)
+
+
+def _hts_slow_has_value(
+    entry: Optional[dict], fh: Optional[float], fl: Optional[float]
+) -> bool:
+    return _entry_has_value(entry) and not _hts_slow_is_placeholder(entry, fh, fl)
 
 
 def _entry_at(entries: list, idx: int) -> Optional[dict]:
@@ -1043,16 +1242,12 @@ def _parse_hts_block(item, results, ind_name: str) -> None:
     if _entry_has_value(trend_change):
         results[f"{ind_name}_Trend_Change"] = _format_legend_value(trend_change)
 
+    slot_entries = _hts_band_slots(entries)
+
     fh_e = _entry_by_label_pattern(entries, "fast high", "fasthigh")
     fl_e = _entry_by_label_pattern(entries, "fast low", "fastlow")
     sh_e = _entry_by_label_pattern(entries, "slow high", "slowhigh")
     sl_e = _entry_by_label_pattern(entries, "slow low", "slowlow")
-
-    slot_entries = [
-        e
-        for e in entries
-        if "trend" not in _normalize_legend_label(e.get("label", ""))
-    ]
 
     if not all([fh_e, fl_e, sh_e, sl_e]):
         if len(slot_entries) < 2:
@@ -1064,22 +1259,41 @@ def _parse_hts_block(item, results, ind_name: str) -> None:
         positional = (slot_entries + [None, None, None, None])[:4]
         fh_e, fl_e, sh_e, sl_e = positional
 
+    fh = _to_float(fh_e["text"]) if _entry_has_value(fh_e) else None
+    fl = _to_float(fl_e["text"]) if _entry_has_value(fl_e) else None
+
+    if len(slot_entries) >= 4:
+        pos_sh, pos_sl = slot_entries[2], slot_entries[3]
+        if _hts_slow_is_placeholder(sh_e, fh, fl) and _hts_slow_has_value(
+            pos_sh, fh, fl
+        ):
+            sh_e = pos_sh
+        if _hts_slow_is_placeholder(sl_e, fh, fl) and _hts_slow_has_value(
+            pos_sl, fh, fl
+        ):
+            sl_e = pos_sl
+
     if _entry_has_value(fh_e):
         results[f"{ind_name}_Fast_High"] = _format_legend_value(fh_e)
     if _entry_has_value(fl_e):
         results[f"{ind_name}_Fast_Low"] = _format_legend_value(fl_e)
-    if _entry_has_value(sh_e):
+    if _hts_slow_has_value(sh_e, fh, fl):
         results[f"{ind_name}_Slow_High"] = _format_legend_value(sh_e)
-    if _entry_has_value(sl_e):
+    if _hts_slow_has_value(sl_e, fh, fl):
         results[f"{ind_name}_Slow_Low"] = _format_legend_value(sl_e)
 
-    if not all(_entry_has_value(e) for e in (fh_e, fl_e, sh_e, sl_e)):
+    if not all(
+        [
+            _entry_has_value(fh_e),
+            _entry_has_value(fl_e),
+            _hts_slow_has_value(sh_e, fh, fl),
+            _hts_slow_has_value(sl_e, fh, fl),
+        ]
+    ):
         results[f"{ind_name}_Trend"] = "Brak trendu"
         results[f"{ind_name}_Cross"] = "Brak Crossa"
         return
 
-    fh = _to_float(fh_e["text"])
-    fl = _to_float(fl_e["text"])
     sh = _to_float(sh_e["text"])
     sl = _to_float(sl_e["text"])
     if None in (fh, fl, sh, sl):
@@ -1156,33 +1370,125 @@ def _parse_macd_block(item, results, ind_name: str) -> None:
     results[f"{ind_name}_Cross"] = cross_info
 
 
+def _select_indicator_from_search_list(target_page, ind_name: str) -> None:
+    """Wybiera element z listy modal wyszukiwania wskaźników (po wciśnięciu „/").
+
+    Dla wskaźnika ``MacD`` skanuje wszystkie widoczne ``[data-role="list-item"]``
+    i klika ten o najwyższym wyniku ``_macd_title_score`` (preferuje
+    ``CM_Ult_MacD_MTF`` nad wbudowanym ``MACD``). Dla pozostałych wskaźników
+    pozostawia historyczne zachowanie (kliknięcie pierwszego elementu).
+    """
+    items = target_page.locator('div[data-role="list-item"]')
+    try:
+        n = int(items.count())
+    except Exception:
+        n = 0
+    if n <= 0:
+        raise RuntimeError("Brak widocznych elementów listy wskaźników do wyboru.")
+
+    if ind_name != "MacD":
+        items.first.click(force=True)
+        return
+
+    best_idx = -1
+    best_score = 0
+    best_title = ""
+    for i in range(min(n, 40)):
+        try:
+            title = items.nth(i).inner_text(timeout=800).strip()
+        except Exception:
+            title = ""
+        score = _macd_title_score(title)
+        if score > best_score:
+            best_idx = i
+            best_score = score
+            best_title = title
+
+    if best_idx >= 0:
+        logger.info(
+            "Indicator search match for %s: %s (score=%d)",
+            ind_name,
+            best_title,
+            best_score,
+        )
+        items.nth(best_idx).click(force=True)
+        return
+
+    try:
+        fallback_title = items.first.inner_text(timeout=800).strip()
+    except Exception:
+        fallback_title = ""
+    logger.warning(
+        "Indicator search match for %s: brak elementu ze score>0; klikam pierwszy (%r).",
+        ind_name,
+        fallback_title,
+    )
+    items.first.click(force=True)
+
+
 def add_indicator_to_chart(
     target_page,
     ind_name: str,
     ticker: str,
     indicator_search: Optional[Dict[str, str]] = None,
 ) -> None:
-    """Otwiera modal wskaźników, wybiera pierwszy wynik, zamyka modal."""
+    """Otwiera modal wskaźników, wybiera najlepszy wynik i weryfikuje legendę.
+
+    Po dodaniu wskaźnika sprawdza ``_verify_indicator_present``; jeśli legenda
+    nie zawiera wskaźnika, usuwa go i ponawia całe dodawanie (search + select)
+    — do 3 prób łącznie. Po wyczerpaniu prób podnosi ``RuntimeError`` z
+    sufiksem ``(legenda nie zawiera wskaźnika po dodaniu)``.
+    """
     search_query = _indicator_search_query(ind_name, indicator_search)
-    target_page.keyboard.press("/")
-    time.sleep(SLEEP_AFTER_INDICATOR_MODAL_S)
-    target_page.keyboard.type(search_query, delay=100)
-    time.sleep(SLEEP_AFTER_INDICATOR_QUERY_S)
-    try:
-        target_page.wait_for_selector(
-            'div[data-role="list-item"]', state="visible", timeout=3000
+    max_add_attempts = 3
+
+    for add_attempt in range(max_add_attempts):
+        target_page.keyboard.press("/")
+        time.sleep(SLEEP_AFTER_INDICATOR_MODAL_S)
+        target_page.keyboard.type(search_query, delay=100)
+        time.sleep(SLEEP_AFTER_INDICATOR_QUERY_S)
+        try:
+            target_page.wait_for_selector(
+                'div[data-role="list-item"]', state="visible", timeout=3000
+            )
+            _select_indicator_from_search_list(target_page, ind_name)
+        except Exception as e:
+            raise RuntimeError(
+                f"Zbyt długi czas oczekiwania na listę wskaźników ({ind_name}) dla {ticker}. Błąd: {e}"
+            )
+        time.sleep(SLEEP_AFTER_SMALL_ACTION_S)
+        target_page.keyboard.press("Escape")
+        logger.info(
+            "Czekam na przeliczenie wskaźnika (%ss)...",
+            SLEEP_AFTER_INDICATOR_COMPUTE_S,
         )
-        target_page.locator('div[data-role="list-item"]').first.click(force=True)
-    except Exception as e:
-        raise RuntimeError(
-            f"Zbyt długi czas oczekiwania na listę wskaźników ({ind_name}) dla {ticker}. Błąd: {e}"
+        time.sleep(SLEEP_AFTER_INDICATOR_COMPUTE_S)
+
+        if _verify_indicator_present(
+            target_page, ind_name, attempts=3, delay_s=1.0
+        ):
+            return
+
+        logger.warning(
+            "Wskaźnik %s nie pojawił się w legendzie po dodaniu "
+            "(próba %d/%d) — czyszczę i ponawiam.",
+            ind_name,
+            add_attempt + 1,
+            max_add_attempts,
         )
-    time.sleep(SLEEP_AFTER_SMALL_ACTION_S)
-    target_page.keyboard.press("Escape")
-    logger.info(
-        "Czekam na przeliczenie wskaźnika (%ss)...", SLEEP_AFTER_INDICATOR_COMPUTE_S
+        try:
+            remove_active_indicator(target_page, ind_name, ticker)
+        except Exception as remove_err:
+            logger.warning(
+                "Próba usunięcia %s przed ponownym dodaniem nie powiodła się: %s",
+                ind_name,
+                remove_err,
+            )
+
+    raise RuntimeError(
+        f"Nie udało się dodać wskaźnika ({ind_name}) dla {ticker} "
+        "(legenda nie zawiera wskaźnika po dodaniu)"
     )
-    time.sleep(SLEEP_AFTER_INDICATOR_COMPUTE_S)
 
 
 def remove_active_indicator(target_page, ind_name: str, ticker: str) -> None:
@@ -1241,6 +1547,8 @@ def run_scraper(
     indicators,
     port=9222,
     is_partial=False,
+    is_indicator_subset=False,
+    all_config_indicators=None,
     indicator_search: Optional[Dict[str, str]] = None,
 ):
     _configure_logging()
@@ -1251,6 +1559,13 @@ def run_scraper(
         except Exception:
             indicator_search = {}
     indicator_search = indicator_search or {}
+    status_indicators = [
+        str(i).strip()
+        for i in (all_config_indicators or indicators or [])
+        if str(i).strip()
+    ]
+    if not status_indicators:
+        status_indicators = list(indicators or [])
     # Use 127.0.0.1 (not "localhost"): on many systems localhost resolves to ::1 first,
     # while Chromium's CDP often listens only on IPv4 — then connect_over_cdp fails with ECONNREFUSED ::1:9222.
     cdp_url = f"http://127.0.0.1:{port}"
@@ -1322,19 +1637,16 @@ def run_scraper(
 
             def _find_tv_page():
                 try:
-                    for page in default_context.pages:
-                        try:
-                            if "tradingview.com" in (page.url or ""):
-                                return page
-                            if "TradingView" in (page.title() or ""):
-                                return page
-                        except Exception:
-                            continue
+                    return pick_tradingview_chart_page(default_context.pages)
                 except Exception:
-                    pass
-                return None
+                    return None
 
             target_page = _find_tv_page()
+            if target_page is not None:
+                logger.info(
+                    "Używam istniejącej karty TradingView: %s",
+                    _target_url(target_page) or "(brak URL)",
+                )
             if target_page is None:
                 logger.info(
                     "Karta TradingView jeszcze niewidoczna — czekam aż Brave/Chrome wstanie…"
@@ -1343,12 +1655,17 @@ def run_scraper(
                 while time.time() < deadline:
                     target_page = _find_tv_page()
                     if target_page is not None:
+                        logger.info(
+                            "Używam istniejącej karty TradingView: %s",
+                            _target_url(target_page) or "(brak URL)",
+                        )
                         break
                     time.sleep(0.5)
 
             if target_page is None:
                 logger.info(
-                    "Brak karty TV — otwieram ją sam (https://www.tradingview.com/chart/)…"
+                    "Brak otwartej karty TradingView — otwieram wykres "
+                    "(https://www.tradingview.com/chart/) w bieżącej sesji CDP…"
                 )
                 try:
                     target_page = default_context.new_page()
@@ -1428,10 +1745,18 @@ def run_scraper(
                 )
 
                 for ticker_idx, ticker in enumerate(tickers):
+                    progress_str = _format_scraper_progress(
+                        ticker_idx,
+                        len(tickers),
+                        ind_idx,
+                        n_inds,
+                        ind_name,
+                    )
                     write_scraper_status(
                         "running",
-                        f"{ticker_idx + 1}/{len(tickers)} · wsk. {ind_idx + 1}/{n_inds}",
+                        progress_str,
                         ticker,
+                        current_indicator=ind_name,
                     )
 
                     existing_df = load_results_dataframe(current_run_file)
@@ -1450,9 +1775,11 @@ def run_scraper(
                     all_done_for_ticker = all(
                         (ticker, interval) in processed_combos for interval in intervals
                     )
-                    if all_done_for_ticker:
+                    if all_done_for_ticker and ticker_fully_done_in_csv(
+                        existing_df, ticker, intervals, indicators
+                    ):
                         logger.info(
-                            "Pomijam cały ticker %s — wszystkie interwały oznaczone w stanie sesji.",
+                            "Pomijam cały ticker %s — stan sesji i CSV są kompletne.",
                             ticker,
                         )
                         continue
@@ -1632,7 +1959,9 @@ def run_scraper(
                         merge_existing_row_into_row_data(
                             row_data,
                             erow,
-                            skip_indicator_merge=is_partial,
+                            skip_indicator_merge=(
+                                is_partial and not is_indicator_subset
+                            ),
                         )
 
                         should_parse = (
@@ -1679,14 +2008,99 @@ def run_scraper(
                                         logger.debug("[%s]: %s", key, val)
                                     row_data[key] = val
 
+                            if ind_name == "MacD":
+                                line_val = row_data.get("MacD_Line") or indicator_data.get(
+                                    "MacD_Line"
+                                )
+                                if not cell_nonempty(line_val):
+                                    logger.warning(
+                                        "MacD legend empty for %s %s — retrying once",
+                                        ticker,
+                                        interval,
+                                    )
+                                    try:
+                                        remove_active_indicator(
+                                            target_page, ind_name, ticker
+                                        )
+                                    except Exception as remove_err:
+                                        logger.warning(
+                                            "Re-try MacD: usuwanie wskaźnika nie powiodło się: %s",
+                                            remove_err,
+                                        )
+                                    time.sleep(SLEEP_AFTER_MICRO_ACTION_S)
+                                    retry_ok = False
+                                    try:
+                                        add_indicator_to_chart(
+                                            target_page,
+                                            ind_name,
+                                            ticker,
+                                            indicator_search,
+                                        )
+                                        retry_ok = True
+                                    except Exception as add_err:
+                                        logger.warning(
+                                            "Re-try MacD: ponowne dodanie wskaźnika nie powiodło się: %s — zostawiam wynik pierwszego parsowania.",
+                                            add_err,
+                                        )
+                                    if retry_ok:
+                                        _wait_for_legend_indicator_ready(
+                                            target_page,
+                                            ind_name,
+                                            max_attempts=5,
+                                            delay_s=1.0,
+                                        )
+                                        time.sleep(SLEEP_AFTER_INDICATOR_COMPUTE_S)
+                                        _ensure_legend_expanded(target_page)
+                                        _move_crosshair_off_chart(target_page)
+                                        html_content_retry = target_page.content()
+                                        indicator_data_retry = parse_indicators(
+                                            html_content_retry, [ind_name]
+                                        )
+                                        line_val_retry = indicator_data_retry.get(
+                                            "MacD_Line"
+                                        )
+                                        # Persist the better of the two parses: only
+                                        # overwrite when retry actually filled MacD_Line.
+                                        if cell_nonempty(line_val_retry):
+                                            indicator_data = indicator_data_retry
+                                            for key, val in indicator_data_retry.items():
+                                                if (
+                                                    key == "PCA_Value"
+                                                    or key == "PCA_Color"
+                                                    or key.startswith(ind_name)
+                                                ):
+                                                    row_data[key] = val
+                                        else:
+                                            logger.warning(
+                                                "Drugi parse MacD też pusty (%s/%s) — zostawiam wynik pierwszego.",
+                                                ticker,
+                                                interval,
+                                            )
+
                         if is_last_indicator:
-                            apply_final_scrape_status(row_data, indicators)
+                            if is_indicator_subset and erow is not None:
+                                for other_ind in status_indicators:
+                                    if other_ind not in indicators:
+                                        merge_indicator_into_row(
+                                            row_data, erow, other_ind
+                                        )
+                            apply_final_scrape_status(row_data, status_indicators)
                             save_results_row(current_run_file, row_data)
                             update_state(ticker, interval)
                         else:
                             row_data["Scrape_Status"] = ""
                             row_data["Scrape_Error"] = ""
                             save_results_row(current_run_file, row_data)
+
+                    if is_last_indicator:
+                        try:
+                            scrape_tv_fundamentals(target_page, ticker)
+                        except Exception as exc:
+                            logger.warning(
+                                "Fundamentale dla %s — błąd po fazie technicznej: %s",
+                                ticker,
+                                exc,
+                            )
 
                 remove_active_indicator(target_page, ind_name, "faza")
 
@@ -1700,7 +2114,13 @@ def run_scraper(
             )
             write_scraper_status(
                 "done",
-                f"{len(tickers)}/{len(tickers)} · wsk. {len(indicators)}/{len(indicators)}",
+                _format_scraper_progress(
+                    len(tickers) - 1,
+                    len(tickers),
+                    len(indicators) - 1,
+                    len(indicators),
+                    indicators[-1] if indicators else "",
+                ),
                 "",
                 "",
                 duration_seconds=elapsed,
@@ -1725,6 +2145,43 @@ def run_scraper(
             raise
 
 
+def scrape_tv_fundamentals(page, ticker: str) -> Dict[str, Any]:
+    """Pobiera fundamentale (yfinance + opcjonalny TV fallback) i zapisuje do CSV."""
+    from fundamentals import fetch_fundamentals
+
+    cfg: Dict[str, Any] = {}
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f) or {}
+    fund_cfg = cfg.get("fundamentals") or {}
+    if not fund_cfg.get("enabled", True):
+        return {}
+
+    cache_path = os.path.join("data", ".fundamentals_cache.json")
+    ttl = float(fund_cfg.get("cache_ttl_hours", 24))
+    tv_page = page if fund_cfg.get("tv_fallback", True) else None
+    data = fetch_fundamentals(
+        ticker,
+        tv_fallback_page=tv_page,
+        cache_path=cache_path,
+        ttl_hours=ttl,
+        force_refresh=True,
+    )
+    normalized = {
+        k: ("N/A" if v is None else str(v))
+        for k, v in data.items()
+        if k.startswith("Fund_")
+    }
+    save_fundamentals_row({"Ticker": ticker, **normalized})
+    logger.info(
+        "Fundamentale %s: source=%s PE=%s",
+        ticker,
+        data.get("Fund_Source"),
+        data.get("Fund_PE"),
+    )
+    return data
+
+
 if __name__ == "__main__":
     _configure_logging()
     parser = argparse.ArgumentParser(description="TradingView Web Scraper")
@@ -1741,7 +2198,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--indicator",
         type=str,
-        help="Specify a single indicator to run (e.g., PCA)",
+        help="Specify a single indicator to run (e.g., PCA); alias for --indicators",
+    )
+    parser.add_argument(
+        "--indicators",
+        type=str,
+        help="Comma-separated indicators to run (e.g., MacD,HTS Panel)",
     )
     parser.add_argument(
         "--cdp-port",
@@ -1765,6 +2227,17 @@ if __name__ == "__main__":
         INTERVALS = ["1D", "1W", "1M"]
         INDICATORS = ["PCA", "HTS Panel", "MacD"]
 
+    ALL_CONFIG_INDICATORS = list(INDICATORS)
+    try:
+        INDICATORS, ALL_CONFIG_INDICATORS, is_indicator_subset = resolve_run_indicators(
+            ALL_CONFIG_INDICATORS,
+            cli_indicators=args.indicators,
+            cli_indicator=args.indicator,
+        )
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(2) from exc
+
     cdp_port = resolve_cdp_port(config, cli_port=args.cdp_port)
 
     is_partial = False
@@ -1774,13 +2247,26 @@ if __name__ == "__main__":
     if args.interval:
         INTERVALS = [args.interval]
         is_partial = True
-    if args.indicator:
-        INDICATORS = [args.indicator]
+    if args.indicator or args.indicators or os.environ.get("TV_SCRAPER_INDICATORS"):
         is_partial = True
 
-    write_scraper_status("running", "0/" + str(len(TICKERS)), "")
+    n_tickers = max(len(TICKERS), 1)
+    n_inds = max(len(INDICATORS), 1)
+    write_scraper_status(
+        "running",
+        _format_scraper_progress(0, n_tickers, 0, n_inds, INDICATORS[0] if INDICATORS else ""),
+        current_indicator=INDICATORS[0] if INDICATORS else "",
+    )
     try:
-        run_scraper(TICKERS, INTERVALS, INDICATORS, port=cdp_port, is_partial=is_partial)
+        run_scraper(
+            TICKERS,
+            INTERVALS,
+            INDICATORS,
+            port=cdp_port,
+            is_partial=is_partial,
+            is_indicator_subset=is_indicator_subset,
+            all_config_indicators=ALL_CONFIG_INDICATORS,
+        )
     except Exception:
         # Błąd i ewentualny czas do `scraper_status.json` zapisuje już `run_scraper`.
         raise

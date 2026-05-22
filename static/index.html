@@ -14,7 +14,7 @@
     <!-- Phosphor Icons for modern iconography -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=10">
+    <link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body>
     <div id="global-scrape-banner" class="global-scrape-banner" aria-live="polite">
@@ -43,34 +43,41 @@
                     Konfiguracja
                 </a>
             </nav>
-            
-            <div class="history-section">
-                <h3>Historia Wyników</h3>
-                <div class="history-list" id="history-list">
-                    <!-- History items will be injected here -->
-                    <div class="loading-spinner sidebar-spinner"></div>
-                </div>
-            </div>
         </aside>
 
         <!-- Main Content Area -->
         <main class="main-content">
             <header class="top-nav">
                 <div class="current-view-info">
-                    <h1 id="current-date-title">Wczytywanie...</h1>
+                    <h1 id="current-date-title">Dashboard</h1>
                     <p class="subtitle record-count-wrap">
                         <span id="record-count">-- wyników</span>
-                        <span id="data-freshness" class="data-freshness" hidden></span>
                     </p>
                 </div>
                 <div class="header-actions" style="display:flex; gap:12px; align-items:center;">
                     <!-- Sort Dropdown -->
                     <div class="sort-container">
+                        <select id="interval-filter" class="sort-select" title="Filtruj interwał">
+                            <option value="All">Wszystkie interwały</option>
+                            <option value="1D">1D</option>
+                            <option value="1W">1W</option>
+                            <option value="1M">1M</option>
+                        </select>
+                    </div>
+                    <div class="sort-container">
                         <select id="sort-select" class="sort-select" title="Sortuj karty">
                             <option value="data-status">Problemy najpierw</option>
-                            <option value="default">Kolejność CSV</option>
+                            <option value="default">Kolejność config</option>
                             <option value="pca-desc">PCA ↓ (najwyższe)</option>
                             <option value="pca-asc">PCA ↑ (najniższe)</option>
+                            <option value="macd-desc">MacD Line ↓</option>
+                            <option value="macd-asc">MacD Line ↑</option>
+                            <option value="pe-desc">P/E ↓</option>
+                            <option value="pe-asc">P/E ↑</option>
+                            <option value="roe-desc">ROE ↓</option>
+                            <option value="roe-asc">ROE ↑</option>
+                            <option value="fcf-desc">FCF ↓</option>
+                            <option value="fcf-asc">FCF ↑</option>
                             <option value="consensus-bullish">Consensus bullish ↓</option>
                             <option value="consensus-bearish">Consensus bearish ↓</option>
                             <option value="ticker-asc">Ticker A→Z</option>
@@ -111,14 +118,32 @@
                 <div class="chart-panel glass-panel hidden" id="chart-panel">
                     <div class="chart-header">
                         <h2 id="chart-title">Wartość PCA (1D) dla tickerów</h2>
-                        <div class="chart-interval-toggle" id="chart-interval-toggle">
-                            <button class="interval-toggle-btn active" data-interval="1D">1D</button>
-                            <button class="interval-toggle-btn" data-interval="1W">1W</button>
-                            <button class="interval-toggle-btn" data-interval="1M">1M</button>
+                        <div class="chart-controls">
+                            <select id="chart-metric-select" class="sort-select chart-metric-select" title="Wskaźnik wykresu">
+                                <option value="pca">PCA Value</option>
+                                <option value="macd_line">MacD Line</option>
+                                <option value="macd_hist">MacD Histogram</option>
+                                <option value="hts_fh">HTS Fast High</option>
+                                <option value="hts_sh">HTS Slow High</option>
+                                <option value="pe">Fund P/E</option>
+                                <option value="pb">Fund P/B</option>
+                                <option value="ev_ebitda">Fund EV/EBITDA</option>
+                                <option value="roe">Fund ROE</option>
+                                <option value="fcf">Fund FCF</option>
+                            </select>
+                            <div class="chart-interval-toggle" id="chart-interval-toggle">
+                                <button class="interval-toggle-btn active" data-interval="1D">1D</button>
+                                <button class="interval-toggle-btn" data-interval="1W">1W</button>
+                                <button class="interval-toggle-btn" data-interval="1M">1M</button>
+                            </div>
                         </div>
                     </div>
                     <div class="chart-container">
                         <canvas id="pcaChart"></canvas>
+                        <div id="chart-empty" class="chart-empty hidden" aria-live="polite">
+                            <i class="ph ph-chart-line-down"></i>
+                            <div id="chart-empty-text">Brak danych dla wybranego wskaźnika.</div>
+                        </div>
                     </div>
                 </div>
 
@@ -183,11 +208,25 @@
                                 <button id="btn-run-scraper-no-data" class="btn btn-secondary">
                                     <i class="ph ph-warning-circle"></i> Odśwież Brak Danych
                                 </button>
+                                <div class="scraper-no-data-menu-wrap">
+                                    <button id="btn-run-scraper-no-data-menu" class="btn btn-secondary btn-icon-only" type="button" title="Odśwież brak danych — wybierz wskaźnik" aria-label="Opcje odświeżania brak danych" aria-haspopup="true" aria-expanded="false">
+                                        <i class="ph ph-caret-down"></i>
+                                    </button>
+                                    <div id="scraper-no-data-menu" class="scraper-dropdown-menu hidden" role="menu">
+                                        <button type="button" role="menuitem" data-no-data-indicators="">Wszystkie wskaźniki</button>
+                                        <button type="button" role="menuitem" data-no-data-indicators="PCA">Tylko PCA</button>
+                                        <button type="button" role="menuitem" data-no-data-indicators="HTS Panel">Tylko HTS</button>
+                                        <button type="button" role="menuitem" data-no-data-indicators="MacD">Tylko MacD</button>
+                                    </div>
+                                </div>
                                 <button id="btn-run-scraper-selected" class="btn btn-secondary">
                                     <i class="ph ph-play-circle"></i> Uruchom wybrane
                                 </button>
                                 <button id="btn-stop-scraper" class="btn btn-danger hidden">
                                     <i class="ph ph-stop"></i> Zatrzymaj
+                                </button>
+                                <button id="btn-refresh-fundamentals-all" class="btn btn-secondary" type="button">
+                                    <i class="ph ph-chart-line-up"></i> Odśwież fundamentale
                                 </button>
                             </div>
                             <div class="auto-schedule-section mt-3">
@@ -300,9 +339,20 @@
                     <button type="button" class="card-action-btn card-rename-btn" title="Zmień symbol tickera w konfiguracji" aria-label="Zmień nazwę tickera">
                         <i class="ph ph-pencil-simple"></i>
                     </button>
-                    <button type="button" class="card-action-btn card-rescrape-btn" title="Pobierz ponownie dane tego tickera" aria-label="Pobierz ponownie">
-                        <i class="ph ph-arrow-clockwise"></i>
-                    </button>
+                    <div class="card-rescrape-wrap">
+                        <button type="button" class="card-action-btn card-rescrape-btn" title="Pobierz ponownie dane tego tickera" aria-label="Pobierz ponownie">
+                            <i class="ph ph-arrow-clockwise"></i>
+                        </button>
+                        <button type="button" class="card-action-btn card-rescrape-menu-btn" title="Odśwież wybrany wskaźnik" aria-label="Opcje odświeżania" aria-haspopup="true" aria-expanded="false">
+                            <i class="ph ph-caret-down"></i>
+                        </button>
+                        <div class="card-rescrape-menu hidden" role="menu">
+                            <button type="button" role="menuitem" data-rescrape-indicators="">Odśwież wszystko</button>
+                            <button type="button" role="menuitem" data-rescrape-indicators="PCA">Odśwież PCA</button>
+                            <button type="button" role="menuitem" data-rescrape-indicators="HTS Panel">Odśwież HTS</button>
+                            <button type="button" role="menuitem" data-rescrape-indicators="MacD">Odśwież MacD</button>
+                        </div>
+                    </div>
                     <button type="button" class="card-action-btn card-history-btn" title="Historia PCA" aria-label="Historia PCA">
                         <i class="ph ph-chart-line"></i>
                     </button>
@@ -313,6 +363,22 @@
                 </div>
             </div>
             
+            <div class="card-fundamentals">
+                <div class="fundamentals-section">
+                    <div class="section-title">Fundamentale</div>
+                    <div class="fundamentals-grid">
+                        <div class="fund-item"><span class="label fund-label" title="Stosunek ceny akcji do zysku netto (EPS). &lt;15 często niedowartościowanie, &gt;25 wzrostowa/droga">P/E</span><span class="value fund-pe">—</span></div>
+                        <div class="fund-item"><span class="label fund-label" title="Cena / wartość księgowa. &lt;1 poniżej majątku, &gt;3 wysoka wycena">P/B</span><span class="value fund-pb">—</span></div>
+                        <div class="fund-item"><span class="label fund-label" title="Wartość przedsiębiorstwa / EBITDA. Poniżej 10–12 często atrakcyjne">EV/EBITDA</span><span class="value fund-ev">—</span></div>
+                        <div class="fund-item"><span class="label fund-label" title="Zysk netto / kapitał własny. &gt;15% dobry biznes">ROE</span><span class="value fund-roe">—</span></div>
+                        <div class="fund-item"><span class="label fund-label" title="Zysk netto / przychody. Wysoka marża = silna pozycja">Net Margin</span><span class="value fund-margin">—</span></div>
+                        <div class="fund-item"><span class="label fund-label" title="Zadłużenie / kapitał. &lt;1 bezpieczne, &gt;2 wysokie ryzyko">D/E</span><span class="value fund-de">—</span></div>
+                        <div class="fund-item"><span class="label fund-label" title="Wolne przepływy pieniężne. Powinny być dodatnie i rosnące">FCF</span><span class="value fund-fcf">—</span></div>
+                    </div>
+                    <div class="fund-updated fund-updated-at" hidden></div>
+                </div>
+            </div>
+
             <div class="card-body">
                 <div class="intervals-container">
                     <!-- Intervals columns injected here -->
@@ -324,7 +390,10 @@
     <!-- Template for an Interval Column -->
     <template id="interval-column-template">
         <div class="interval-column">
-            <h3 class="interval-title"><span class="interval-badge">1D</span></h3>
+            <h3 class="interval-title">
+                <span class="interval-badge">1D</span>
+                <span class="card-last-refresh" data-role="last-refresh"></span>
+            </h3>
             <div class="interval-missing hidden" data-role="interval-missing"></div>
             
             <!-- HTS Section -->
@@ -416,10 +485,23 @@
                 <button type="button" class="modal-close" id="ticker-history-close" aria-label="Zamknij">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="chart-interval-toggle" id="ticker-history-interval-toggle" style="margin-bottom: 14px;">
-                    <button type="button" class="interval-toggle-btn active" data-interval="1D">1D</button>
-                    <button type="button" class="interval-toggle-btn" data-interval="1W">1W</button>
-                    <button type="button" class="interval-toggle-btn" data-interval="1M">1M</button>
+                <div class="history-metric-row" style="margin-bottom: 14px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
+                    <label for="ticker-history-metric" style="font-size: 0.85rem; color: var(--text-muted);">Wskaźnik</label>
+                    <select id="ticker-history-metric" class="sort-select">
+                        <option value="PCA">PCA</option>
+                        <option value="MacD_Line">MacD Line</option>
+                        <option value="MacD_Histogram">MacD Histogram</option>
+                        <option value="Fund_PE">Fund P/E</option>
+                        <option value="Fund_PB">Fund P/B</option>
+                        <option value="Fund_EV_EBITDA">Fund EV/EBITDA</option>
+                        <option value="Fund_ROE">Fund ROE</option>
+                        <option value="Fund_FCF">Fund FCF</option>
+                    </select>
+                    <div class="chart-interval-toggle" id="ticker-history-interval-toggle">
+                        <button type="button" class="interval-toggle-btn active" data-interval="1D">1D</button>
+                        <button type="button" class="interval-toggle-btn" data-interval="1W">1W</button>
+                        <button type="button" class="interval-toggle-btn" data-interval="1M">1M</button>
+                    </div>
                 </div>
                 <div class="modal-chart-container">
                     <canvas id="ticker-history-chart"></canvas>
@@ -493,7 +575,7 @@
             <div class="modal-header">
                 <div>
                     <h3>Napraw symbole giełdowe</h3>
-                    <div class="modal-subtitle">Dla tickerów oznaczonych „Brak danych” sprawdzimy w TradingView, czy istnieją na konfigurowanych giełdach (np. GPW). Zaznacz propozycje, które chcesz zastosować.</div>
+                    <div class="modal-subtitle">Dla tickerów oznaczonych „Brak danych” sprawdzimy w TradingView dopasowania na giełdach z konfiguracji (np. GPW, SSE, SGX). Zaznacz propozycje lub wpisz symbol ręcznie — scraper uruchomisz osobno, gdy będziesz gotowy.</div>
                 </div>
                 <button type="button" class="modal-close" id="repair-symbols-close" aria-label="Zamknij">&times;</button>
             </div>
@@ -504,18 +586,15 @@
                     Brak tickerów do naprawy lub TradingView nie znalazło dopasowań na konfigurowanych giełdach.
                 </div>
                 <div id="repair-symbols-list" class="repair-list" hidden></div>
-                <label class="repair-rerun-toggle">
-                    <input type="checkbox" id="repair-symbols-rerun" checked>
-                    <span>Po naprawie uruchom scraper dla zmienionych tickerów (no_data_only)</span>
-                </label>
-                <div class="rename-actions">
+                <div class="rename-actions repair-actions">
                     <button type="button" class="btn btn-secondary" id="repair-symbols-cancel">Anuluj</button>
-                    <button type="button" class="btn btn-primary" id="repair-symbols-submit" disabled>Zatwierdź zaznaczone</button>
+                    <button type="button" class="btn btn-primary" id="repair-symbols-submit" disabled>Zapisz naprawy</button>
+                    <button type="button" class="btn btn-secondary" id="repair-symbols-submit-rerun" disabled title="Zapisz i od razu uruchom scraper (no_data_only)">Zapisz i uruchom scraper</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="app.js?v=22"></script>
+    <script src="app.js?v=23"></script>
 </body>
 </html>

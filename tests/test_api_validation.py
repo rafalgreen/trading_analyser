@@ -14,7 +14,7 @@ def test_scraper_run_accepts_empty_body_as_all(client, monkeypatch):
 
     called = {}
 
-    def fake(tickers=None):
+    def fake(tickers=None, indicators=None):
         called["tickers"] = tickers
         return {"status": "started", "pid": 1, "count": 0, "scope": "all"}
 
@@ -29,7 +29,7 @@ def test_scraper_run_passes_tickers(client, monkeypatch):
 
     seen = {}
 
-    def fake(tickers=None):
+    def fake(tickers=None, indicators=None):
         seen["tickers"] = tickers
         return {"status": "started", "pid": 2, "count": len(tickers or []), "scope": "subset"}
 
@@ -56,30 +56,41 @@ def test_scraper_run_no_data_only_starts_subset(client, app_env, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        m, "load_config", lambda: {"indicators": ["PCA", "HTS Panel", "MacD"]}
+        m,
+        "load_config",
+        lambda: {
+            "tickers": ["AAA", "BBB", "CCC"],
+            "intervals": ["1D", "1W", "1M"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+        },
     )
 
     called = {}
 
-    def fake(tickers=None):
+    def fake(tickers=None, indicators=None):
         called["tickers"] = list(tickers or [])
         return {"status": "started", "pid": 321, "count": len(tickers or []), "scope": "subset"}
 
     monkeypatch.setattr(m, "start_scraper_subprocess", fake)
     r = client.post("/api/scraper/run", json={"no_data_only": True})
     assert r.status_code == 200
-    assert called["tickers"] == ["AAA", "BBB"]
+    assert called["tickers"] == ["AAA", "BBB", "CCC"]
     body = r.json()
     assert body["status"] == "started"
     assert body["scope"] == "subset"
-    assert body["count"] == 2
+    assert body["count"] == 3
 
 
 def test_scraper_run_no_data_only_empty_when_no_results(client, app_env, monkeypatch):
     import app as m
 
     monkeypatch.setattr(
-        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+        m,
+        "load_config",
+        lambda: {"tickers": [], "intervals": ["1D"], "indicators": ["PCA"]},
+    )
+    monkeypatch.setattr(
+        m, "start_scraper_subprocess", lambda tickers=None, indicators=None: {"status": "started"}
     )
     r = client.post("/api/scraper/run", json={"no_data_only": True})
     assert r.status_code == 200
@@ -725,7 +736,7 @@ def test_repair_no_data_apply_rerun_triggers_scraper(client, app_env, tmp_path, 
 
     started = {"tickers": None}
 
-    def fake_start(tickers=None):
+    def fake_start(tickers=None, indicators=None):
         started["tickers"] = list(tickers or [])
         return {"status": "started", "pid": 999}
 
@@ -757,6 +768,155 @@ def test_repair_no_data_apply_empty_renames_400(client, app_env, tmp_path, monke
         json={"renames": [], "rerun": False},
     )
     assert r.status_code == 400
+
+
+def test_exchange_prefixes_from_config_tickers(client, app_env, tmp_path, monkeypatch):
+    m, _res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["AAPL", "GPW:PKO", "SSE:600941", "SGX:F34"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+
+    assert m._exchange_prefixes_from_config() == ["GPW", "SSE", "SGX"]
+
+
+def test_repair_no_data_preview_derives_sse_from_config(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["601088", "SSE:600941"],
+            "intervals": ["1D"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+    _write_no_data_csv(res, "2026-05-04", {"601088": "NO_DATA"})
+
+    def fake_lookup(ticker, exchanges):
+        if ticker == "601088" and "SSE" in exchanges:
+            return [{"symbol": "SSE:601088", "exchange": "SSE", "description": "China Railway"}]
+        return []
+
+    monkeypatch.setattr(m, "lookup_symbol_match", fake_lookup)
+
+    r = client.get("/api/tickers/repair_no_data?date_id=2026-05-04")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["exchange_prefixes"] == ["GPW", "SSE"]
+    item = next(it for it in body["items"] if it["old"] == "601088")
+    assert item["candidates"] == [
+        {"new": "SSE:601088", "exchange": "SSE", "description": "China Railway"}
+    ]
+
+
+def test_repair_no_data_preview_other_candidates(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["PSHG"],
+            "intervals": ["1D"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+    _write_no_data_csv(res, "2026-05-04", {"PSHG": "NO_DATA"})
+
+    monkeypatch.setattr(m, "lookup_symbol_match", lambda t, ex: [])
+
+    def fake_all(ticker):
+        if ticker == "PSHG":
+            return [
+                {"symbol": "NASDAQ:PSHG", "exchange": "NASDAQ", "description": "Performance Shipping"},
+            ]
+        return []
+
+    monkeypatch.setattr(m, "fetch_symbol_matches", fake_all)
+
+    r = client.get("/api/tickers/repair_no_data?date_id=2026-05-04")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    item = next(it for it in body["items"] if it["old"] == "PSHG")
+    assert item["candidates"] == []
+    assert item["other_candidates"][0]["new"] == "NASDAQ:PSHG"
+    assert "innych giełdach" in item.get("note", "")
+
+
+def test_repair_no_data_apply_default_no_scraper(client, app_env, tmp_path, monkeypatch):
+    m, _res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["AMB"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+
+    started = {"hit": False}
+
+    def fake_start(tickers=None, indicators=None):
+        started["hit"] = True
+        return {"status": "started"}
+
+    monkeypatch.setattr(m, "start_scraper_subprocess", fake_start)
+
+    r = client.post(
+        "/api/tickers/repair_no_data",
+        json={"renames": [{"old": "AMB", "new": "GPW:AMB"}]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert "scraper" not in body
+    assert started["hit"] is False
+
+
+def test_repair_no_data_apply_manual_rename_without_match(client, app_env, tmp_path, monkeypatch):
+    m, _res, _dat = app_env
+    cfg = tmp_path / "scraper_config.json"
+    cfg.write_text(
+        json.dumps({
+            "tickers": ["LIOP", "601088"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+            "exchange_prefixes": ["GPW"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg))
+
+    r = client.post(
+        "/api/tickers/repair_no_data",
+        json={
+            "renames": [
+                {"old": "LIOP", "new": "OTC:LIOPF"},
+                {"old": "601088", "new": "SSE:601088"},
+            ],
+            "rerun": False,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert len(body["applied"]) == 2
+    saved = json.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["tickers"] == ["OTC:LIOPF", "SSE:601088"]
 
 
 # --- Pending run / fresh start (Wznów vs Od nowa) -------------------------
@@ -848,7 +1008,7 @@ def test_scraper_run_fresh_true_removes_state_file(client, app_env, tmp_path, mo
 
     called = {"count": 0}
 
-    def fake_start(tickers=None):
+    def fake_start(tickers=None, indicators=None):
         called["count"] += 1
         return {"status": "started", "pid": 111}
 
@@ -870,7 +1030,7 @@ def test_scraper_run_fresh_false_keeps_state_file(client, app_env, tmp_path, mon
     monkeypatch.setattr(m, "STATE_FILE", str(state_path))
 
     monkeypatch.setattr(
-        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+        m, "start_scraper_subprocess", lambda tickers=None, indicators=None: {"status": "started"}
     )
 
     r = client.post("/api/scraper/run", json={"fresh": False})
@@ -888,7 +1048,7 @@ def test_scraper_run_fresh_ignored_for_partial(client, app_env, tmp_path, monkey
     )
     monkeypatch.setattr(m, "STATE_FILE", str(state_path))
     monkeypatch.setattr(
-        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+        m, "start_scraper_subprocess", lambda tickers=None, indicators=None: {"status": "started"}
     )
 
     r = client.post(
@@ -909,7 +1069,7 @@ def test_scraper_run_fresh_ignored_for_no_data_only(client, app_env, tmp_path, m
     monkeypatch.setattr(m, "STATE_FILE", str(state_path))
     # Brak no-data tickerów → endpoint zwróci no_data_empty bez wołania subprocesu
     monkeypatch.setattr(
-        m, "start_scraper_subprocess", lambda tickers=None: {"status": "started"}
+        m, "start_scraper_subprocess", lambda tickers=None, indicators=None: {"status": "started"}
     )
 
     r = client.post("/api/scraper/run", json={"fresh": True, "no_data_only": True})

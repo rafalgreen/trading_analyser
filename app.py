@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 
 import pandas as pd
@@ -29,12 +29,24 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from results_store import (
+    FUNDAMENTALS_COLUMNS,
     count_ticker_rows_in_csv,
+    fundamentals_csv_path,
+    get_fundamentals_for_ticker,
+    load_fundamentals_dataframe,
     load_results_dataframe,
     parse_pca_number,
     remove_ticker_rows_from_csv,
     row_has_indicator_data,
-    tickers_with_no_data,
+    save_fundamentals_row,
+    config_tickers_with_no_data,
+)
+from fundamentals import (
+    FUND_KEYS,
+    check_yfinance_available,
+    fetch_fundamentals,
+    fundamentals_row_has_values,
+    is_crypto,
 )
 from signal_strategies import (
     STRATEGIES as SIGNAL_STRATEGIES,
@@ -42,10 +54,12 @@ from signal_strategies import (
     compute_signals as compute_row_signals,
 )
 from company_names import (
+    fetch_symbol_matches,
     lookup_company_name,
     lookup_exchange,
     lookup_symbol_match,
 )
+from tv_scraper import cdp_find_tradingview_chart_url
 
 logger = logging.getLogger("trading_analyser.app")
 if not logger.handlers:
@@ -72,8 +86,12 @@ DEFAULT_AUTO_SCHEDULE = {
 _scheduler = BackgroundScheduler()
 
 STARTUP_SCRAPER_DELAY_SEC = 15
+STARTUP_FUNDAMENTALS_DELAY_SEC = 8
+DASHBOARD_FUND_SYNC_MAX = 30
 
 _startup_scrape_scheduled = False
+_startup_fundamentals_scheduled = False
+_fundamentals_refresh_lock = threading.Lock()
 _scraper_lock = threading.Lock()
 
 
@@ -83,6 +101,7 @@ async def _app_lifespan(app: FastAPI):
     reschedule_auto_scraper()
     _scheduler.start()
     _schedule_startup_scrape()
+    _schedule_startup_fundamentals_refresh()
     yield
     _scheduler.shutdown(wait=False)
 
@@ -137,6 +156,7 @@ class ConfigUpdateRequest(BaseModel):
 
 class ScraperRunRequest(BaseModel):
     tickers: List[str] = Field(default_factory=list)
+    indicators: Optional[List[str]] = None
     no_data_only: bool = False
     date_id: Optional[str] = None
     fresh: bool = False
@@ -154,8 +174,13 @@ class RepairRenamePair(BaseModel):
 
 class RepairNoDataRequest(BaseModel):
     renames: List[RepairRenamePair] = Field(default_factory=list, max_length=200)
-    rerun: bool = True
+    rerun: bool = False
     date_id: Optional[str] = None
+
+
+class FundamentalsRefreshRequest(BaseModel):
+    tickers: List[str] = Field(default_factory=list)
+    all: bool = False
 
 
 def load_config() -> Dict[str, Any]:
@@ -537,11 +562,10 @@ def _start_cdp_browser_mac(
 
 
 def ensure_cdp_ready() -> None:
-    """Jeśli CDP nie działa, spróbuj uruchomić przeglądarkę automatycznie (macOS).
+    """Przygotowuje sesję CDP: reuse istniejącej Brave/Chrome albo uruchomienie nowej (macOS).
 
-    Dodatkowo: jeśli CDP odpowiada, ale używa innego ``--user-data-dir`` niż
-    teraz wybrany (np. zombi-instancja z dedykowanym pustym profilem) — ubija
-    ją i startuje świeżo z prawidłowego profilu (zalogowanego TV).
+    Gdy port CDP już nasłuchuje, nie zamykamy przeglądarki — scraper podłączy się
+    do otwartej karty TradingView (jeśli jest) albo otworzy wykres w tej samej sesji.
     """
     cfg = load_config()
     try:
@@ -549,36 +573,23 @@ def ensure_cdp_ready() -> None:
     except Exception:
         port = 9222
 
-    pref = str(cfg.get("cdp_browser_preference", "brave"))
-    user_data_dir = str(cfg.get("cdp_user_data_dir", "") or "")
-    use_system_profile = bool(cfg.get("cdp_use_system_profile", True))
-
     if _cdp_is_listening(port):
-        if platform.system().lower() == "darwin":
-            try:
-                expected = _resolve_cdp_browser_mac(
-                    pref, user_data_dir, use_system_profile
-                )
-                actual = _running_cdp_user_data_dir(port)
-                if actual and os.path.abspath(actual) != os.path.abspath(
-                    expected["profile_dir"]
-                ):
-                    logger.warning(
-                        "CDP używa innego profilu (%s) niż chcemy (%s) — restart…",
-                        actual,
-                        expected["profile_dir"],
-                    )
-                    if expected.get("app_name"):
-                        _quit_mac_app(expected["app_name"], timeout_s=8.0)
-                    _purge_chromium_singletons(actual)
-                    _purge_chromium_singletons(expected["profile_dir"])
-                else:
-                    return
-            except Exception as e:
-                logger.debug("Nie udało się zweryfikować profilu CDP: %s", e)
-                return
+        try:
+            tv_url = cdp_find_tradingview_chart_url(port)
+        except Exception as exc:
+            logger.debug("Nie udało się odczytać listy kart CDP: %s", exc)
+            tv_url = None
+        if tv_url:
+            logger.info(
+                "Istniejąca sesja CDP — używam karty TradingView: %s", tv_url
+            )
         else:
-            return
+            logger.info(
+                "Istniejąca sesja CDP na porcie %s — brak karty TradingView; "
+                "scraper otworzy wykres w tej przeglądarce.",
+                port,
+            )
+        return
 
     auto = cfg.get("auto_start_cdp_browser", True)
     env_override = (os.environ.get("TV_AUTO_START_CDP") or "").strip().lower()
@@ -606,7 +617,9 @@ def ensure_cdp_ready() -> None:
     profile_directory = str(cfg.get("cdp_profile_directory") or "Default")
     startup_url = cfg.get("cdp_startup_url", "https://www.tradingview.com/chart/")
     logger.info(
-        "CDP nie działa — uruchamiam przeglądarkę (%s) na porcie %s…", pref, port
+        "Brak nasłuchu CDP — uruchamiam nową instancję Brave/Chrome (%s) na porcie %s…",
+        pref,
+        port,
     )
     try:
         info = _start_cdp_browser_mac(
@@ -643,7 +656,46 @@ def ensure_cdp_ready() -> None:
     )
 
 
-def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, Any]:
+def _normalize_scraper_indicators(
+    indicators: Optional[List[str]],
+) -> Optional[List[str]]:
+    """Waliduje i normalizuje listę wskaźników względem konfiguracji."""
+    if indicators is None:
+        return None
+    cfg_inds = [str(i).strip() for i in load_config().get("indicators") or [] if str(i).strip()]
+    if not cfg_inds:
+        cfg_inds = ["PCA", "HTS Panel", "MacD"]
+    requested = [str(i).strip() for i in indicators if i and str(i).strip()]
+    if not requested:
+        raise HTTPException(
+            status_code=422,
+            detail="Lista indicators nie może być pusta.",
+        )
+    cfg_set = {i.casefold(): i for i in cfg_inds}
+    out: List[str] = []
+    unknown: List[str] = []
+    for ind in requested:
+        canon = cfg_set.get(ind.casefold())
+        if canon:
+            if canon not in out:
+                out.append(canon)
+        else:
+            unknown.append(ind)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Nieznane wskaźniki: {', '.join(unknown)}. "
+                f"Dozwolone: {', '.join(cfg_inds)}."
+            ),
+        )
+    return out
+
+
+def start_scraper_subprocess(
+    tickers: Optional[List[str]] = None,
+    indicators: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Uruchamia `tv_scraper.py` w tle. Pusta lista tickerów = pełna lista z konfiguracji."""
     global _scraper_process
     with _scraper_lock:
@@ -660,6 +712,8 @@ def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, A
         cmd = [sys.executable, "-u", "tv_scraper.py"]
         if tickers:
             cmd.extend(["--ticker", ",".join(tickers)])
+        if indicators:
+            cmd.extend(["--indicators", ",".join(indicators)])
         # Przytnij poprzedni log scrapera, jeśli urósł — chcemy zobaczyć
         # przebieg bieżącego runu bez mieszania z setkami starych linii.
         try:
@@ -675,7 +729,8 @@ def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, A
             log_fh.write(
                 (
                     f"\n===== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  "
-                    f"start  tickers={tickers or 'ALL'}  =====\n"
+                    f"start  tickers={tickers or 'ALL'}  "
+                    f"indicators={indicators or 'ALL'}  =====\n"
                 ).encode("utf-8")
             )
         except Exception:
@@ -723,11 +778,19 @@ def start_scraper_subprocess(tickers: Optional[List[str]] = None) -> Dict[str, A
                     json.dump(data, f)
             except Exception:
                 pass
+            scope = "all"
+            if tickers and indicators:
+                scope = "subset_indicators"
+            elif tickers:
+                scope = "subset"
+            elif indicators:
+                scope = "indicators_only"
             return {
                 "status": "started",
                 "pid": _scraper_process.pid,
                 "count": count,
-                "scope": "subset" if tickers else "all",
+                "scope": scope,
+                "indicators": indicators or [],
             }
         except Exception as e:
             logger.exception("Nie udało się uruchomić scrapera: %s", e)
@@ -961,6 +1024,251 @@ def get_csv_files():
     return files
 
 
+def _fundamentals_csv_path() -> str:
+    """Ścieżka do CSV z fundamentami (zależna od aktualnego RESULTS_DIR)."""
+    return fundamentals_csv_path(RESULTS_DIR)
+
+
+def _fundamentals_cache_path() -> str:
+    """Ścieżka do JSON cache fundamentów (zależna od DATA_DIR)."""
+    return os.path.join(DATA_DIR, ".fundamentals_cache.json")
+
+
+def _fundamentals_config() -> Dict[str, Any]:
+    cfg = load_config()
+    fund = cfg.get("fundamentals")
+    if not isinstance(fund, dict):
+        fund = {"enabled": True, "cache_ttl_hours": 24, "tv_fallback": True}
+    return fund
+
+
+def _scalarize_fund_value(value: Any) -> Any:
+    """JSON-friendly serializacja wartości fundamentów (None pozostaje None)."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float)):
+        return value
+    s = str(value).strip()
+    if s == "" or s.upper() in ("N/A", "NAN", "NONE"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return s
+
+
+def _fundamentals_row_has_values(data: Optional[Dict[str, Any]]) -> bool:
+    """Czy wiersz fundamentów ma choć jedną sensowną wartość wskaźnika."""
+    return fundamentals_row_has_values(data)
+
+
+def _fundamentals_from_cache(ticker: str) -> Optional[Dict[str, Any]]:
+    """Odczyt pojedynczego tickera z JSON cache (gdy CSV jeszcze pusty)."""
+    cache_path = _fundamentals_cache_path()
+    if not cache_path or not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(cache, dict):
+        return None
+    entry = cache.get(str(ticker or "").strip().upper())
+    if not isinstance(entry, dict):
+        return None
+    out: Dict[str, Any] = {"Ticker": str(ticker).strip()}
+    for k in FUND_KEYS:
+        out[k] = _scalarize_fund_value(entry.get(k))
+    src = entry.get("Fund_Source")
+    out["Fund_Source"] = (
+        str(src).strip() if src is not None and str(src).strip() else "none"
+    )
+    upd = entry.get("Fund_Updated_At")
+    out["Fund_Updated_At"] = (
+        str(upd).strip() if upd is not None and str(upd).strip() else None
+    )
+    return out
+
+
+def _fundamentals_dict_to_api(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalizuje słownik fundamentów do odpowiedzi API / dashboardu."""
+    out: Dict[str, Any] = {k: None for k in FUND_KEYS}
+    out["Fund_Source"] = "none"
+    out["Fund_Updated_At"] = None
+    if not data:
+        return out
+    for k in FUND_KEYS:
+        out[k] = _scalarize_fund_value(data.get(k))
+    if data.get("Fund_Source"):
+        out["Fund_Source"] = str(data.get("Fund_Source"))
+    if data.get("Fund_Updated_At"):
+        out["Fund_Updated_At"] = str(data.get("Fund_Updated_At"))
+    return out
+
+
+def _row_fundamentals(ticker: str) -> Dict[str, Any]:
+    """Zwraca dict z polami Fund_* dla tickera (puste gdy brak)."""
+    data = get_fundamentals_for_ticker(ticker, path=_fundamentals_csv_path())
+    if not data:
+        data = _fundamentals_from_cache(ticker)
+    return _fundamentals_dict_to_api(data or {})
+
+
+def _fetch_and_persist_fundamentals(
+    ticker: str, *, force_refresh: bool = False, tv_http_fallback: bool = False
+) -> Dict[str, Any]:
+    """Pobiera fundamentale (yfinance + cache) i zapisuje do CSV."""
+    ticker = str(ticker or "").strip()
+    if not ticker:
+        raise ValueError("Empty ticker")
+
+    fund_cfg = _fundamentals_config()
+    if not fund_cfg.get("enabled", True) or is_crypto(ticker):
+        return _row_fundamentals(ticker)
+
+    ttl = float(fund_cfg.get("cache_ttl_hours", 24))
+    use_tv_http = tv_http_fallback and bool(fund_cfg.get("tv_fallback", True))
+    try:
+        data = fetch_fundamentals(
+            ticker,
+            tv_fallback_page=None,
+            tv_http_fallback=use_tv_http,
+            cache_path=_fundamentals_cache_path(),
+            ttl_hours=ttl,
+            force_refresh=force_refresh,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fundamentals fetch %s zawiódł: %s", ticker, exc)
+        return _row_fundamentals(ticker)
+
+    save_fundamentals_row(
+        {
+            "Ticker": ticker,
+            **{k: data.get(k) for k in FUND_KEYS},
+            "Fund_Source": data.get("Fund_Source") or "none",
+            "Fund_Updated_At": data.get("Fund_Updated_At") or "",
+        },
+        path=_fundamentals_csv_path(),
+    )
+    return _fundamentals_dict_to_api(data)
+
+
+def _refresh_fundamentals_batch(
+    tickers: List[str], *, force_refresh: bool = False
+) -> Tuple[int, int]:
+    """Odświeża brakujące fundamentale. Zwraca (przetworzone, z_danymi)."""
+    if not tickers:
+        return 0, 0
+    fund_cfg = _fundamentals_config()
+    if not fund_cfg.get("enabled", True):
+        return 0, 0
+
+    csv_path = _fundamentals_csv_path()
+    tv_http = bool(fund_cfg.get("tv_fallback", True))
+    processed = 0
+    with_data = 0
+    for ticker in tickers:
+        t = str(ticker or "").strip()
+        if not t or is_crypto(t):
+            continue
+        if not force_refresh:
+            existing = get_fundamentals_for_ticker(t, path=csv_path)
+            if _fundamentals_row_has_values(existing):
+                continue
+        api_row = _fetch_and_persist_fundamentals(
+            t, force_refresh=force_refresh, tv_http_fallback=tv_http
+        )
+        processed += 1
+        if _fundamentals_row_has_values(api_row):
+            with_data += 1
+    return processed, with_data
+
+
+def _schedule_startup_fundamentals_refresh() -> None:
+    """Po starcie serwera uzupełnia brakujące fundamentale w tle (yfinance)."""
+    global _startup_fundamentals_scheduled
+    if os.environ.get("PYTEST_RUNNING"):
+        return
+    if _startup_fundamentals_scheduled:
+        return
+    fund_cfg = _fundamentals_config()
+    if not fund_cfg.get("enabled", True):
+        return
+
+    def _run() -> None:
+        if not _fundamentals_refresh_lock.acquire(blocking=False):
+            return
+        try:
+            cfg = load_config()
+            tickers = [
+                str(t).strip() for t in (cfg.get("tickers") or []) if str(t).strip()
+            ]
+            count, with_data = _refresh_fundamentals_batch(tickers, force_refresh=False)
+            if count:
+                logger.info(
+                    "Startup fundamentals refresh: przetworzono %s, z danymi %s",
+                    count,
+                    with_data,
+                )
+        finally:
+            _fundamentals_refresh_lock.release()
+
+    t = threading.Timer(STARTUP_FUNDAMENTALS_DELAY_SEC, _run)
+    t.daemon = True
+    t.start()
+    _startup_fundamentals_scheduled = True
+
+
+def _sync_missing_fundamentals_for_dashboard(
+    tickers: List[str], *, priority: Optional[set] = None
+) -> None:
+    """Synchronizuje brakujące fundamentale (limit na żądanie dashboardu)."""
+    fund_cfg = _fundamentals_config()
+    if not fund_cfg.get("enabled", True):
+        return
+
+    csv_path = _fundamentals_csv_path()
+    missing: List[str] = []
+    for ticker in tickers:
+        t = str(ticker or "").strip()
+        if not t or is_crypto(t):
+            continue
+        existing = get_fundamentals_for_ticker(t, path=csv_path)
+        if not _fundamentals_row_has_values(existing):
+            missing.append(t)
+
+    if not missing:
+        return
+
+    priority = priority or set()
+    missing.sort(
+        key=lambda t: (
+            0 if t.upper() in priority else 1,
+            tickers.index(t) if t in tickers else 9999,
+        )
+    )
+    batch = missing[:DASHBOARD_FUND_SYNC_MAX]
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [
+            pool.submit(_fetch_and_persist_fundamentals, t, force_refresh=False)
+            for t in batch
+        ]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Dashboard fundamentals sync: %s", exc)
+
+
 def _resolve_results_file_for_refresh(date_id: Optional[str]) -> Optional[str]:
     """Date-scoped plik wynikowy; bez date_id bierze najnowszy."""
     if date_id:
@@ -976,20 +1284,46 @@ def _resolve_results_file_for_refresh(date_id: Optional[str]) -> Optional[str]:
     return files[0] if files else None
 
 
+def _latest_results_csv_snapshot() -> Tuple[Optional[str], List[str]]:
+    """Zwraca (data_etykieta, lista tickerów) z najnowszego pliku wyników."""
+    files = get_csv_files()
+    if not files:
+        return None, []
+    latest = files[0]
+    label = parse_date_from_filename(latest)
+    tickers: List[str] = []
+    try:
+        with open(latest, "r", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                t = str(row.get("Ticker") or "").strip()
+                if t:
+                    tickers.append(t)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Nie można odczytać tickerów z %s: %s", latest, exc)
+    return label, tickers
+
+
 def _resolve_no_data_tickers(
     date_id: Optional[str], requested_tickers: Optional[List[str]] = None
 ) -> List[str]:
-    """Tickery kwalifikujące się do trybu „Odśwież Brak Danych”."""
-    path = _resolve_results_file_for_refresh(date_id)
-    if not path:
-        return []
-    df = load_results_dataframe(path)
-    indicators = load_config().get("indicators") or ["PCA", "HTS Panel", "MacD"]
-    candidates = tickers_with_no_data(df, indicators)
+    """Tickery kwalifikujące się do trybu „Odśwież Brak Danych” (zgodnie z dashboardem)."""
+    del date_id  # zachowane w API; źródłem prawdy jest stan dashboardu, nie jeden plik CSV
+    config = load_config()
+    config_tickers = [
+        str(t).strip() for t in (config.get("tickers") or []) if str(t).strip()
+    ]
     if requested_tickers:
         wanted = {str(t).strip().upper() for t in requested_tickers if str(t).strip()}
-        candidates = [t for t in candidates if str(t).strip().upper() in wanted]
-    return candidates
+        config_tickers = [t for t in config_tickers if str(t).strip().upper() in wanted]
+
+    latest_label, latest_tickers = _latest_results_csv_snapshot()
+    dashboard = build_dashboard(sync_fundamentals=False)
+    return config_tickers_with_no_data(
+        config_tickers,
+        dashboard.get("data") or [],
+        latest_scrape_date=latest_label,
+        tickers_in_latest_csv=latest_tickers,
+    )
 
 
 @app.get("/api/history", response_model=HistoryResponse)
@@ -1074,6 +1408,12 @@ def get_results(date_id: str):
                     row["WL_YTD"] = wl_data.get("YTD", "")
                     row["WL_1Y"] = wl_data.get("1Y", "")
 
+                # Dolepiamy fundamentale per ticker (jeden wiersz na ticker w
+                # results/fundamentals.csv niezależnie od interwału).
+                fund = _row_fundamentals(ticker)
+                for k, v in fund.items():
+                    row[k] = v
+
                 results.append(row)
 
         for row in results:
@@ -1111,6 +1451,397 @@ def get_results(date_id: str):
             for k in SIGNAL_STRATEGIES.keys()
         ],
     }
+
+
+@app.get("/api/fundamentals")
+def get_fundamentals_all():
+    """Lista wszystkich wierszy z fundamentals.csv."""
+    df = load_fundamentals_dataframe(_fundamentals_csv_path())
+    if df is None or df.empty:
+        return {"data": []}
+    rows: List[Dict[str, Any]] = []
+    for rec in df.to_dict(orient="records"):
+        clean: Dict[str, Any] = {}
+        ticker = str(rec.get("Ticker") or "").strip()
+        if not ticker:
+            continue
+        clean["Ticker"] = ticker
+        for k in FUND_KEYS:
+            clean[k] = _scalarize_fund_value(rec.get(k))
+        src = rec.get("Fund_Source")
+        clean["Fund_Source"] = (str(src).strip() if src is not None and str(src).strip() else "none")
+        upd = rec.get("Fund_Updated_At")
+        clean["Fund_Updated_At"] = (str(upd).strip() if upd is not None and str(upd).strip() else None)
+        rows.append(clean)
+    return {"data": rows}
+
+
+@app.get("/api/fundamentals/{ticker}")
+def get_fundamentals_one(ticker: str):
+    if not ticker or not TICKER_PATTERN.match(ticker):
+        raise HTTPException(status_code=400, detail="Invalid ticker")
+    data = get_fundamentals_for_ticker(ticker, path=_fundamentals_csv_path())
+    if not data:
+        raise HTTPException(status_code=404, detail="Brak fundamentów dla tickera")
+    out: Dict[str, Any] = {"Ticker": ticker}
+    for k in FUND_KEYS:
+        out[k] = _scalarize_fund_value(data.get(k))
+    src = data.get("Fund_Source")
+    out["Fund_Source"] = (
+        str(src).strip() if src is not None and str(src).strip() else "none"
+    )
+    upd = data.get("Fund_Updated_At")
+    out["Fund_Updated_At"] = (
+        str(upd).strip() if upd is not None and str(upd).strip() else None
+    )
+    return out
+
+
+@app.post("/api/fundamentals/refresh")
+def refresh_fundamentals(body: FundamentalsRefreshRequest):
+    """Odśwież fundamentale (yfinance + opcjonalny TV HTTP fallback dla GPW).
+
+    Body:
+      * ``{"tickers": ["AAPL", "GPW:TXT"]}`` — odśwież podaną listę.
+      * ``{"all": true}`` — odśwież wszystkie tickery z ``scraper_config.json``.
+    """
+    cfg = load_config()
+    fund_cfg = _fundamentals_config()
+    tv_http = bool(fund_cfg.get("tv_fallback", True))
+
+    if body.all:
+        targets = [str(t).strip() for t in (cfg.get("tickers") or []) if str(t).strip()]
+    else:
+        targets = [str(t).strip() for t in (body.tickers or []) if str(t).strip()]
+
+    if not targets:
+        raise HTTPException(status_code=400, detail="No tickers specified")
+
+    yf_ok, yf_err = check_yfinance_available()
+    if not yf_ok and not tv_http:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"yfinance niedostępny ({yf_err or 'import failed'}). "
+                "Zainstaluj: pip install yfinance"
+            ),
+        )
+
+    refreshed: List[Dict[str, Any]] = []
+    with_data = 0
+    skipped_crypto = 0
+    sources: Dict[str, int] = defaultdict(int)
+
+    for ticker in targets:
+        if is_crypto(ticker):
+            skipped_crypto += 1
+            continue
+        api_row = _fetch_and_persist_fundamentals(
+            ticker, force_refresh=True, tv_http_fallback=tv_http
+        )
+        src = str(api_row.get("Fund_Source") or "none").strip().lower() or "none"
+        sources[src] += 1
+        if _fundamentals_row_has_values(api_row):
+            with_data += 1
+        refreshed.append({"Ticker": ticker, **api_row})
+
+    count = len(refreshed)
+    without_data = count - with_data
+
+    if with_data == 0:
+        parts = [f"Brak danych fundamentalnych dla {count} tickerów."]
+        if not yf_ok:
+            parts.append(
+                f"yfinance niedostępny ({yf_err or 'import failed'}). "
+                "Zainstaluj: pip install yfinance"
+            )
+        raise HTTPException(status_code=503, detail=" ".join(parts))
+
+    if without_data > 0:
+        status = "partial"
+        message = f"Przetworzono {count} tickerów, z danymi {with_data}."
+    else:
+        status = "ok"
+        message = f"Zaktualizowano {with_data} tickerów."
+
+    return {
+        "status": status,
+        "message": message,
+        "count": count,
+        "with_data": with_data,
+        "without_data": without_data,
+        "skipped_crypto": skipped_crypto,
+        "yfinance_available": yf_ok,
+        "sources": dict(sources),
+        "refreshed": refreshed,
+    }
+
+
+def _config_ticker_for_csv_symbol(
+    csv_ticker: str, config_tickers: List[str]
+) -> Optional[str]:
+    """Mapuje symbol z CSV na kanoniczny ticker z configu (lub ``None`` gdy brak)."""
+    resolution = _resolve_config_symbol(csv_ticker, config_tickers)
+    if resolution.get("in_config") and resolution.get("match"):
+        return str(resolution["match"])
+    return None
+
+
+def _scan_latest_rows_per_ticker_interval(
+    tickers: List[str],
+    intervals: List[str],
+    indicators: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Dla każdej pary (ticker, interval) zwróć najlepszy wiersz (merge per wskaźnik).
+
+    Skanuje pliki ``results/tradingview_results_*.csv`` od najnowszego do
+    najstarszego. Najnowszy wiersz z kompletnymi lub częściowymi danymi jest
+    bazą; brakujące wskaźniki są uzupełniane ze starszych plików. Wiersze
+    ``Scrape_Status=SKIPPED`` oraz całkowicie puste są pomijane; częściowe
+    wiersze z nowszego pliku nie blokują starszych wartości HTS/PCA/MacD.
+    """
+    from results_store import (
+        merge_indicator_into_row,
+        normalize_served_scrape_status,
+        row_has_all_configured_indicators,
+        row_has_indicator_data,
+        row_skipped_for_dashboard,
+    )
+
+    inds = indicators or ["PCA", "HTS Panel", "MacD"]
+    wanted_intervals = {str(i).strip() for i in intervals if str(i).strip()}
+    found: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    files = get_csv_files()
+    for fpath in files:
+        base = os.path.basename(fpath)
+        date_id = base.replace(CSV_PREFIX, "").replace(".csv", "")
+        if not RESULTS_DATE_ID_PATTERN.match(date_id):
+            continue
+        refresh_label = parse_date_from_filename(fpath)
+        try:
+            with open(fpath, "r", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    csv_ticker = str(row.get("Ticker") or "").strip()
+                    interval = str(row.get("Interval") or "").strip()
+                    if not csv_ticker or not interval:
+                        continue
+                    config_ticker = _config_ticker_for_csv_symbol(csv_ticker, tickers)
+                    if not config_ticker:
+                        continue
+                    t_u = config_ticker.upper()
+                    if wanted_intervals and interval not in wanted_intervals:
+                        continue
+                    if str(row.get("Scrape_Status") or "").strip().upper() == "SKIPPED":
+                        continue
+
+                    normalized = normalize_served_scrape_status(dict(row), inds)
+                    ser = pd.Series(normalized)
+                    if not any(row_has_indicator_data(ser, ind) for ind in inds):
+                        continue
+
+                    bucket = found.setdefault(t_u, {}).get(interval)
+                    if bucket is None:
+                        found[t_u][interval] = {
+                            "row": normalized,
+                            "last_refresh": refresh_label,
+                            "_refresh_dates": {refresh_label},
+                        }
+                        continue
+
+                    target_row = bucket["row"]
+                    target_ser = pd.Series(target_row)
+                    merged_any = False
+                    for ind in inds:
+                        if row_has_indicator_data(target_ser, ind):
+                            continue
+                        if not row_has_indicator_data(ser, ind):
+                            continue
+                        merge_indicator_into_row(target_row, normalized, ind)
+                        merged_any = True
+
+                    refresh_dates = bucket.setdefault("_refresh_dates", set())
+                    refresh_dates.add(refresh_label)
+                    if merged_any:
+                        bucket["row"] = normalize_served_scrape_status(target_row, inds)
+                        if row_has_all_configured_indicators(bucket["row"], inds):
+                            bucket["row"]["Scrape_Status"] = "OK"
+                            bucket["row"]["Scrape_Error"] = ""
+                    if refresh_dates:
+                        bucket["last_refresh"] = max(refresh_dates)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Dashboard scan: nie można odczytać %s: %s", fpath, exc)
+            continue
+
+    for ticker_buckets in found.values():
+        for bucket in ticker_buckets.values():
+            bucket.pop("_refresh_dates", None)
+    return found
+
+
+def _flatten_dashboard_to_rows(
+    dashboard_tickers: List[Dict[str, Any]], indicators: List[str]
+) -> List[Dict[str, Any]]:
+    """Spłaszcza strukturę tickers → płaskie wiersze dla frontendu (data.data)."""
+    rows: List[Dict[str, Any]] = []
+    for entry in dashboard_tickers:
+        ticker = entry["ticker"]
+        company_name = entry.get("company_name") or ticker
+        exchange = entry.get("exchange") or ""
+        fundamentals = entry.get("fundamentals") or {}
+        for interval, bucket in (entry.get("intervals") or {}).items():
+            raw_row = bucket.get("row") if bucket else None
+            if raw_row:
+                row = dict(raw_row)
+            else:
+                row = {
+                    "Ticker": ticker,
+                    "Company_Name": company_name,
+                    "Exchange": exchange,
+                    "Interval": interval,
+                    "Scrape_Status": "",
+                }
+            # Config jest źródłem prawdy — nie pokazujemy surowego symbolu z CSV.
+            row["Ticker"] = ticker
+            row["Company_Name"] = row.get("Company_Name") or company_name
+            row["Exchange"] = row.get("Exchange") or exchange
+            row["Interval"] = row.get("Interval") or interval
+            row["In_Config"] = True
+            row["Config_Match"] = ticker
+            row["Config_Status"] = "exact"
+            row["Config_Candidates"] = []
+            last_refresh = bucket.get("last_refresh") if bucket else None
+            if last_refresh:
+                row["Last_Refresh"] = last_refresh
+            for k, v in fundamentals.items():
+                row[k] = v
+            rows.append(row)
+
+    for row in rows:
+        try:
+            ser = pd.Series(row)
+            missing = [
+                ind for ind in indicators if not row_has_indicator_data(ser, ind)
+            ]
+        except Exception:
+            missing = []
+        row["Missing_Indicators"] = missing
+        row["All_Indicators_Missing"] = bool(
+            indicators and len(missing) == len(indicators)
+        )
+        try:
+            sig_map = compute_row_signals(row)
+        except Exception:
+            sig_map = {}
+        for strat_id in SIGNAL_STRATEGIES.keys():
+            row[f"Computed_Signal_{strat_id}"] = sig_map.get(strat_id, "")
+
+    return rows
+
+
+def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
+    """Backbone /api/dashboard — wystawiony do bezpośrednich testów."""
+    config = load_config()
+    tickers = [str(t).strip() for t in (config.get("tickers") or []) if str(t).strip()]
+    intervals = [
+        str(i).strip()
+        for i in (config.get("intervals") or ["1D", "1W", "1M"])
+        if str(i).strip()
+    ]
+    watchlist = get_watchlist()
+
+    indicators = config.get("indicators") or ["PCA", "HTS Panel", "MacD"]
+    latest = _scan_latest_rows_per_ticker_interval(tickers, intervals, indicators)
+
+    if sync_fundamentals:
+        _sync_missing_fundamentals_for_dashboard(
+            tickers, priority=set(latest.keys())
+        )
+
+    dashboard_tickers: List[Dict[str, Any]] = []
+    for ticker in tickers:
+        t_u = ticker.upper()
+        intervals_data: Dict[str, Any] = {}
+        last_refresh_any: Optional[str] = None
+        company_name: str = ""
+        exchange: str = ""
+
+        for interval in intervals:
+            bucket = latest.get(t_u, {}).get(interval)
+            if bucket:
+                row = bucket["row"]
+                last_refresh = bucket["last_refresh"]
+                if not company_name:
+                    raw_name = row.get("Company_Name", "")
+                    cn = clean_company_name(ticker, raw_name, watchlist)
+                    if not cn or cn.strip().upper() == t_u:
+                        cn = lookup_company_name(ticker) or cn
+                    company_name = cn or ""
+                if not exchange:
+                    exch_raw = str(row.get("Exchange") or "").strip().upper()
+                    if not exch_raw and ":" in ticker:
+                        exch_raw = ticker.split(":", 1)[0].strip().upper()
+                    if not exch_raw:
+                        bare = ticker.split(":", 1)[-1].strip()
+                        try:
+                            exch_raw = (lookup_exchange(bare) or "").strip().upper()
+                        except Exception:  # noqa: BLE001
+                            exch_raw = ""
+                    exchange = exch_raw
+                intervals_data[interval] = {
+                    "row": row,
+                    "last_refresh": last_refresh,
+                }
+                if last_refresh and (
+                    last_refresh_any is None or last_refresh > last_refresh_any
+                ):
+                    last_refresh_any = last_refresh
+            else:
+                intervals_data[interval] = {
+                    "row": None,
+                    "last_refresh": None,
+                }
+
+        if not company_name:
+            cn = clean_company_name(ticker, "", watchlist)
+            if not cn or cn.strip().upper() == t_u:
+                cn = lookup_company_name(ticker) or ""
+            company_name = cn or ticker
+        if not exchange and ":" in ticker:
+            exchange = ticker.split(":", 1)[0].strip().upper()
+
+        fundamentals = _row_fundamentals(ticker)
+        dashboard_tickers.append(
+            {
+                "ticker": ticker,
+                "company_name": company_name,
+                "exchange": exchange,
+                "intervals": intervals_data,
+                "fundamentals": fundamentals,
+                "last_refresh_any": last_refresh_any,
+            }
+        )
+
+    flat_rows = _flatten_dashboard_to_rows(dashboard_tickers, indicators)
+    return {
+        "tickers": dashboard_tickers,
+        "data": flat_rows,
+        "config_ticker_count": len(tickers),
+        "signal_strategies": [
+            {"id": k, "label": SIGNAL_STRATEGY_LABELS[k]}
+            for k in SIGNAL_STRATEGIES.keys()
+        ],
+    }
+
+
+@app.get("/api/dashboard")
+def get_dashboard():
+    try:
+        return build_dashboard()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Nie udało się zbudować dashboardu: %s", exc)
+        raise HTTPException(status_code=500, detail="Nie udało się zbudować dashboardu.")
 
 
 @app.get("/api/watchlist")
@@ -1151,9 +1882,17 @@ def update_config(body: ConfigUpdateRequest):
     return {"status": "saved", "config": config}
 
 
+@app.get("/api/tickers/no_data")
+def get_no_data_tickers():
+    """Lista tickerów z configu oznaczonych na dashboardzie jako „Brak danych”."""
+    tickers = _resolve_no_data_tickers(None, None)
+    return {"tickers": tickers, "count": len(tickers)}
+
+
 @app.post("/api/scraper/run")
 def run_scraper(body: ScraperRunRequest):
     tickers = [t.strip() for t in body.tickers if t and t.strip()]
+    run_indicators = _normalize_scraper_indicators(body.indicators)
     if body.no_data_only:
         target_tickers = _resolve_no_data_tickers(body.date_id, tickers or None)
         if not target_tickers:
@@ -1161,18 +1900,21 @@ def run_scraper(body: ScraperRunRequest):
                 "status": "no_data_empty",
                 "count": 0,
                 "scope": "no_data_only",
-                "message": "Brak tickerów oznaczonych jako Brak Danych.",
+                "tickers": [],
+                "message": (
+                    "Brak tickerów z „Brak danych” na dashboardzie (0 do odświeżenia)."
+                ),
             }
-        started = start_scraper_subprocess(target_tickers)
+        started = start_scraper_subprocess(target_tickers, run_indicators)
         if isinstance(started, dict):
             started.setdefault("scope", "no_data_only")
             started["count"] = len(target_tickers)
             started["tickers"] = target_tickers
         return started
 
-    # Fresh start dla pełnego runu (bez tickers) — usuwamy ewentualny pending state,
-    # żeby scraper nie dopisywał do wczorajszego pliku.
-    if body.fresh and not tickers:
+    # Fresh start dla pełnego runu (bez tickers / bez subset wskaźników) — usuwamy
+    # ewentualny pending state, żeby scraper nie dopisywał do wczorajszego pliku.
+    if body.fresh and not tickers and not run_indicators:
         try:
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
@@ -1181,7 +1923,10 @@ def run_scraper(body: ScraperRunRequest):
             logger.warning(
                 "Fresh start: nie udało się usunąć %s: %s", STATE_FILE, exc
             )
-    return start_scraper_subprocess(tickers if tickers else None)
+    return start_scraper_subprocess(
+        tickers if tickers else None,
+        run_indicators,
+    )
 
 
 @app.get("/api/scraper/pending_run")
@@ -1797,15 +2542,27 @@ def delete_ticker_everywhere(ticker: str):
     }
 
 
-def _exchange_prefixes() -> List[str]:
-    cfg = load_config()
-    raw = cfg.get("exchange_prefixes") or []
+def _exchange_prefixes_from_config(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Giełdy do auto-match: ``exchange_prefixes`` + prefixy z tickerów w configu."""
+    if cfg is None:
+        cfg = load_config()
     out: List[str] = []
-    for p in raw:
+    for p in cfg.get("exchange_prefixes") or []:
         s = str(p or "").strip().upper()
         if s and s not in out:
             out.append(s)
+    for t in cfg.get("tickers") or []:
+        ts = str(t or "").strip()
+        if ":" not in ts:
+            continue
+        prefix = ts.split(":", 1)[0].strip().upper()
+        if prefix and prefix not in out:
+            out.append(prefix)
     return out
+
+
+def _exchange_prefixes() -> List[str]:
+    return _exchange_prefixes_from_config()
 
 
 @app.get("/api/tickers/repair_no_data")
@@ -1819,7 +2576,16 @@ def repair_no_data_preview(date_id: Optional[str] = None):
     if date_id is not None:
         validate_results_date_id(date_id)
     prefixes = _exchange_prefixes()
-    no_data = _resolve_no_data_tickers(date_id, None)
+    dashboard = build_dashboard(sync_fundamentals=False)
+    config = load_config()
+    config_tickers = [
+        str(t).strip() for t in (config.get("tickers") or []) if str(t).strip()
+    ]
+    no_data = config_tickers_with_no_data(
+        config_tickers,
+        dashboard.get("data") or [],
+        include_stale_and_partial=False,
+    )
 
     items: List[Dict[str, Any]] = []
     for ticker in no_data:
@@ -1852,7 +2618,35 @@ def repair_no_data_preview(date_id: Optional[str] = None):
         ]
         entry: Dict[str, Any] = {"old": t, "candidates": candidates}
         if not candidates:
-            entry["note"] = f"Brak match-a na {prefixes or '[]'}"
+            try:
+                all_matches = fetch_symbol_matches(t)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("repair preview: all-match lookup failed for %s: %s", t, exc)
+                all_matches = []
+            allowed = {p.upper() for p in prefixes}
+            other = [
+                {
+                    "new": m.get("symbol") or "",
+                    "exchange": m.get("exchange") or "",
+                    "description": m.get("description") or "",
+                }
+                for m in all_matches
+                if m.get("symbol")
+                and str(m.get("exchange") or "").upper() not in allowed
+            ]
+            if other:
+                entry["other_candidates"] = other
+                entry["note"] = (
+                    f"Brak match-a na {prefixes or '[]'}; "
+                    f"TradingView znalazło {len(other)} dopasowań na innych giełdach"
+                )
+            elif all_matches:
+                entry["note"] = f"Brak match-a na {prefixes or '[]'}"
+            else:
+                entry["note"] = (
+                    f"Brak match-a na {prefixes or '[]'} — "
+                    "TradingView nie zwraca tego symbolu (sprawdź literówkę lub wpisz ręcznie)"
+                )
         items.append(entry)
 
     return {
