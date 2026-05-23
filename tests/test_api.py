@@ -336,6 +336,50 @@ def test_dashboard_maps_csv_bare_symbol_to_config_ticker(
     assert body["tickers"][0]["ticker"] == "GPW:ATC"
 
 
+def test_dashboard_maps_bare_cdr_csv_to_gpw_cdr(
+    client: TestClient, app_env, monkeypatch
+):
+    """Bare CDR (GPW) w CSV mapuje się na GPW:CDR z configu."""
+    m, res, _dat = app_env
+    fields = [
+        "Ticker",
+        "Company_Name",
+        "Exchange",
+        "Interval",
+        "PCA_Values",
+        "Scrape_Status",
+    ]
+    fp = res / "tradingview_results_2026-05-22.csv"
+    with open(fp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({
+            "Ticker": "CDR",
+            "Company_Name": "CD Projekt S.A.",
+            "Exchange": "GPW",
+            "Interval": "1D",
+            "PCA_Values": "25.8 (Zielony)",
+            "Scrape_Status": "OK",
+        })
+
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {
+            "tickers": ["GPW:CDR"],
+            "intervals": ["1D"],
+            "indicators": ["PCA"],
+        },
+    )
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["data"]) == 1
+    row = body["data"][0]
+    assert row["Ticker"] == "GPW:CDR"
+    assert row["PCA_Values"] == "25.8 (Zielony)"
+
+
 def test_dashboard_maps_legacy_asbp_csv_to_gpw_asb(
     client: TestClient, app_env, monkeypatch
 ):
