@@ -14,7 +14,7 @@
     <!-- Phosphor Icons for modern iconography -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=12">
+    <link rel="stylesheet" href="styles.css?v=13">
 </head>
 <body>
     <div id="global-scrape-banner" class="global-scrape-banner" aria-live="polite">
@@ -48,87 +48,98 @@
         <!-- Main Content Area -->
         <main class="main-content">
             <header class="top-nav">
-                <div class="current-view-info">
-                    <h1 id="current-date-title">Dashboard</h1>
-                    <p class="subtitle record-count-wrap">
-                        <span id="record-count">-- wyników</span>
-                    </p>
+                <div class="top-nav-primary">
+                    <div class="current-view-info">
+                        <h1 id="current-date-title">Dashboard</h1>
+                        <p class="subtitle record-count-wrap">
+                            <span id="record-count">-- wyników</span>
+                        </p>
+                    </div>
+                    <div class="header-actions">
+                        <div class="sort-container">
+                            <select id="verdict-filter" class="sort-select toolbar-select" title="Filtr werdyktu composite">
+                                <option value="all">Werdykt: wszystkie</option>
+                                <option value="kup">Werdykt: Kup</option>
+                                <option value="obserwuj">Werdykt: Obserwuj</option>
+                                <option value="unikaj">Werdykt: Unikaj</option>
+                            </select>
+                        </div>
+                        <div class="sort-container">
+                            <select id="interval-filter" class="sort-select toolbar-select" title="Filtruj interwał">
+                                <option value="All">Wszystkie interwały</option>
+                                <option value="1D">1D</option>
+                                <option value="1W">1W</option>
+                                <option value="1M">1M</option>
+                            </select>
+                        </div>
+                        <div class="sort-container">
+                            <select id="sort-select" class="sort-select toolbar-select" title="Sortuj karty">
+                                <option value="data-status">Problemy najpierw</option>
+                                <option value="default">Kolejność config</option>
+                                <option value="pca-desc">PCA ↓ (najwyższe)</option>
+                                <option value="pca-asc">PCA ↑ (najniższe)</option>
+                                <option value="macd-desc">MacD Line ↓</option>
+                                <option value="macd-asc">MacD Line ↑</option>
+                                <option value="pe-desc">P/E ↓</option>
+                                <option value="pe-asc">P/E ↑</option>
+                                <option value="roe-desc">ROE ↓</option>
+                                <option value="roe-asc">ROE ↑</option>
+                                <option value="fcf-desc">FCF ↓</option>
+                                <option value="fcf-asc">FCF ↑</option>
+                                <option value="consensus-bullish">Consensus bullish ↓</option>
+                                <option value="consensus-bearish">Consensus bearish ↓</option>
+                                <option value="verdict-kup-first">Werdykt (Kup first)</option>
+                                <option value="composite-desc">Composite score ↓</option>
+                                <option value="ticker-asc">Ticker A→Z</option>
+                                <option value="ticker-desc">Ticker Z→A</option>
+                            </select>
+                        </div>
+                        <div class="search-container">
+                            <i class="ph ph-magnifying-glass search-icon"></i>
+                            <input type="text" id="search-input" class="search-input" placeholder="Szukaj tickera...">
+                        </div>
+                        <button class="icon-btn" id="expand-all-btn" title="Rozwiń / zwiń wszystko (E)" aria-label="Rozwiń lub zwiń wszystkie karty">
+                            <i class="ph ph-arrows-out-line-vertical"></i>
+                        </button>
+                        <button class="icon-btn" id="repair-symbols-btn" title="Napraw symbole bez prefixu giełdy (np. GPW:)" aria-label="Napraw symbole" hidden>
+                            <i class="ph ph-magnifying-glass-plus"></i>
+                        </button>
+                        <button class="icon-btn" id="refresh-btn" title="Odśwież dane (R)" aria-label="Odśwież dane">
+                            <i class="ph ph-arrows-clockwise"></i>
+                        </button>
+                    </div>
                 </div>
-                <div class="header-actions" style="display:flex; gap:12px; align-items:center;">
-                    <!-- Sort Dropdown -->
-                    <div class="sort-container">
-                        <select id="verdict-filter" class="sort-select" title="Filtr werdyktu composite">
-                            <option value="all">Wszystkie werdykty</option>
-                            <option value="kup">Kup</option>
-                            <option value="obserwuj">Obserwuj</option>
-                            <option value="unikaj">Unikaj</option>
-                        </select>
-                    </div>
-                    <div class="sort-container fund-filters" title="Filtry fundamentalne">
-                        <select id="fund-pe-max" class="sort-select fund-filter-select" title="Maks. P/E">
-                            <option value="">P/E: dowolne</option>
-                            <option value="15">P/E ≤ 15</option>
-                            <option value="20">P/E ≤ 20</option>
-                            <option value="30">P/E ≤ 30</option>
-                        </select>
-                        <select id="fund-roe-min" class="sort-select fund-filter-select" title="Min. ROE">
-                            <option value="">ROE: dowolne</option>
-                            <option value="10">ROE ≥ 10%</option>
-                            <option value="15">ROE ≥ 15%</option>
-                        </select>
-                        <label class="fund-filter-check" title="Tylko dodatnie FCF">
-                            <input type="checkbox" id="fund-fcf-positive">
-                            <span>FCF+</span>
-                        </label>
-                        <select id="fund-de-max" class="sort-select fund-filter-select" title="Maks. D/E">
-                            <option value="">D/E: dowolne</option>
-                            <option value="100">D/E ≤ 100</option>
-                            <option value="200">D/E ≤ 200</option>
-                        </select>
-                    </div>
-                    <div class="sort-container">
-                        <select id="interval-filter" class="sort-select" title="Filtruj interwał">
-                            <option value="All">Wszystkie interwały</option>
-                            <option value="1D">1D</option>
-                            <option value="1W">1W</option>
-                            <option value="1M">1M</option>
-                        </select>
-                    </div>
-                    <div class="sort-container">
-                        <select id="sort-select" class="sort-select" title="Sortuj karty">
-                            <option value="data-status">Problemy najpierw</option>
-                            <option value="default">Kolejność config</option>
-                            <option value="pca-desc">PCA ↓ (najwyższe)</option>
-                            <option value="pca-asc">PCA ↑ (najniższe)</option>
-                            <option value="macd-desc">MacD Line ↓</option>
-                            <option value="macd-asc">MacD Line ↑</option>
-                            <option value="pe-desc">P/E ↓</option>
-                            <option value="pe-asc">P/E ↑</option>
-                            <option value="roe-desc">ROE ↓</option>
-                            <option value="roe-asc">ROE ↑</option>
-                            <option value="fcf-desc">FCF ↓</option>
-                            <option value="fcf-asc">FCF ↑</option>
-                            <option value="consensus-bullish">Consensus bullish ↓</option>
-                            <option value="consensus-bearish">Consensus bearish ↓</option>
-                            <option value="verdict-kup-first">Werdykt (Kup first)</option>
-                            <option value="composite-desc">Composite score ↓</option>
-                            <option value="ticker-asc">Ticker A→Z</option>
-                            <option value="ticker-desc">Ticker Z→A</option>
-                        </select>
-                    </div>
-                    <div class="search-container">
-                        <i class="ph ph-magnifying-glass search-icon"></i>
-                        <input type="text" id="search-input" class="search-input" placeholder="Szukaj tickera...">
-                    </div>
-                    <button class="icon-btn" id="expand-all-btn" title="Rozwiń / zwiń wszystko (E)" aria-label="Rozwiń lub zwiń wszystkie karty">
-                        <i class="ph ph-arrows-out-line-vertical"></i>
-                    </button>
-                    <button class="icon-btn" id="repair-symbols-btn" title="Napraw symbole bez prefixu giełdy (np. GPW:)" aria-label="Napraw symbole" hidden>
-                        <i class="ph ph-magnifying-glass-plus"></i>
-                    </button>
-                    <button class="icon-btn" id="refresh-btn" title="Odśwież dane (R)" aria-label="Odśwież dane">
-                        <i class="ph ph-arrows-clockwise"></i>
-                    </button>
+                <div class="top-nav-filters">
+                    <details class="fund-filters-panel" id="fund-filters-panel">
+                        <summary class="fund-filters-toggle">
+                            <i class="ph ph-chart-line-up" aria-hidden="true"></i>
+                            <span>Fundamenty</span>
+                            <span class="fund-filters-count" id="fund-filters-count" hidden></span>
+                            <i class="ph ph-caret-down fund-filters-chevron" aria-hidden="true"></i>
+                        </summary>
+                        <div class="fund-filters-body">
+                            <select id="fund-pe-max" class="sort-select fund-filter-select" title="Maks. P/E" aria-label="Maksymalne P/E">
+                                <option value="">P/E: dowolne</option>
+                                <option value="15">P/E ≤ 15</option>
+                                <option value="20">P/E ≤ 20</option>
+                                <option value="30">P/E ≤ 30</option>
+                            </select>
+                            <select id="fund-roe-min" class="sort-select fund-filter-select" title="Min. ROE" aria-label="Minimalne ROE">
+                                <option value="">ROE: dowolne</option>
+                                <option value="10">ROE ≥ 10%</option>
+                                <option value="15">ROE ≥ 15%</option>
+                            </select>
+                            <label class="fund-filter-check" title="Tylko dodatnie FCF">
+                                <input type="checkbox" id="fund-fcf-positive">
+                                <span>FCF dodatnie</span>
+                            </label>
+                            <select id="fund-de-max" class="sort-select fund-filter-select" title="Maks. D/E" aria-label="Maksymalne D/E">
+                                <option value="">D/E: dowolne</option>
+                                <option value="100">D/E ≤ 100</option>
+                                <option value="200">D/E ≤ 200</option>
+                            </select>
+                        </div>
+                    </details>
                 </div>
             </header>
 
@@ -361,9 +372,11 @@
         <div class="ticker-card glass-panel collapsed" style="grid-column: 1 / -1;">
             <div class="card-header">
                 <div class="ticker-info">
-                    <h2 class="ticker-name">BTCUSDT</h2>
-                    <span class="composite-verdict-badge" hidden></span>
-                    <span class="exchange-badge" hidden></span>
+                    <div class="ticker-title-row">
+                        <h2 class="ticker-name">BTCUSDT</h2>
+                        <span class="composite-verdict-badge wl-badge" hidden></span>
+                        <span class="exchange-badge" hidden></span>
+                    </div>
                     <span class="company-name">Nazwa Firmy</span>
                 </div>
                 <div class="card-header-right">
@@ -628,6 +641,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=24"></script>
+    <script src="app.js?v=25"></script>
 </body>
 </html>

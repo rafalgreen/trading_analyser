@@ -16,6 +16,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const fundRoeMin = document.getElementById('fund-roe-min');
     const fundFcfPositive = document.getElementById('fund-fcf-positive');
     const fundDeMax = document.getElementById('fund-de-max');
+    const fundFiltersPanel = document.getElementById('fund-filters-panel');
+    const fundFiltersCount = document.getElementById('fund-filters-count');
     const intervalFilter = document.getElementById('interval-filter');
     const chartPanel = document.getElementById('chart-panel');
     const pcaChartCanvas = document.getElementById('pcaChart');
@@ -429,6 +431,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function updateFundFiltersUI() {
+        let active = 0;
+        if (fundFilterPeMax) active += 1;
+        if (fundFilterRoeMin) active += 1;
+        if (fundFilterFcfPositive) active += 1;
+        if (fundFilterDeMax) active += 1;
+        if (fundFiltersCount) {
+            if (active > 0) {
+                fundFiltersCount.hidden = false;
+                fundFiltersCount.textContent = String(active);
+            } else {
+                fundFiltersCount.hidden = true;
+                fundFiltersCount.textContent = '';
+            }
+        }
+        if (fundFiltersPanel && active > 0) {
+            fundFiltersPanel.open = true;
+        }
+    }
+
     // Initialize App
     async function init() {
         if (sortSelect) sortSelect.value = currentSortMode;
@@ -437,6 +459,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (fundRoeMin) fundRoeMin.value = fundFilterRoeMin;
         if (fundFcfPositive) fundFcfPositive.checked = fundFilterFcfPositive;
         if (fundDeMax) fundDeMax.value = fundFilterDeMax;
+        updateFundFiltersUI();
         if (intervalFilter) intervalFilter.value = currentIntervalFilter;
         if (chartMetricSelect) chartMetricSelect.value = currentChartMetric;
         syncChartIntervalToggleVisibility();
@@ -488,6 +511,7 @@ document.addEventListener('DOMContentLoaded', () => {
         savePref(UI_KEYS.fundRoeMin, fundFilterRoeMin);
         savePref(UI_KEYS.fundFcfPositive, fundFilterFcfPositive);
         savePref(UI_KEYS.fundDeMax, fundFilterDeMax);
+        updateFundFiltersUI();
     }
 
     fundPeMax?.addEventListener('change', (e) => {
@@ -921,12 +945,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!verdict) {
             badge.hidden = true;
             badge.textContent = '';
-            badge.className = 'composite-verdict-badge';
+            badge.className = 'composite-verdict-badge wl-badge';
             badge.removeAttribute('title');
             return;
         }
         badge.hidden = false;
-        badge.className = `composite-verdict-badge verdict-${verdict}`;
+        badge.className = `composite-verdict-badge wl-badge verdict-${verdict}`;
         badge.textContent = verdict === 'kup' ? 'Kup' : (verdict === 'unikaj' ? 'Unikaj' : 'Obserwuj');
         badge.title = formatCompositeTooltip(row);
     }
