@@ -9,6 +9,7 @@ wiersz jest kompletny w \u015bwietle konfiguracji wska\u017anik\u00f3w. U\u017cy
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -618,10 +619,80 @@ def apply_final_scrape_status(row_data: dict, indicators: Iterable[str]) -> None
         row_data["Scrape_Error"] = ""
     else:
         row_data["Scrape_Status"] = "NO_DATA"
-        row_data["Scrape_Error"] = (
-            "Brak danych wska\u017anik\u00f3w na wykresie "
-            "(np. niewidoczna legenda, z\u0142y symbol lub b\u0142\u0105d parsowania)."
-        )
+        row_data["Scrape_Error"] = format_scrape_error_message(row_data, indicators)
+
+
+def _default_indicator_error(ind_name: str) -> str:
+    return "brak danych w legendzie"
+
+
+def parse_indicator_errors_from_scrape_error(scrape_error: str) -> Dict[str, str]:
+    """Parsuje ``Scrape_Error`` w formacie ``MacD: timeout legendy; PCA: …``."""
+    out: Dict[str, str] = {}
+    if not scrape_error:
+        return out
+    for part in str(scrape_error).split(";"):
+        chunk = part.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        name, _, msg = chunk.partition(":")
+        name = name.strip()
+        msg = msg.strip()
+        if name and msg:
+            out[name] = msg
+    return out
+
+
+def build_indicator_errors(row_data: dict, indicators: Iterable[str]) -> Dict[str, str]:
+    """Mapa ``{wskaźnik: powód}`` dla brakujących wskaźników w wierszu."""
+    stored = row_data.get("_indicator_errors")
+    parsed_stored: Dict[str, str] = {}
+    if isinstance(stored, dict):
+        parsed_stored = {
+            str(k).strip(): str(v).strip()
+            for k, v in stored.items()
+            if str(k).strip() and str(v).strip()
+        }
+    elif isinstance(stored, str) and stored.strip():
+        try:
+            loaded = json.loads(stored)
+            if isinstance(loaded, dict):
+                parsed_stored = {
+                    str(k).strip(): str(v).strip()
+                    for k, v in loaded.items()
+                    if str(k).strip() and str(v).strip()
+                }
+        except Exception:
+            parsed_stored = {}
+
+    from_scrape = parse_indicator_errors_from_scrape_error(
+        str(row_data.get("Scrape_Error") or "")
+    )
+
+    out: Dict[str, str] = {}
+    _ser = pd.Series(row_data)
+    for ind in indicators:
+        ind_name = str(ind or "").strip()
+        if not ind_name:
+            continue
+        if row_has_indicator_data(_ser, ind_name):
+            continue
+        reason = parsed_stored.get(ind_name) or from_scrape.get(ind_name)
+        if not reason:
+            reason = _default_indicator_error(ind_name)
+        out[ind_name] = reason
+    return out
+
+
+def format_scrape_error_message(row_data: dict, indicators: Iterable[str]) -> str:
+    """Buduje czytelny ``Scrape_Error`` z per-wskaźnikowych powodów."""
+    errors = build_indicator_errors(row_data, indicators)
+    if errors:
+        return "; ".join(f"{k}: {v}" for k, v in errors.items())
+    return (
+        "Brak danych wska\u017anik\u00f3w na wykresie "
+        "(np. niewidoczna legenda, z\u0142y symbol lub b\u0142\u0105d parsowania)."
+    )
 
 
 def save_results_row(current_run_file: str, row_data: dict) -> None:
@@ -750,6 +821,9 @@ FUNDAMENTALS_COLUMNS: List[str] = [
     "Fund_FCF",
     "Fund_DividendYield",
     "Fund_DividendRate",
+    "Fund_Sector",
+    "Fund_Industry",
+    "Fund_PE_vs_Sector",
     "Fund_Source",
     "Fund_Updated_At",
 ]

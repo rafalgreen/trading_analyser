@@ -23,23 +23,23 @@ def _row(
     }
 
 
-def test_trend_only_strong_buy_with_high_pca():
+def test_trend_only_strong_buy_with_low_pca():
     r = _row(
         hts_trend="Wzrostowy",
         macd_trend="Wzrostowy",
-        pca="72.10 (color: rgb(255, 156, 0);)",
+        pca="22.10 (color: rgb(0, 128, 255);)",
     )
     assert strategy_trend_only(r) == "strong buy"
+
+
+def test_trend_only_strong_sell_with_high_pca():
+    r = _row(hts_trend="Spadkowy", macd_trend="Spadkowy", pca="72.0")
+    assert strategy_trend_only(r) == "strong sell"
 
 
 def test_trend_only_buy_without_pca_threshold():
     r = _row(hts_trend="Wzrostowy", macd_trend="Wzrostowy", pca="55.0")
     assert strategy_trend_only(r) == "buy"
-
-
-def test_trend_only_strong_sell_with_low_pca():
-    r = _row(hts_trend="Spadkowy", macd_trend="Spadkowy", pca="22.0")
-    assert strategy_trend_only(r) == "strong sell"
 
 
 def test_trend_only_neutral_when_mixed():
@@ -56,8 +56,8 @@ def test_cross_priority_two_bull_crosses():
     assert strategy_cross_priority(r) == "strong buy"
 
 
-def test_cross_priority_one_bear_with_low_pca():
-    r = _row(macd_cross="BEAR CROSS", pca="35.0")
+def test_cross_priority_one_bear_with_high_pca():
+    r = _row(macd_cross="BEAR CROSS", pca="72.0")
     assert strategy_cross_priority(r) == "strong sell"
 
 
@@ -113,7 +113,7 @@ def test_compute_signals_returns_all_strategies():
         "pca_buckets",
         "scoring",
     }
-    assert out["trend_only"] == "buy"  # 2× Wzrostowy, PCA<60 → buy (nie strong)
+    assert out["trend_only"] == "strong buy"  # 2× Wzrostowy, PCA<=40
     assert out["scoring"] == "strong buy"  # +1 +1 +1 (PCA<=40) = 3
     assert out["pca_buckets"] == "buy"  # 35 ∈ (20, 40]
     assert out["cross_priority"] == "buy"  # brak crossów, fallback do trendu

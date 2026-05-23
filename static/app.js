@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchInput = document.getElementById('search-input');
     const sortSelect = document.getElementById('sort-select');
     const verdictFilter = document.getElementById('verdict-filter');
+    const favoritesFilter = document.getElementById('favorites-filter');
     const fundPeMax = document.getElementById('fund-pe-max');
     const fundRoeMin = document.getElementById('fund-roe-min');
     const fundFcfPositive = document.getElementById('fund-fcf-positive');
@@ -51,7 +52,11 @@ document.addEventListener('DOMContentLoaded', () => {
         fundFcfPositive: 'ta_fund_fcf_positive',
         fundDeMax: 'ta_fund_de_max',
         renamedHidden: 'ta_renamed_hidden',
+        favoriteTickers: 'ta_favorite_tickers',
+        favoritesOnly: 'ta_favorites_only',
     };
+
+    const FAVORITES_STORAGE_KEY = UI_KEYS.favoriteTickers;
 
     function loadPref(key, fallback) {
         try {
@@ -103,7 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const ALLOWED_SORT = new Set([
-        'data-status', 'default', 'pca-desc', 'pca-asc',
+        'data-status', 'favorites-first', 'default', 'pca-desc', 'pca-asc',
         'macd-desc', 'macd-asc', 'pe-desc', 'pe-asc', 'roe-desc', 'roe-asc', 'fcf-desc', 'fcf-asc',
         'consensus-bullish', 'consensus-bearish',
         'verdict-kup-first', 'composite-desc',
@@ -127,8 +132,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     const STRATEGY_DESCRIPTIONS = {
         all: 'Pokazuje wszystkie tickery — bez filtra strategii. Badże na karcie wyświetlają wynik każdej z 4 strategii.',
-        trend_only: '2× Wzrostowy + PCA ≥ 60 → Strong Buy; 2× Wzrostowy → Buy; mieszane → Neutral; 2× Spadkowy → Sell; 2× Spadkowy + PCA ≤ 40 → Strong Sell. Wymaga jednoznacznego trendu w obu modułach (HTS Trend i MacD Trend).',
-        cross_priority: 'Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem. PCA jako tie-breaker (≥60 → buy, ≤40 → sell). Gdy brak crossów — fallback na strategię trendową.',
+        trend_only: '2× Wzrostowy + PCA ≤ 40 → Strong Buy; 2× Wzrostowy → Buy; mieszane → Neutral; 2× Spadkowy → Sell; 2× Spadkowy + PCA ≥ 60 → Strong Sell. PCA niskie = okazja, wysokie = drogo (jak kosze PCA).',
+        cross_priority: 'Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem. PCA jako tie-breaker (≤40 → buy, ≥60 → sell). Gdy brak crossów — fallback na strategię trendową.',
         pca_buckets: 'Wyłącznie z wartości PCA: ≤20 → Strong Buy, 20–40 → Buy, 40–60 → Neutral, 60–80 → Sell, ≥80 → Strong Sell. Najprostsza i najbardziej kontr-trendowa.',
         scoring: 'HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma w zakresie [−3..+3] mapowana na 5 koszyków: ≥+2 Strong Buy, +1 Buy, 0 Neutral, −1 Sell, ≤−2 Strong Sell.',
     };
@@ -172,7 +177,58 @@ document.addEventListener('DOMContentLoaded', () => {
     let fundFilterRoeMin = loadPref(UI_KEYS.fundRoeMin, '') || '';
     let fundFilterFcfPositive = Boolean(loadPref(UI_KEYS.fundFcfPositive, false));
     let fundFilterDeMax = loadPref(UI_KEYS.fundDeMax, '') || '';
+    let favoritesOnly = Boolean(loadPref(UI_KEYS.favoritesOnly, false));
     let availableSignalStrategies = ALL_STRATEGY_IDS.map(id => ({ id, label: id }));
+
+    const storedFavorites = loadPref(FAVORITES_STORAGE_KEY, []);
+    const favoriteTickers = new Set(
+        Array.isArray(storedFavorites)
+            ? storedFavorites.map(t => String(t || '').trim().toUpperCase()).filter(Boolean)
+            : []
+    );
+
+    function persistFavoriteTickers() {
+        savePref(FAVORITES_STORAGE_KEY, Array.from(favoriteTickers));
+    }
+
+    function isFavoriteTicker(ticker) {
+        return favoriteTickers.has(String(ticker || '').trim().toUpperCase());
+    }
+
+    function toggleFavoriteTicker(ticker) {
+        const key = String(ticker || '').trim().toUpperCase();
+        if (!key) return;
+        if (favoriteTickers.has(key)) favoriteTickers.delete(key);
+        else favoriteTickers.add(key);
+        persistFavoriteTickers();
+    }
+
+    function shortSectorLabel(sector) {
+        const s = String(sector || '').trim();
+        if (!s) return '';
+        const map = {
+            'Technology': 'Tech',
+            'Financial Services': 'Finanse',
+            'Healthcare': 'Zdrowie',
+            'Consumer Cyclical': 'Kons. cykl.',
+            'Consumer Defensive': 'Kons. def.',
+            'Communication Services': 'Komunik.',
+            'Basic Materials': 'Surowce',
+            'Real Estate': 'Nieruch.',
+            'Industrials': 'Przemysł',
+            'Energy': 'Energia',
+            'Utilities': 'Utilities',
+        };
+        return map[s] || (s.length > 14 ? `${s.slice(0, 12)}…` : s);
+    }
+
+    function formatPeVsSectorTooltip(pct) {
+        const n = Number(pct);
+        if (!Number.isFinite(n)) return '';
+        const rounded = Math.round(n);
+        const sign = rounded > 0 ? '+' : '';
+        return `P/E vs sektor: ${sign}${rounded}%`;
+    }
 
     function persistCollapsed() {
         savePref(UI_KEYS.collapsedCards, Array.from(collapsedCards));
@@ -469,6 +525,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function init() {
         if (sortSelect) sortSelect.value = currentSortMode;
         if (verdictFilter) verdictFilter.value = currentVerdictFilter;
+        if (favoritesFilter) favoritesFilter.checked = favoritesOnly;
         if (fundPeMax) fundPeMax.value = fundFilterPeMax;
         if (fundRoeMin) fundRoeMin.value = fundFilterRoeMin;
         if (fundFcfPositive) fundFcfPositive.checked = fundFilterFcfPositive;
@@ -517,6 +574,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const val = e.target.value;
         currentVerdictFilter = ALLOWED_VERDICT_FILTERS.has(val) ? val : 'all';
         savePref(UI_KEYS.verdictFilter, currentVerdictFilter);
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+
+    favoritesFilter?.addEventListener('change', (e) => {
+        favoritesOnly = Boolean(e.target.checked);
+        savePref(UI_KEYS.favoritesOnly, favoritesOnly);
         filterAndRenderCards(searchInput.value.toLowerCase().trim());
     });
 
@@ -1066,6 +1129,10 @@ document.addEventListener('DOMContentLoaded', () => {
             filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
         }
 
+        if (favoritesOnly) {
+            filteredData = filteredData.filter(row => isFavoriteTicker(row['Ticker']));
+        }
+
         if (fundFilterPeMax || fundFilterRoeMin || fundFilterFcfPositive || fundFilterDeMax) {
             const byTicker = new Map();
             filteredData.forEach(row => {
@@ -1114,6 +1181,29 @@ document.addEventListener('DOMContentLoaded', () => {
         if (typeof syncRepairBtnVisibility === 'function') {
             try { syncRepairBtnVisibility(); } catch (e) { /* repair UI may not be wired yet */ }
         }
+    }
+
+    function formatIndicatorMissingHtml(row) {
+        const errors = row['Indicator_Errors'];
+        const missing = Array.isArray(row['Missing_Indicators']) ? row['Missing_Indicators'] : [];
+        if (errors && typeof errors === 'object' && !Array.isArray(errors) && missing.length > 0) {
+            const parts = missing.map(ind => {
+                const reason = errors[ind] || errors[String(ind)] || 'brak danych';
+                return `${escapeHtml(ind)}: ${escapeHtml(reason)}`;
+            });
+            return parts.join('; ');
+        }
+        if (missing.length > 0) {
+            return escapeHtml(missing.join(', '));
+        }
+        return '';
+    }
+
+    function cmpFavoritesFirst(a, b) {
+        const af = isFavoriteTicker(a) ? 0 : 1;
+        const bf = isFavoriteTicker(b) ? 0 : 1;
+        if (af !== bf) return af - bf;
+        return 0;
     }
 
     function formatFundDividendYield(val) {
@@ -1623,6 +1713,13 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'data-status':
                 sortedKeys.sort((a, b) => cmpDataStatusGroups(a, b, groupedData));
                 break;
+            case 'favorites-first':
+                sortedKeys.sort((a, b) => {
+                    const fav = cmpFavoritesFirst(a, b);
+                    if (fav !== 0) return fav;
+                    return cmpDataStatusGroups(a, b, groupedData);
+                });
+                break;
             case 'pca-desc':
                 sortedKeys.sort((a, b) => cmpPcaDesc(getGroupPCA(groupedData[a]), getGroupPCA(groupedData[b])));
                 break;
@@ -1692,6 +1789,45 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             cardClone.querySelector('.ticker-name').textContent = ticker;
+
+            const favoriteBtn = cardClone.querySelector('.card-favorite-btn');
+            if (favoriteBtn) {
+                const favActive = isFavoriteTicker(ticker);
+                const favIcon = favoriteBtn.querySelector('i');
+                favoriteBtn.classList.toggle('is-favorite', favActive);
+                if (favIcon) favIcon.classList.toggle('ph-fill', favActive);
+                favoriteBtn.title = favActive ? 'Usuń z ulubionych' : 'Dodaj do ulubionych';
+                favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
+                favoriteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    toggleFavoriteTicker(ticker);
+                    const nowFav = isFavoriteTicker(ticker);
+                    favoriteBtn.classList.toggle('is-favorite', nowFav);
+                    if (favIcon) favIcon.classList.toggle('ph-fill', nowFav);
+                    favoriteBtn.title = nowFav ? 'Usuń z ulubionych' : 'Dodaj do ulubionych';
+                    favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
+                    filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
+                });
+            }
+
+            const sectorBadge = cardClone.querySelector('.sector-badge');
+            const fundRowForSector = getTickerFundRow(rows);
+            if (sectorBadge && fundRowForSector) {
+                const sector = fundRowForSector['Fund_Sector'];
+                const peVs = fundRowForSector['Fund_PE_vs_Sector'];
+                const label = shortSectorLabel(sector);
+                if (label) {
+                    sectorBadge.textContent = label;
+                    const tips = [String(sector || '').trim()];
+                    const peTip = formatPeVsSectorTooltip(peVs);
+                    if (peTip) tips.push(peTip);
+                    sectorBadge.title = tips.filter(Boolean).join(' · ');
+                    sectorBadge.hidden = false;
+                } else {
+                    sectorBadge.hidden = true;
+                }
+            }
+
             addCompositeVerdictBadge(cardClone, rows);
             const companyEl = cardClone.querySelector('.company-name');
             const hasRealName = companyName && companyName !== '—'
@@ -1828,6 +1964,12 @@ document.addEventListener('DOMContentLoaded', () => {
             };
             if (fundRow) {
                 setFund('.fund-pe', fundRow['Fund_PE']);
+                const peItem = cardClone.querySelector('.fund-pe-item');
+                const peVs = fundRow['Fund_PE_vs_Sector'];
+                const peTip = formatPeVsSectorTooltip(peVs);
+                if (peItem && peTip) {
+                    peItem.title = peTip;
+                }
                 setFund('.fund-pb', fundRow['Fund_PB']);
                 setFund('.fund-ev', fundRow['Fund_EV_EBITDA']);
                 setFund('.fund-roe', fundRow['Fund_ROE']);
@@ -1904,9 +2046,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const missingEl = colClone.querySelector('[data-role="interval-missing"]');
                 if (missingEl && missing.length > 0) {
                     missingEl.classList.remove('hidden');
+                    const detailHtml = formatIndicatorMissingHtml(row);
                     missingEl.innerHTML =
                         `<span><span class="missing-label">Brak danych:</span>` +
-                        ` ${escapeHtml(missing.join(', '))}</span>`;
+                        ` ${detailHtml || escapeHtml(missing.join(', '))}</span>`;
                 }
                 // Wyszarz sekcje wskaźników bez danych (po nazwie w .section-title).
                 const missingSet = new Set(missing.map(s => String(s).toLowerCase()));
@@ -2196,6 +2339,69 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnRunSelected = document.getElementById('btn-run-scraper-selected');
     const btnStopScraper = document.getElementById('btn-stop-scraper');
     const btnRefreshFundamentalsAll = document.getElementById('btn-refresh-fundamentals-all');
+    const btnRefreshHealth = document.getElementById('btn-refresh-health');
+    const systemHealthList = document.getElementById('system-health-list');
+
+    function renderSystemHealth(data) {
+        if (!systemHealthList || !data) return;
+        const labels = {
+            cdp: 'CDP',
+            tradingview_tab: 'Karta TradingView',
+            yfinance: 'yfinance',
+        };
+        systemHealthList.querySelectorAll('.system-health-item').forEach(item => {
+            const key = item.dataset.healthKey;
+            const block = data[key];
+            const dot = item.querySelector('.health-dot');
+            const msgEl = item.querySelector('.health-message');
+            const labelEl = item.querySelector('.health-label');
+            if (labelEl && labels[key]) labelEl.textContent = labels[key];
+            if (!block) {
+                if (dot) dot.className = 'health-dot health-dot-unknown';
+                if (msgEl) msgEl.textContent = 'Brak danych';
+                return;
+            }
+            const ok = Boolean(block.ok);
+            if (dot) dot.className = `health-dot ${ok ? 'health-dot-ok' : 'health-dot-bad'}`;
+            let message = block.message || (ok ? 'OK' : 'Błąd');
+            if (key === 'tradingview_tab' && block.url) {
+                message = `${message} · ${block.url}`;
+            }
+            if (key === 'cdp' && block.port) {
+                message = `${message} (port ${block.port})`;
+            }
+            if (msgEl) {
+                msgEl.textContent = message;
+                msgEl.title = message;
+            }
+        });
+    }
+
+    async function fetchSystemHealth() {
+        if (!systemHealthList) return;
+        systemHealthList.querySelectorAll('.health-dot').forEach(dot => {
+            dot.className = 'health-dot health-dot-unknown';
+        });
+        systemHealthList.querySelectorAll('.health-message').forEach(el => {
+            el.textContent = 'Sprawdzanie…';
+        });
+        try {
+            const res = await fetch('/api/health');
+            if (!res.ok) throw new Error('health check failed');
+            renderSystemHealth(await res.json());
+        } catch (e) {
+            systemHealthList.querySelectorAll('.system-health-item').forEach(item => {
+                const dot = item.querySelector('.health-dot');
+                const msgEl = item.querySelector('.health-message');
+                if (dot) dot.className = 'health-dot health-dot-bad';
+                if (msgEl) msgEl.textContent = 'Nie udało się sprawdzić statusu';
+            });
+        }
+    }
+
+    btnRefreshHealth?.addEventListener('click', () => {
+        fetchSystemHealth();
+    });
 
     function switchView(targetId) {
         navLinks.forEach(l => {
@@ -2209,6 +2415,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (targetId === 'config-view') {
             loadConfig();
             pollScraperStatus();
+            fetchSystemHealth();
         } else if (targetId === 'dashboard-view') {
             if (statusInterval) {
                 clearInterval(statusInterval);

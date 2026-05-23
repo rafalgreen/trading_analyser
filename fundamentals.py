@@ -50,6 +50,14 @@ FUND_KEYS = (
     "Fund_DividendRate",
 )
 
+FUND_SECTOR_KEYS = (
+    "Fund_Sector",
+    "Fund_Industry",
+    "Fund_PE_vs_Sector",
+)
+
+ALL_FUND_KEYS = FUND_KEYS + FUND_SECTOR_KEYS
+
 _YF_FIELD_MAP = {
     "Fund_PE": "trailingPE",
     "Fund_PB": "priceToBook",
@@ -522,7 +530,12 @@ def _yf_fetch(symbol: str) -> Optional[Dict[str, Optional[float]]]:
     sanitized = _sanitize_fund_values(out)
     if not any(v is not None for v in sanitized.values()):
         return None
-    return sanitized
+    sector = str(info.get("sector") or "").strip()
+    industry = str(info.get("industry") or "").strip()
+    result: Dict[str, Any] = dict(sanitized)
+    result["Fund_Sector"] = sector or None
+    result["Fund_Industry"] = industry or None
+    return result
 
 
 def _yf_fetch_best(ticker: str) -> Optional[Dict[str, Optional[float]]]:
@@ -703,6 +716,8 @@ def _empty_row(ticker: str, source: str = "none") -> Dict[str, Any]:
     row: Dict[str, Any] = {"Ticker": str(ticker).strip()}
     for key in FUND_KEYS:
         row[key] = None
+    for key in FUND_SECTOR_KEYS:
+        row[key] = None
     row["Fund_Source"] = source
     row["Fund_Updated_At"] = _now_utc_iso()
     return row
@@ -759,6 +774,8 @@ def fetch_fundamentals(
                     out = {k: v for k, v in entry.items() if not k.startswith("_")}
                     for k in FUND_KEYS:
                         out.setdefault(k, None)
+                    for k in FUND_SECTOR_KEYS:
+                        out.setdefault(k, None)
                     out.setdefault("Ticker", ticker_norm)
                     out.setdefault("Fund_Source", "none")
                     out.setdefault("Fund_Updated_At", _now_utc_iso())
@@ -778,9 +795,13 @@ def fetch_fundamentals(
 
     used_source: Optional[str] = None
     values: Dict[str, Optional[float]] = {k: None for k in FUND_KEYS}
+    sector_val: Optional[str] = None
+    industry_val: Optional[str] = None
     if yf_values and any(v is not None for v in yf_values.values()):
         for k in FUND_KEYS:
             values[k] = yf_values.get(k)
+        sector_val = yf_values.get("Fund_Sector")  # type: ignore[assignment]
+        industry_val = yf_values.get("Fund_Industry")  # type: ignore[assignment]
         used_source = "yfinance"
 
     # 4) TV fallback (gdy yfinance pusty — uzupełnij brakujące pola)
@@ -812,6 +833,9 @@ def fetch_fundamentals(
     row: Dict[str, Any] = {"Ticker": ticker_norm}
     for k in FUND_KEYS:
         row[k] = values.get(k)
+    row["Fund_Sector"] = sector_val
+    row["Fund_Industry"] = industry_val
+    row["Fund_PE_vs_Sector"] = None
     row["Fund_Source"] = used_source or "none"
     row["Fund_Updated_At"] = _now_utc_iso()
 
@@ -820,3 +844,98 @@ def fetch_fundamentals(
         cache[ticker_norm.upper()] = {**row, "_cached_at": time.time()}
         _write_cache(cache_path, cache)
     return row
+
+
+# ---------------------------------------------------------------------------
+# Sector-relative P/E
+# ---------------------------------------------------------------------------
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def pe_vs_sector_pct(ticker_pe: Optional[float], sector_median_pe: Optional[float]) -> Optional[float]:
+    """Procentowa różnica P/E tickera względem mediany sektora.
+
+    Ujemna wartość = ticker tańszy niż mediana sektora.
+    """
+    if ticker_pe is None or sector_median_pe is None:
+        return None
+    if not math.isfinite(ticker_pe) or not math.isfinite(sector_median_pe):
+        return None
+    if sector_median_pe <= 0:
+        return None
+    return ((ticker_pe - sector_median_pe) / sector_median_pe) * 100.0
+
+
+def load_all_fundamentals_rows(
+    *,
+    cache_path: Path,
+    csv_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Ładuje wszystkie wiersze fundamentów z cache JSON i opcjonalnie CSV."""
+    rows_by_ticker: Dict[str, Dict[str, Any]] = {}
+    cache = _read_cache(Path(cache_path))
+    for key, entry in cache.items():
+        if not isinstance(entry, dict):
+            continue
+        ticker = str(entry.get("Ticker") or key).strip().upper()
+        if ticker:
+            rows_by_ticker[ticker] = {k: v for k, v in entry.items() if not k.startswith("_")}
+
+    if csv_path and os.path.exists(csv_path):
+        try:
+            import pandas as pd
+
+            df = pd.read_csv(csv_path, encoding="utf-8", on_bad_lines="skip")
+            for rec in df.to_dict(orient="records"):
+                ticker = str(rec.get("Ticker") or "").strip().upper()
+                if not ticker:
+                    continue
+                existing = rows_by_ticker.get(ticker, {})
+                merged = {**existing, **{k: rec.get(k) for k in rec if k != "Ticker"}}
+                merged["Ticker"] = ticker
+                rows_by_ticker[ticker] = merged
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Nie udało się wczytać fundamentals CSV %s: %s", csv_path, exc)
+
+    return list(rows_by_ticker.values())
+
+
+def compute_sector_median_pe(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Mediana P/E per sektor na podstawie listy wierszy fundamentów."""
+    by_sector: Dict[str, List[float]] = {}
+    for row in rows:
+        sector = str(row.get("Fund_Sector") or "").strip()
+        if not sector:
+            continue
+        pe = _coerce_number(row.get("Fund_PE"))
+        if pe is None or not _is_sane_fund_value("Fund_PE", pe):
+            continue
+        by_sector.setdefault(sector, []).append(float(pe))
+    out: Dict[str, float] = {}
+    for sector, pes in by_sector.items():
+        med = _median(pes)
+        if med is not None:
+            out[sector] = med
+    return out
+
+
+def enrich_fundamentals_with_sector_pe(
+    row: Dict[str, Any], sector_medians: Dict[str, float]
+) -> Dict[str, Any]:
+    """Uzupełnia ``Fund_PE_vs_Sector`` w kopii wiersza fundamentów."""
+    out = dict(row)
+    sector = str(out.get("Fund_Sector") or "").strip()
+    pe = _coerce_number(out.get("Fund_PE"))
+    med = sector_medians.get(sector) if sector else None
+    out["Fund_PE_vs_Sector"] = pe_vs_sector_pct(pe, med)
+    return out

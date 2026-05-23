@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 
@@ -42,15 +43,20 @@ from results_store import (
     row_has_indicator_data,
     save_fundamentals_row,
     config_tickers_with_no_data,
+    build_indicator_errors,
 )
 from fundamentals import (
     FUND_KEYS,
+    FUND_SECTOR_KEYS,
     check_yfinance_available,
     fetch_fundamentals,
     fundamentals_fetch_attempted,
     fundamentals_row_has_values,
     is_crypto,
     configure_yfinance_logging,
+    compute_sector_median_pe,
+    load_all_fundamentals_rows,
+    enrich_fundamentals_with_sector_pe,
 )
 from signal_strategies import (
     STRATEGIES as SIGNAL_STRATEGIES,
@@ -1105,17 +1111,39 @@ def _fundamentals_from_cache(ticker: str) -> Optional[Dict[str, Any]]:
 def _fundamentals_dict_to_api(data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalizuje słownik fundamentów do odpowiedzi API / dashboardu."""
     out: Dict[str, Any] = {k: None for k in FUND_KEYS}
+    for k in FUND_SECTOR_KEYS:
+        out[k] = None
     out["Fund_Source"] = "none"
     out["Fund_Updated_At"] = None
     if not data:
         return out
     for k in FUND_KEYS:
         out[k] = _scalarize_fund_value(data.get(k))
+    for k in FUND_SECTOR_KEYS:
+        raw = data.get(k)
+        if k == "Fund_PE_vs_Sector":
+            out[k] = _scalarize_fund_value(raw)
+        else:
+            s = str(raw or "").strip()
+            out[k] = s or None
     if data.get("Fund_Source"):
         out["Fund_Source"] = str(data.get("Fund_Source"))
     if data.get("Fund_Updated_At"):
         out["Fund_Updated_At"] = str(data.get("Fund_Updated_At"))
     return out
+
+
+def _load_sector_median_pe_map() -> Dict[str, float]:
+    """Mediana P/E per sektor z cache + CSV fundamentów."""
+    try:
+        rows = load_all_fundamentals_rows(
+            cache_path=Path(_fundamentals_cache_path()),
+            csv_path=Path(_fundamentals_csv_path()),
+        )
+        return compute_sector_median_pe(rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Nie udało się policzyć median sektorowych P/E: %s", exc)
+        return {}
 
 
 def _row_fundamentals(ticker: str) -> Dict[str, Any]:
@@ -1157,6 +1185,7 @@ def _fetch_and_persist_fundamentals(
         {
             "Ticker": ticker,
             **{k: data.get(k) for k in FUND_KEYS},
+            **{k: data.get(k) for k in FUND_SECTOR_KEYS},
             "Fund_Source": data.get("Fund_Source") or "none",
             "Fund_Updated_At": data.get("Fund_Updated_At") or "",
         },
@@ -1453,6 +1482,7 @@ def get_results(date_id: str):
             row["All_Indicators_Missing"] = bool(
                 indicators and len(missing) == len(indicators)
             )
+            row["Indicator_Errors"] = build_indicator_errors(row, indicators)
 
             try:
                 sig_map = compute_row_signals(row)
@@ -1662,10 +1692,23 @@ def _scan_latest_rows_per_ticker_interval(
 
                     normalized = normalize_served_scrape_status(dict(row), inds)
                     ser = pd.Series(normalized)
-                    if not any(row_has_indicator_data(ser, ind) for ind in inds):
+                    has_any_indicator = any(
+                        row_has_indicator_data(ser, ind) for ind in inds
+                    )
+                    scrape_st = str(normalized.get("Scrape_Status") or "").strip().upper()
+                    if not has_any_indicator and scrape_st != "NO_DATA":
                         continue
 
                     bucket = found.setdefault(t_u, {}).get(interval)
+                    if not has_any_indicator and scrape_st == "NO_DATA":
+                        if bucket is None:
+                            found[t_u][interval] = {
+                                "row": normalized,
+                                "last_refresh": refresh_label,
+                                "_refresh_dates": {refresh_label},
+                            }
+                        continue
+
                     if bucket is None:
                         found[t_u][interval] = {
                             "row": normalized,
@@ -1692,8 +1735,7 @@ def _scan_latest_rows_per_ticker_interval(
                         if row_has_all_configured_indicators(bucket["row"], inds):
                             bucket["row"]["Scrape_Status"] = "OK"
                             bucket["row"]["Scrape_Error"] = ""
-                    if refresh_dates:
-                        bucket["last_refresh"] = max(refresh_dates)
+                        bucket["last_refresh"] = refresh_label
         except Exception as exc:  # noqa: BLE001
             logger.warning("Dashboard scan: nie można odczytać %s: %s", fpath, exc)
             continue
@@ -1777,6 +1819,7 @@ def _flatten_dashboard_to_rows(
         row["All_Indicators_Missing"] = bool(
             indicators and len(missing) == len(indicators)
         )
+        row["Indicator_Errors"] = build_indicator_errors(row, indicators)
         try:
             sig_map = compute_row_signals(row)
         except Exception:
@@ -1805,6 +1848,8 @@ def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
         _sync_missing_fundamentals_for_dashboard(
             tickers, priority=set(latest.keys())
         )
+
+    sector_medians = _load_sector_median_pe_map()
 
     dashboard_tickers: List[Dict[str, Any]] = []
     for ticker in tickers:
@@ -1858,7 +1903,10 @@ def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
         if not exchange and ":" in ticker:
             exchange = ticker.split(":", 1)[0].strip().upper()
 
-        fundamentals = _row_fundamentals(ticker)
+        fundamentals = enrich_fundamentals_with_sector_pe(
+            _row_fundamentals(ticker), sector_medians
+        )
+        fundamentals = _fundamentals_dict_to_api(fundamentals)
         interval_rows: Dict[str, Dict[str, Any]] = {}
         for iv, bucket in intervals_data.items():
             raw = (bucket or {}).get("row")
@@ -1916,6 +1964,49 @@ def reload_watchlist():
 @app.get("/api/config")
 def get_config():
     return load_config()
+
+
+@app.get("/api/health")
+def api_health():
+    """Status CDP, karty TradingView i yfinance."""
+    cfg = load_config()
+    try:
+        port = int(cfg.get("cdp_port", 9222))
+    except (TypeError, ValueError):
+        port = 9222
+
+    cdp_ok = _cdp_is_listening(port)
+    if cdp_ok:
+        cdp_message = f"Nasłuch CDP aktywny na porcie {port}"
+    else:
+        cdp_message = f"Brak nasłuchu CDP na porcie {port}"
+
+    tv_url: Optional[str] = None
+    tv_ok = False
+    tv_message = "Brak połączenia CDP — nie można sprawdzić kart"
+    if cdp_ok:
+        try:
+            tv_url = cdp_find_tradingview_chart_url(port)
+            tv_ok = bool(tv_url)
+            if tv_ok:
+                tv_message = "Znaleziono kartę z wykresem TradingView"
+            else:
+                tv_message = "Brak otwartej karty TradingView z wykresem"
+        except Exception as exc:  # noqa: BLE001
+            tv_message = f"Nie udało się odczytać listy kart CDP: {exc}"
+
+    yf_ok, yf_err = check_yfinance_available()
+    yf_message = "Pakiet yfinance dostępny" if yf_ok else (yf_err or "yfinance niedostępny")
+
+    return {
+        "cdp": {"ok": cdp_ok, "port": port, "message": cdp_message},
+        "tradingview_tab": {
+            "ok": tv_ok,
+            "url": tv_url or "",
+            "message": tv_message,
+        },
+        "yfinance": {"ok": yf_ok, "message": yf_message},
+    }
 
 
 @app.put("/api/config")

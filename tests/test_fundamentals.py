@@ -631,6 +631,62 @@ def test_absurd_cached_pe_not_served_within_ttl(tmp_path, monkeypatch):
     assert data["Fund_PE"] == pytest.approx(13.01)
 
 
+def test_pe_vs_sector_pct():
+    from fundamentals import pe_vs_sector_pct
+
+    assert pe_vs_sector_pct(15.0, 20.0) == pytest.approx(-25.0)
+    assert pe_vs_sector_pct(25.0, 20.0) == pytest.approx(25.0)
+    assert pe_vs_sector_pct(None, 20.0) is None
+    assert pe_vs_sector_pct(10.0, 0.0) is None
+
+
+def test_compute_sector_median_pe():
+    from fundamentals import compute_sector_median_pe, enrich_fundamentals_with_sector_pe
+
+    rows = [
+        {"Ticker": "AAPL", "Fund_Sector": "Technology", "Fund_PE": 20.0},
+        {"Ticker": "MSFT", "Fund_Sector": "Technology", "Fund_PE": 30.0},
+        {"Ticker": "JPM", "Fund_Sector": "Financial Services", "Fund_PE": 10.0},
+        {"Ticker": "BAC", "Fund_Sector": "Financial Services", "Fund_PE": 14.0},
+    ]
+    medians = compute_sector_median_pe(rows)
+    assert medians["Technology"] == pytest.approx(25.0)
+    assert medians["Financial Services"] == pytest.approx(12.0)
+
+    enriched = enrich_fundamentals_with_sector_pe(rows[0], medians)
+    assert enriched["Fund_PE_vs_Sector"] == pytest.approx(-20.0)
+
+
+def test_yf_fetch_includes_sector_and_industry(monkeypatch):
+    from fundamentals import _yf_fetch
+
+    fake_info = {
+        "trailingPE": 12.5,
+        "priceToBook": 2.1,
+        "enterpriseToEbitda": 8.0,
+        "returnOnEquity": 0.15,
+        "profitMargins": 0.22,
+        "debtToEquity": 45.0,
+        "freeCashflow": 1_500_000_000,
+        "dividendYield": 0.025,
+        "dividendRate": 0.96,
+        "sector": "Technology",
+        "industry": "Software—Infrastructure",
+    }
+
+    class _FakeTicker:
+        def __init__(self, _sym):
+            self.info = fake_info
+
+    import yfinance  # type: ignore
+
+    monkeypatch.setattr(yfinance, "Ticker", _FakeTicker)
+    data = _yf_fetch("AAPL")
+    assert data is not None
+    assert data["Fund_Sector"] == "Technology"
+    assert "Software" in str(data["Fund_Industry"])
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------

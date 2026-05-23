@@ -64,6 +64,12 @@
                                 <option value="unikaj">Werdykt: Unikaj</option>
                             </select>
                         </div>
+                        <div class="sort-container favorites-filter-wrap">
+                            <label class="favorites-filter-label" title="Pokaż tylko ulubione tickery">
+                                <input type="checkbox" id="favorites-filter" class="favorites-filter-cb">
+                                <span>Ulubione</span>
+                            </label>
+                        </div>
                         <div class="sort-container">
                             <select id="interval-filter" class="sort-select toolbar-select" title="Filtruj interwał">
                                 <option value="All">Wszystkie interwały</option>
@@ -75,6 +81,7 @@
                         <div class="sort-container">
                             <select id="sort-select" class="sort-select toolbar-select" title="Sortuj karty">
                                 <option value="data-status">Problemy najpierw</option>
+                                <option value="favorites-first">Ulubione najpierw</option>
                                 <option value="default">Kolejność config</option>
                                 <option value="pca-desc">PCA ↓ (najwyższe)</option>
                                 <option value="pca-asc">PCA ↑ (najniższe)</option>
@@ -293,6 +300,32 @@
                             </div>
                         </div>
 
+                        <div class="config-section system-health-section">
+                            <div class="section-header system-health-header">
+                                <h3>Status systemu</h3>
+                                <button type="button" id="btn-refresh-health" class="btn btn-sm btn-secondary" title="Odśwież status CDP, TradingView i yfinance">
+                                    <i class="ph ph-arrows-clockwise"></i> Odśwież
+                                </button>
+                            </div>
+                            <ul class="system-health-list" id="system-health-list">
+                                <li class="system-health-item" data-health-key="cdp">
+                                    <span class="health-dot health-dot-unknown" aria-hidden="true"></span>
+                                    <span class="health-label">CDP</span>
+                                    <span class="health-message">Sprawdzanie…</span>
+                                </li>
+                                <li class="system-health-item" data-health-key="tradingview_tab">
+                                    <span class="health-dot health-dot-unknown" aria-hidden="true"></span>
+                                    <span class="health-label">Karta TradingView</span>
+                                    <span class="health-message">Sprawdzanie…</span>
+                                </li>
+                                <li class="system-health-item" data-health-key="yfinance">
+                                    <span class="health-dot health-dot-unknown" aria-hidden="true"></span>
+                                    <span class="health-label">yfinance</span>
+                                    <span class="health-message">Sprawdzanie…</span>
+                                </li>
+                            </ul>
+                        </div>
+
                         <div class="config-grid">
                             <!-- Left Col: Tickers -->
                             <div class="config-section tickers-section">
@@ -373,7 +406,11 @@
         <div class="ticker-card glass-panel collapsed" style="grid-column: 1 / -1;">
             <div class="card-header">
                 <div class="ticker-title-row">
+                    <button type="button" class="card-favorite-btn" title="Dodaj do ulubionych" aria-label="Ulubione">
+                        <i class="ph ph-star"></i>
+                    </button>
                     <h2 class="ticker-name">BTCUSDT</h2>
+                    <span class="sector-badge" hidden title=""></span>
                     <span class="exchange-badge" hidden></span>
                     <span class="current-price-badge" hidden title="Cena aktualna z ostatniego scrapingu"></span>
                     <span class="composite-verdict-badge wl-badge" hidden></span>
@@ -413,7 +450,7 @@
                 <div class="fundamentals-section">
                     <div class="section-title">Fundamentale</div>
                     <div class="fundamentals-grid">
-                        <div class="fund-item"><span class="label fund-label" title="Stosunek ceny akcji do zysku netto (EPS). &lt;15 często niedowartościowanie, &gt;25 wzrostowa/droga">P/E</span><span class="value fund-pe">—</span></div>
+                        <div class="fund-item fund-pe-item"><span class="label fund-label" title="Stosunek ceny akcji do zysku netto (EPS). &lt;15 często niedowartościowanie, &gt;25 wzrostowa/droga">P/E</span><span class="value fund-pe">—</span></div>
                         <div class="fund-item"><span class="label fund-label" title="Cena / wartość księgowa. &lt;1 poniżej majątku, &gt;3 wysoka wycena">P/B</span><span class="value fund-pb">—</span></div>
                         <div class="fund-item"><span class="label fund-label" title="Wartość przedsiębiorstwa / EBITDA. Poniżej 10–12 często atrakcyjne">EV/EBITDA</span><span class="value fund-ev">—</span></div>
                         <div class="fund-item"><span class="label fund-label" title="Zysk netto / kapitał własny. &gt;15% dobry biznes">ROE</span><span class="value fund-roe">—</span></div>

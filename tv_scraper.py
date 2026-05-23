@@ -884,7 +884,7 @@ def _page_legend_has_indicator(target_page, ind_name: str) -> bool:
 
 def _wait_for_legend_indicator_ready(
     target_page, ind_name: str, max_attempts: int = 5, delay_s: float = 1.0
-) -> None:
+) -> bool:
     """Czeka na pojawienie się wskaźnika w legendzie; rozwija legendę między próbami."""
     for attempt in range(max_attempts):
         _ensure_legend_expanded(target_page)
@@ -896,13 +896,20 @@ def _wait_for_legend_indicator_ready(
                     attempt + 1,
                     max_attempts,
                 )
-            return
+            return True
         time.sleep(delay_s)
     logger.warning(
         "Legenda: nie udało się potwierdzić obecności %s w DOM po %d próbach — kontynuuję odczyt.",
         ind_name,
         max_attempts,
     )
+    return False
+
+
+def _note_indicator_error(row_data: dict, ind_name: str, message: str) -> None:
+    errors = row_data.setdefault("_indicator_errors", {})
+    if isinstance(errors, dict):
+        errors[str(ind_name).strip()] = str(message).strip()
 
 
 def _verify_indicator_present(
@@ -1982,12 +1989,16 @@ def run_scraper(
                                 ind_name,
                                 SLEEP_AFTER_INDICATOR_COMPUTE_S,
                             )
-                            _wait_for_legend_indicator_ready(
+                            legend_ready = _wait_for_legend_indicator_ready(
                                 target_page,
                                 ind_name,
                                 max_attempts=5,
                                 delay_s=1.0,
                             )
+                            if not legend_ready:
+                                _note_indicator_error(
+                                    row_data, ind_name, "timeout legendy"
+                                )
                             time.sleep(SLEEP_AFTER_INDICATOR_COMPUTE_S)
                             _ensure_legend_expanded(target_page)
                             _move_crosshair_off_chart(target_page)
@@ -2076,6 +2087,29 @@ def run_scraper(
                                                 ticker,
                                                 interval,
                                             )
+                                            _note_indicator_error(
+                                                row_data,
+                                                ind_name,
+                                                "pusty odczyt po ponowieniu",
+                                            )
+                                    else:
+                                        _note_indicator_error(
+                                            row_data,
+                                            ind_name,
+                                            "ponowne dodanie wskaźnika nie powiodło się",
+                                        )
+
+                            _ser = pd.Series(row_data)
+                            if not row_has_indicator_data(_ser, ind_name):
+                                errors = row_data.get("_indicator_errors") or {}
+                                if not (
+                                    isinstance(errors, dict) and ind_name in errors
+                                ):
+                                    _note_indicator_error(
+                                        row_data,
+                                        ind_name,
+                                        "błąd parsowania legendy",
+                                    )
 
                         if is_last_indicator:
                             if is_indicator_subset and erow is not None:
@@ -2085,11 +2119,13 @@ def run_scraper(
                                             row_data, erow, other_ind
                                         )
                             apply_final_scrape_status(row_data, status_indicators)
+                            row_data.pop("_indicator_errors", None)
                             save_results_row(current_run_file, row_data)
                             update_state(ticker, interval)
                         else:
                             row_data["Scrape_Status"] = ""
                             row_data["Scrape_Error"] = ""
+                            row_data.pop("_indicator_errors", None)
                             save_results_row(current_run_file, row_data)
 
                     if is_last_indicator:

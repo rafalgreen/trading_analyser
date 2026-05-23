@@ -59,6 +59,68 @@ def test_config_get(client: TestClient):
     assert "indicators" in body
 
 
+def test_health_endpoint(client: TestClient, monkeypatch):
+    import app as m
+
+    monkeypatch.setattr(m, "_cdp_is_listening", lambda _port: True)
+    monkeypatch.setattr(
+        m,
+        "cdp_find_tradingview_chart_url",
+        lambda _port: "https://www.tradingview.com/chart/abc/",
+    )
+    monkeypatch.setattr(m, "check_yfinance_available", lambda: (True, None))
+
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cdp"]["ok"] is True
+    assert body["cdp"]["port"] == 9222
+    assert body["tradingview_tab"]["ok"] is True
+    assert "tradingview.com" in body["tradingview_tab"]["url"]
+    assert body["yfinance"]["ok"] is True
+
+
+def test_dashboard_includes_indicator_errors(app_env, client, monkeypatch):
+    m, res, _dat = app_env
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {"tickers": ["AAA"], "intervals": ["1D"], "indicators": ["PCA", "MacD"]},
+    )
+    fp = res / "tradingview_results_2026-05-01.csv"
+    with open(fp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "Ticker",
+                "Company_Name",
+                "Interval",
+                "Scrape_Status",
+                "Scrape_Error",
+                "PCA_Values",
+                "MacD_Line",
+            ],
+        )
+        w.writeheader()
+        w.writerow(
+            {
+                "Ticker": "AAA",
+                "Company_Name": "Test",
+                "Interval": "1D",
+                "Scrape_Status": "NO_DATA",
+                "Scrape_Error": "MacD: timeout legendy; PCA: brak danych w legendzie",
+                "PCA_Values": "",
+                "MacD_Line": "",
+            }
+        )
+    monkeypatch.setattr(m, "_sync_missing_fundamentals_for_dashboard", lambda *a, **k: None)
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200
+    row = r.json()["data"][0]
+    assert row["Indicator_Errors"]["MacD"] == "timeout legendy"
+    assert "PCA" in row["Indicator_Errors"]
+
+
 # ---------------------------------------------------------------------------
 # /api/dashboard
 # ---------------------------------------------------------------------------

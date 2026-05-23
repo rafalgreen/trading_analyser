@@ -113,3 +113,22 @@ def test_repair_modal_decoupled_from_scraper_in_source():
     assert "Uruchom scraper ręcznie" in js
     assert "repair-manual-input" in js
     assert "Edytuj ręcznie" in js
+
+
+def test_favorites_filter_and_storage_wired():
+    js = APP_JS.read_text(encoding="utf-8")
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "ta_favorite_tickers" in js
+    assert "favorites-first" in js
+    assert 'id="favorites-filter"' in html
+    assert "card-favorite-btn" in html
+    assert "toggleFavoriteTicker" in js
+    assert "favoritesOnly" in js
+
+
+def test_system_health_ui_wired():
+    js = APP_JS.read_text(encoding="utf-8")
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "/api/health" in js
+    assert 'id="system-health-list"' in html
+    assert "fetchSystemHealth" in js
