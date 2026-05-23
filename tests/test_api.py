@@ -336,6 +336,46 @@ def test_dashboard_maps_csv_bare_symbol_to_config_ticker(
     assert body["tickers"][0]["ticker"] == "GPW:ATC"
 
 
+def test_dashboard_maps_legacy_asbp_csv_to_gpw_asb(
+    client: TestClient, app_env, monkeypatch
+):
+    """Stare wiersze ASBP w CSV mapują się na GPW:ASB z configu bez ponownego rename."""
+    m, res, _dat = app_env
+    fields = [
+        "Ticker",
+        "Company_Name",
+        "Interval",
+        "PCA_Values",
+        "Scrape_Status",
+        "Exchange",
+    ]
+    fp = res / "tradingview_results_2026-05-22.csv"
+    with open(fp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({
+            "Ticker": "ASBP",
+            "Company_Name": "Asseco BS",
+            "Interval": "1D",
+            "PCA_Values": "0.4",
+            "Scrape_Status": "OK",
+            "Exchange": "GPW",
+        })
+
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {"tickers": ["GPW:ASB"], "intervals": ["1D"], "indicators": ["PCA"]},
+    )
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["data"]) == 1
+    row = body["data"][0]
+    assert row["Ticker"] == "GPW:ASB"
+    assert row["PCA_Values"] == "0.4"
+
+
 # ---------------------------------------------------------------------------
 # /api/fundamentals
 # ---------------------------------------------------------------------------

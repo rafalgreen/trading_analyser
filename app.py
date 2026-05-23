@@ -37,6 +37,8 @@ from results_store import (
     load_results_dataframe,
     parse_pca_number,
     remove_ticker_rows_from_csv,
+    rename_fundamentals_ticker,
+    rename_ticker_rows_in_csv,
     row_has_indicator_data,
     save_fundamentals_row,
     config_tickers_with_no_data,
@@ -1582,7 +1584,7 @@ def _config_ticker_for_csv_symbol(
     csv_ticker: str, config_tickers: List[str]
 ) -> Optional[str]:
     """Mapuje symbol z CSV na kanoniczny ticker z configu (lub ``None`` gdy brak)."""
-    resolution = _resolve_config_symbol(csv_ticker, config_tickers)
+    resolution = _resolve_config_symbol(csv_ticker, config_tickers, allow_similar_match=True)
     if resolution.get("in_config") and resolution.get("match"):
         return str(resolution["match"])
     return None
@@ -2318,12 +2320,17 @@ def _resolve_config_symbol(
     ticker: str,
     config_tickers: List[str],
     preferred_new: str = "",
+    *,
+    allow_similar_match: bool = False,
 ) -> Dict[str, Any]:
     """Rozpoznaje relację tickera z CSV/requestu do aktualnego configu.
 
     Zwraca jeden format dla ``/api/results`` i ``/api/tickers/rename``.
     ``In_Config=True`` tylko dla exact albo bezpiecznego jednoznacznego wariantu.
     Stare symbole z CSV dostają ``Config_Status=stale`` i listę kandydatów.
+
+    Gdy ``allow_similar_match=True`` (skan dashboardu), pojedynczy kandydat
+    z wysokim score może zostać zmapowany na config (np. ``ASBP`` → ``GPW:ASB``).
     """
     t_u = (ticker or "").strip().upper()
     upper = [str(t or "").strip().upper() for t in config_tickers]
@@ -2360,6 +2367,27 @@ def _resolve_config_symbol(
             if str(c.get("ticker") or "").strip().upper() != preferred_u
         ]
         candidates.insert(0, preferred)
+
+    if allow_similar_match:
+        strong = [
+            c for c in candidates if int(c.get("score") or 0) >= 100
+        ]
+        if len(strong) == 1:
+            return {
+                "in_config": True,
+                "match": str(strong[0]["ticker"]),
+                "status": "variant",
+                "candidates": [],
+            }
+
+        if len(candidates) == 1 and int(candidates[0].get("score") or 0) >= 75:
+            return {
+                "in_config": True,
+                "match": str(candidates[0]["ticker"]),
+                "status": "variant",
+                "candidates": [],
+            }
+
     return {
         "in_config": False,
         "match": "",
@@ -2441,6 +2469,97 @@ def _apply_ticker_rename(config: Dict[str, Any], old: str, new: str) -> Dict[str
     }
 
 
+def _rename_fundamentals_cache_ticker(old_ticker: str, new_ticker: str) -> bool:
+    """Przenosi wpis tickera w JSON cache fundamentów (``data/.fundamentals_cache.json``)."""
+    old_u = str(old_ticker or "").strip().upper()
+    new_u = str(new_ticker or "").strip().upper()
+    if not old_u or not new_u or old_u == new_u:
+        return False
+    cache_path = _fundamentals_cache_path()
+    if not cache_path or not os.path.exists(cache_path):
+        return False
+    try:
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            cache = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Nie można odczytać cache fundamentów do rename: %s", exc)
+        return False
+    if not isinstance(cache, dict):
+        return False
+
+    old_entry = cache.pop(old_u, None)
+    if not isinstance(old_entry, dict):
+        return False
+
+    new_entry = cache.get(new_u)
+    if isinstance(new_entry, dict):
+        for key, val in old_entry.items():
+            if key == "Ticker":
+                continue
+            new_val = new_entry.get(key)
+            if new_val in (None, "") and val not in (None, ""):
+                new_entry[key] = val
+        old_entry = new_entry
+    old_entry["Ticker"] = new_u
+    cache[new_u] = old_entry
+
+    try:
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Nie można zapisać cache fundamentów po rename: %s", exc)
+        return False
+    return True
+
+
+def _migrate_ticker_symbol_everywhere(old_ticker: str, new_ticker: str) -> Dict[str, Any]:
+    """Przepisuje historyczne wiersze CSV i fundamenty ze starego symbolu."""
+    old_u = str(old_ticker or "").strip().upper()
+    new_u = str(new_ticker or "").strip().upper()
+    if not old_u or not new_u or old_u == new_u:
+        return {
+            "csv_files_modified": 0,
+            "csv_rows_affected": 0,
+            "fundamentals_migrated": False,
+            "fundamentals_cache_migrated": False,
+            "files": [],
+        }
+
+    files_out: List[Dict[str, Any]] = []
+    rows_affected = 0
+    files_modified = 0
+    for path in sorted(get_csv_files()):
+        affected, remaining = rename_ticker_rows_in_csv(path, old_u, new_u)
+        if affected <= 0:
+            continue
+        rows_affected += affected
+        files_modified += 1
+        base = os.path.basename(path)
+        files_out.append(
+            {
+                "filename": base,
+                "date_id": base.replace(CSV_PREFIX, "").replace(".csv", ""),
+                "rows_affected": affected,
+                "remaining_rows": remaining,
+            }
+        )
+
+    fundamentals_migrated = rename_fundamentals_ticker(
+        old_u,
+        new_u,
+        path=_fundamentals_csv_path(),
+    )
+    fundamentals_cache_migrated = _rename_fundamentals_cache_ticker(old_u, new_u)
+
+    return {
+        "csv_files_modified": files_modified,
+        "csv_rows_affected": rows_affected,
+        "fundamentals_migrated": fundamentals_migrated,
+        "fundamentals_cache_migrated": fundamentals_cache_migrated,
+        "files": files_out,
+    }
+
+
 @app.post("/api/tickers/rename")
 def rename_ticker(body: TickerRenameRequest):
     """Zmienia nazwę tickera w konfiguracji (zachowuje pozycję na liście).
@@ -2450,7 +2569,8 @@ def rename_ticker(body: TickerRenameRequest):
       2) bazowy symbol (prefiks przed pierwszą kropką, np. ``LULU.O`` ↔ ``LULU``),
       3) gdy w configu jest dokładnie jeden kandydat z tym samym basem — używamy go.
 
-    Nie dotyka historycznych plików CSV — pozostają pod starą nazwą.
+    Po rename przepisuje też wiersze historycznych CSV oraz fundamenty ze
+    starego symbolu na nowy, żeby dashboard od razu widział dane pod nową nazwą.
     """
     config = load_config()
     try:
@@ -2458,6 +2578,8 @@ def rename_ticker(body: TickerRenameRequest):
     except TickerRenameError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     save_config(config)
+    migration = _migrate_ticker_symbol_everywhere(result["old"], result["new"])
+    result.update(migration)
     return result
 
 
