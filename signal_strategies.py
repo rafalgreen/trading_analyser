@@ -89,7 +89,11 @@ def _bucket_score(score: float) -> str:
 
 
 def strategy_trend_only(row: Dict[str, object]) -> str:
-    """2× Wzrostowy + PCA≥60 → Strong Buy; 2× Wzrostowy → Buy; 2× Spadkowy + PCA≤40 → Strong Sell; 2× Spadkowy → Sell; reszta → Neutral."""
+    """2× Wzrostowy + PCA≤40 → Strong Buy; 2× Wzrostowy → Buy; 2× Spadkowy + PCA≥60 → Strong Sell; 2× Spadkowy → Sell; reszta → Neutral.
+
+    PCA jest skalą risk-on jak w ``pca_buckets``: niskie = okazja (bullish),
+    wysokie = drogo/przegrzane (bearish).
+    """
     i = _row_inputs(row)
     h, m, p = i["hts_trend"], i["macd_trend"], i["pca"]
     if h is None and m is None:
@@ -97,18 +101,18 @@ def strategy_trend_only(row: Dict[str, object]) -> str:
     ups = sum(1 for x in (h, m) if x == "up")
     downs = sum(1 for x in (h, m) if x == "down")
     if ups >= 2:
-        if p is not None and p >= 60:
+        if p is not None and p <= 40:
             return SIGNAL_STRONG_BUY
         return SIGNAL_BUY
     if downs >= 2:
-        if p is not None and p <= 40:
+        if p is not None and p >= 60:
             return SIGNAL_STRONG_SELL
         return SIGNAL_SELL
     return SIGNAL_NEUTRAL
 
 
 def strategy_cross_priority(row: Dict[str, object]) -> str:
-    """Crossy mają priorytet; PCA jako tie-breaker (≥60 buy, ≤40 sell)."""
+    """Crossy mają priorytet; PCA jako tie-breaker (≤40 buy, ≥60 sell — jak ``pca_buckets``)."""
     i = _row_inputs(row)
     cross_up = sum(1 for x in (i["hts_cross"], i["macd_cross"]) if x == "up")
     cross_down = sum(1 for x in (i["hts_cross"], i["macd_cross"]) if x == "down")
@@ -118,11 +122,11 @@ def strategy_cross_priority(row: Dict[str, object]) -> str:
     if cross_down >= 2:
         return SIGNAL_STRONG_SELL
     if cross_up == 1 and cross_down == 0:
-        if p is not None and p >= 60:
+        if p is not None and p <= 40:
             return SIGNAL_STRONG_BUY
         return SIGNAL_BUY
     if cross_down == 1 and cross_up == 0:
-        if p is not None and p <= 40:
+        if p is not None and p >= 60:
             return SIGNAL_STRONG_SELL
         return SIGNAL_SELL
     h, m = i["hts_trend"], i["macd_trend"]
@@ -135,9 +139,9 @@ def strategy_cross_priority(row: Dict[str, object]) -> str:
     if downs >= 2:
         return SIGNAL_SELL
     if p is not None:
-        if p >= 60:
-            return SIGNAL_BUY
         if p <= 40:
+            return SIGNAL_BUY
+        if p >= 60:
             return SIGNAL_SELL
     return SIGNAL_NEUTRAL
 
