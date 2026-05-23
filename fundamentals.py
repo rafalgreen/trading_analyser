@@ -46,6 +46,8 @@ FUND_KEYS = (
     "Fund_NetMargin",
     "Fund_DE",
     "Fund_FCF",
+    "Fund_DividendYield",
+    "Fund_DividendRate",
 )
 
 _YF_FIELD_MAP = {
@@ -56,7 +58,11 @@ _YF_FIELD_MAP = {
     "Fund_NetMargin": "profitMargins",
     "Fund_DE": "debtToEquity",
     "Fund_FCF": "freeCashflow",
+    "Fund_DividendYield": "dividendYield",
+    "Fund_DividendRate": "dividendRate",
 }
+
+_YF_DIVIDEND_RATE_FALLBACK = "trailingAnnualDividendRate"
 
 _TV_ROW_LABELS = {
     "Fund_PE": ("price to earnings ratio", "p/e ratio", "price-to-earnings"),
@@ -66,6 +72,13 @@ _TV_ROW_LABELS = {
     "Fund_NetMargin": ("net margin", "net profit margin"),
     "Fund_DE": ("debt to equity ratio", "debt-to-equity"),
     "Fund_FCF": ("free cash flow",),
+    "Fund_DividendYield": ("dividend yield",),
+    "Fund_DividendRate": (
+        "dividend per share",
+        "dividend rate",
+        "annual dividend",
+        "trailing annual dividend",
+    ),
 }
 
 # Granice sensownych wartości (poza zakresem → traktujemy jak brak danych).
@@ -76,6 +89,8 @@ _FUND_SANITY_BOUNDS: Dict[str, Tuple[Optional[float], Optional[float]]] = {
     "Fund_ROE": (-5.0, 5.0),
     "Fund_NetMargin": (-1.0, 1.0),
     "Fund_DE": (0.0, 10_000.0),
+    "Fund_DividendYield": (0.0, 1.0),
+    "Fund_DividendRate": (0.0, 10_000.0),
 }
 
 _NUMBER_TOKEN_RE = re.compile(
@@ -389,6 +404,15 @@ def _coerce_number(value: Any) -> Optional[float]:
     return _normalize_numeric_token(match.group(0))
 
 
+def _normalize_dividend_yield(value: Optional[float]) -> Optional[float]:
+    """yfinance zwraca ułamek (0.025 = 2.5%); czasem procent (2.5)."""
+    if value is None:
+        return None
+    if value > 1.0:
+        value = value / 100.0
+    return value
+
+
 def _is_sane_fund_value(fund_key: str, value: Optional[float]) -> bool:
     if value is None:
         return False
@@ -492,6 +516,9 @@ def _yf_fetch(symbol: str) -> Optional[Dict[str, Optional[float]]]:
     out: Dict[str, Optional[float]] = {}
     for fund_key, yf_field in _YF_FIELD_MAP.items():
         out[fund_key] = _coerce_number(info.get(yf_field))
+    if out.get("Fund_DividendRate") is None:
+        out["Fund_DividendRate"] = _coerce_number(info.get(_YF_DIVIDEND_RATE_FALLBACK))
+    out["Fund_DividendYield"] = _normalize_dividend_yield(out.get("Fund_DividendYield"))
     sanitized = _sanitize_fund_values(out)
     if not any(v is not None for v in sanitized.values()):
         return None
