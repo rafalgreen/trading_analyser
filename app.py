@@ -53,6 +53,7 @@ from signal_strategies import (
     STRATEGY_LABELS as SIGNAL_STRATEGY_LABELS,
     compute_signals as compute_row_signals,
 )
+from composite_score import compute_composite_verdict
 from company_names import (
     fetch_symbol_matches,
     lookup_company_name,
@@ -1714,8 +1715,16 @@ def _flatten_dashboard_to_rows(
             last_refresh = bucket.get("last_refresh") if bucket else None
             if last_refresh:
                 row["Last_Refresh"] = last_refresh
+            composite = entry.get("composite") or {}
             for k, v in fundamentals.items():
                 row[k] = v
+            row["Composite_Verdict"] = composite.get("verdict") or ""
+            row["Composite_Score"] = composite.get("score")
+            breakdown = composite.get("breakdown") or {}
+            row["Composite_Breakdown_Fund"] = breakdown.get("fund")
+            row["Composite_Breakdown_Tech"] = breakdown.get("tech")
+            row["Composite_Breakdown_Consensus"] = breakdown.get("consensus")
+            row["Composite_Flags"] = composite.get("flags") or []
             rows.append(row)
 
     for row in rows:
@@ -1812,6 +1821,12 @@ def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
             exchange = ticker.split(":", 1)[0].strip().upper()
 
         fundamentals = _row_fundamentals(ticker)
+        interval_rows: Dict[str, Dict[str, Any]] = {}
+        for iv, bucket in intervals_data.items():
+            raw = (bucket or {}).get("row")
+            if raw:
+                interval_rows[iv] = raw
+        composite = compute_composite_verdict(ticker, interval_rows, fundamentals)
         dashboard_tickers.append(
             {
                 "ticker": ticker,
@@ -1819,6 +1834,7 @@ def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
                 "exchange": exchange,
                 "intervals": intervals_data,
                 "fundamentals": fundamentals,
+                "composite": composite,
                 "last_refresh_any": last_refresh_any,
             }
         )

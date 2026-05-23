@@ -118,7 +118,9 @@ Na górze widoku:
 
 - **Filtr interwału** — `1D` / `1W` / `1M` / wszystkie.
 - **Pasek wyszukiwania** — filtrowanie po tickerze / nazwie spółki.
-- **Sortowanie** — domyślnie „Problemy najpierw", plus PCA, MacD Line, P/E, ROE, FCF, consensus i ticker A→Z.
+- **Sortowanie** — domyślnie „Problemy najpierw", plus PCA, MacD Line, P/E, ROE, FCF, consensus, **werdykt composite (Kup first)**, **composite score ↓** i ticker A→Z.
+- **Werdykt composite** — badge **Kup** / **Obserwuj** / **Unikaj** na karcie (40% fundamenty, 40% scoring 1W, 20% consensus D/W/M); tooltip z breakdown. Filtr `#verdict-filter` w nagłówku.
+- **Filtry fundamentalne** — P/E max, ROE min, FCF dodatnie, D/E max (client-side, `localStorage`).
 - **Wykres dashboardu** — dropdown metryki (PCA, MacD Line/Histogram, HTS Fast/Slow High, fundamentale); filtr interwału `1D` / `1W` / `1M` (ukryty dla metryk `Fund_*`). Gdy brak punktów dla wybranej metryki, panel pokazuje **komunikat pustego stanu**, ale **sterowanie (dropdown + interwał) pozostaje widoczne**.
 
 Diagnostyka braków wskaźników: `/api/results/{date_id}` i `/api/dashboard` zwracają `Missing_Indicators` oraz `All_Indicators_Missing`.

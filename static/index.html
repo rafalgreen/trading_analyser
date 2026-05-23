@@ -14,7 +14,7 @@
     <!-- Phosphor Icons for modern iconography -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=11">
+    <link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
     <div id="global-scrape-banner" class="global-scrape-banner" aria-live="polite">
@@ -57,6 +57,36 @@
                 <div class="header-actions" style="display:flex; gap:12px; align-items:center;">
                     <!-- Sort Dropdown -->
                     <div class="sort-container">
+                        <select id="verdict-filter" class="sort-select" title="Filtr werdyktu composite">
+                            <option value="all">Wszystkie werdykty</option>
+                            <option value="kup">Kup</option>
+                            <option value="obserwuj">Obserwuj</option>
+                            <option value="unikaj">Unikaj</option>
+                        </select>
+                    </div>
+                    <div class="sort-container fund-filters" title="Filtry fundamentalne">
+                        <select id="fund-pe-max" class="sort-select fund-filter-select" title="Maks. P/E">
+                            <option value="">P/E: dowolne</option>
+                            <option value="15">P/E ≤ 15</option>
+                            <option value="20">P/E ≤ 20</option>
+                            <option value="30">P/E ≤ 30</option>
+                        </select>
+                        <select id="fund-roe-min" class="sort-select fund-filter-select" title="Min. ROE">
+                            <option value="">ROE: dowolne</option>
+                            <option value="10">ROE ≥ 10%</option>
+                            <option value="15">ROE ≥ 15%</option>
+                        </select>
+                        <label class="fund-filter-check" title="Tylko dodatnie FCF">
+                            <input type="checkbox" id="fund-fcf-positive">
+                            <span>FCF+</span>
+                        </label>
+                        <select id="fund-de-max" class="sort-select fund-filter-select" title="Maks. D/E">
+                            <option value="">D/E: dowolne</option>
+                            <option value="100">D/E ≤ 100</option>
+                            <option value="200">D/E ≤ 200</option>
+                        </select>
+                    </div>
+                    <div class="sort-container">
                         <select id="interval-filter" class="sort-select" title="Filtruj interwał">
                             <option value="All">Wszystkie interwały</option>
                             <option value="1D">1D</option>
@@ -80,6 +110,8 @@
                             <option value="fcf-asc">FCF ↑</option>
                             <option value="consensus-bullish">Consensus bullish ↓</option>
                             <option value="consensus-bearish">Consensus bearish ↓</option>
+                            <option value="verdict-kup-first">Werdykt (Kup first)</option>
+                            <option value="composite-desc">Composite score ↓</option>
                             <option value="ticker-asc">Ticker A→Z</option>
                             <option value="ticker-desc">Ticker Z→A</option>
                         </select>
@@ -330,6 +362,7 @@
             <div class="card-header">
                 <div class="ticker-info">
                     <h2 class="ticker-name">BTCUSDT</h2>
+                    <span class="composite-verdict-badge" hidden></span>
                     <span class="exchange-badge" hidden></span>
                     <span class="company-name">Nazwa Firmy</span>
                 </div>
@@ -595,6 +628,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=23"></script>
+    <script src="app.js?v=24"></script>
 </body>
 </html>

@@ -11,6 +11,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const expandAllBtn = document.getElementById('expand-all-btn');
     const searchInput = document.getElementById('search-input');
     const sortSelect = document.getElementById('sort-select');
+    const verdictFilter = document.getElementById('verdict-filter');
+    const fundPeMax = document.getElementById('fund-pe-max');
+    const fundRoeMin = document.getElementById('fund-roe-min');
+    const fundFcfPositive = document.getElementById('fund-fcf-positive');
+    const fundDeMax = document.getElementById('fund-de-max');
     const intervalFilter = document.getElementById('interval-filter');
     const chartPanel = document.getElementById('chart-panel');
     const pcaChartCanvas = document.getElementById('pcaChart');
@@ -38,6 +43,11 @@ document.addEventListener('DOMContentLoaded', () => {
         signalStrategy: 'ta_signal_strategy',
         signalInterval: 'ta_signal_interval',
         consensusFilter: 'ta_consensus_filter',
+        verdictFilter: 'ta_verdict_filter',
+        fundPeMax: 'ta_fund_pe_max',
+        fundRoeMin: 'ta_fund_roe_min',
+        fundFcfPositive: 'ta_fund_fcf_positive',
+        fundDeMax: 'ta_fund_de_max',
         renamedHidden: 'ta_renamed_hidden',
     };
 
@@ -91,8 +101,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const ALLOWED_SORT = new Set([
         'data-status', 'default', 'pca-desc', 'pca-asc',
         'macd-desc', 'macd-asc', 'pe-desc', 'pe-asc', 'roe-desc', 'roe-asc', 'fcf-desc', 'fcf-asc',
-        'consensus-bullish', 'consensus-bearish', 'ticker-asc', 'ticker-desc',
+        'consensus-bullish', 'consensus-bearish',
+        'verdict-kup-first', 'composite-desc',
+        'ticker-asc', 'ticker-desc',
     ]);
+    const ALLOWED_VERDICT_FILTERS = new Set(['all', 'kup', 'obserwuj', 'unikaj']);
+    const VERDICT_SORT_RANK = { kup: 0, obserwuj: 1, unikaj: 2 };
     const ALLOWED_INTERVAL = new Set(['1D', '1W', '1M']);
     const ALLOWED_SIGNAL_INTERVALS = new Set(['D', 'W', 'M']);
     const BUY_SIGNALS = new Set(['buy', 'strong buy']);
@@ -148,6 +162,12 @@ document.addEventListener('DOMContentLoaded', () => {
         ? loadPref(UI_KEYS.signalInterval, 'D') : 'D';
     let consensusFilter = ALLOWED_CONSENSUS_FILTERS.has(loadPref(UI_KEYS.consensusFilter, 'all'))
         ? loadPref(UI_KEYS.consensusFilter, 'all') : 'all';
+    let currentVerdictFilter = ALLOWED_VERDICT_FILTERS.has(loadPref(UI_KEYS.verdictFilter, 'all'))
+        ? loadPref(UI_KEYS.verdictFilter, 'all') : 'all';
+    let fundFilterPeMax = loadPref(UI_KEYS.fundPeMax, '') || '';
+    let fundFilterRoeMin = loadPref(UI_KEYS.fundRoeMin, '') || '';
+    let fundFilterFcfPositive = Boolean(loadPref(UI_KEYS.fundFcfPositive, false));
+    let fundFilterDeMax = loadPref(UI_KEYS.fundDeMax, '') || '';
     let availableSignalStrategies = ALL_STRATEGY_IDS.map(id => ({ id, label: id }));
 
     function persistCollapsed() {
@@ -412,6 +432,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize App
     async function init() {
         if (sortSelect) sortSelect.value = currentSortMode;
+        if (verdictFilter) verdictFilter.value = currentVerdictFilter;
+        if (fundPeMax) fundPeMax.value = fundFilterPeMax;
+        if (fundRoeMin) fundRoeMin.value = fundFilterRoeMin;
+        if (fundFcfPositive) fundFcfPositive.checked = fundFilterFcfPositive;
+        if (fundDeMax) fundDeMax.value = fundFilterDeMax;
         if (intervalFilter) intervalFilter.value = currentIntervalFilter;
         if (chartMetricSelect) chartMetricSelect.value = currentChartMetric;
         syncChartIntervalToggleVisibility();
@@ -449,6 +474,41 @@ document.addEventListener('DOMContentLoaded', () => {
         savePref(UI_KEYS.sortMode, currentSortMode);
         const term = searchInput.value.toLowerCase().trim();
         filterAndRenderCards(term);
+    });
+
+    verdictFilter?.addEventListener('change', (e) => {
+        const val = e.target.value;
+        currentVerdictFilter = ALLOWED_VERDICT_FILTERS.has(val) ? val : 'all';
+        savePref(UI_KEYS.verdictFilter, currentVerdictFilter);
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+
+    function syncFundFilterPrefs() {
+        savePref(UI_KEYS.fundPeMax, fundFilterPeMax);
+        savePref(UI_KEYS.fundRoeMin, fundFilterRoeMin);
+        savePref(UI_KEYS.fundFcfPositive, fundFilterFcfPositive);
+        savePref(UI_KEYS.fundDeMax, fundFilterDeMax);
+    }
+
+    fundPeMax?.addEventListener('change', (e) => {
+        fundFilterPeMax = e.target.value || '';
+        syncFundFilterPrefs();
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+    fundRoeMin?.addEventListener('change', (e) => {
+        fundFilterRoeMin = e.target.value || '';
+        syncFundFilterPrefs();
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+    fundFcfPositive?.addEventListener('change', (e) => {
+        fundFilterFcfPositive = Boolean(e.target.checked);
+        syncFundFilterPrefs();
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+    fundDeMax?.addEventListener('change', (e) => {
+        fundFilterDeMax = e.target.value || '';
+        syncFundFilterPrefs();
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
     });
 
     intervalFilter?.addEventListener('change', (e) => {
@@ -796,6 +856,103 @@ document.addEventListener('DOMContentLoaded', () => {
         return (Date.now() - newest) / 3_600_000 > 24;
     }
 
+    function getTickerFundRow(rows) {
+        return (rows || []).find(r => r['Fund_PE'] != null || r['Fund_ROE'] != null || r['Fund_FCF'] != null
+            || (r['Fund_Source'] && String(r['Fund_Source']).toLowerCase() !== 'none'))
+            || (rows && rows[0]) || null;
+    }
+
+    function getCompositeVerdict(rows) {
+        const row = (rows || []).find(r => r['Composite_Verdict']) || (rows && rows[0]);
+        return String(row?.['Composite_Verdict'] || '').toLowerCase();
+    }
+
+    function getCompositeScore(rows) {
+        const row = (rows || []).find(r => r['Composite_Score'] != null && r['Composite_Score'] !== '')
+            || (rows && rows[0]);
+        const n = Number(row?.['Composite_Score']);
+        return Number.isFinite(n) ? n : NaN;
+    }
+
+    function passesFundFilters(rows) {
+        const fund = getTickerFundRow(rows);
+        if (!fund) return true;
+        if (fundFilterPeMax) {
+            const pe = extractNumericField(fund, 'Fund_PE');
+            const maxPe = Number(fundFilterPeMax);
+            if (!Number.isFinite(pe) || pe > maxPe) return false;
+        }
+        if (fundFilterRoeMin) {
+            let roe = extractNumericField(fund, 'Fund_ROE');
+            if (Number.isFinite(roe) && Math.abs(roe) <= 1) roe *= 100;
+            const minRoe = Number(fundFilterRoeMin);
+            if (!Number.isFinite(roe) || roe < minRoe) return false;
+        }
+        if (fundFilterFcfPositive) {
+            const fcf = extractNumericField(fund, 'Fund_FCF');
+            if (!Number.isFinite(fcf) || fcf <= 0) return false;
+        }
+        if (fundFilterDeMax) {
+            const de = extractNumericField(fund, 'Fund_DE');
+            const maxDe = Number(fundFilterDeMax);
+            if (!Number.isFinite(de) || de > maxDe) return false;
+        }
+        return true;
+    }
+
+    function formatCompositeTooltip(row) {
+        if (!row) return '';
+        const score = row['Composite_Score'];
+        const bFund = row['Composite_Breakdown_Fund'];
+        const bTech = row['Composite_Breakdown_Tech'];
+        const bCons = row['Composite_Breakdown_Consensus'];
+        const flags = Array.isArray(row['Composite_Flags']) ? row['Composite_Flags'] : [];
+        let tip = `Composite: ${score != null ? score : '—'}`;
+        tip += `\nFund: ${bFund != null ? bFund : '—'} · Tech 1W: ${bTech != null ? bTech : '—'} · Consensus D/W/M: ${bCons != null ? bCons : '—'}`;
+        if (flags.length) tip += `\nFlagi: ${flags.join(', ')}`;
+        return tip;
+    }
+
+    function addCompositeVerdictBadge(cardClone, rows) {
+        const badge = cardClone.querySelector('.composite-verdict-badge');
+        if (!badge) return;
+        const row = (rows || []).find(r => r['Composite_Verdict']) || rows[0];
+        const verdict = String(row?.['Composite_Verdict'] || '').toLowerCase();
+        if (!verdict) {
+            badge.hidden = true;
+            badge.textContent = '';
+            badge.className = 'composite-verdict-badge';
+            badge.removeAttribute('title');
+            return;
+        }
+        badge.hidden = false;
+        badge.className = `composite-verdict-badge verdict-${verdict}`;
+        badge.textContent = verdict === 'kup' ? 'Kup' : (verdict === 'unikaj' ? 'Unikaj' : 'Obserwuj');
+        badge.title = formatCompositeTooltip(row);
+    }
+
+    function cmpVerdictGroups(aTicker, bTicker, groupedData) {
+        const av = getCompositeVerdict(groupedData[aTicker]);
+        const bv = getCompositeVerdict(groupedData[bTicker]);
+        const ar = VERDICT_SORT_RANK[av] ?? 99;
+        const br = VERDICT_SORT_RANK[bv] ?? 99;
+        if (ar !== br) return ar - br;
+        const as = getCompositeScore(groupedData[aTicker]);
+        const bs = getCompositeScore(groupedData[bTicker]);
+        if (Number.isFinite(as) && Number.isFinite(bs) && as !== bs) return bs - as;
+        return aTicker.localeCompare(bTicker);
+    }
+
+    function cmpCompositeDesc(aTicker, bTicker, groupedData) {
+        const as = getCompositeScore(groupedData[aTicker]);
+        const bs = getCompositeScore(groupedData[bTicker]);
+        const aOk = Number.isFinite(as);
+        const bOk = Number.isFinite(bs);
+        if (aOk && bOk && as !== bs) return bs - as;
+        if (aOk !== bOk) return aOk ? -1 : 1;
+        return cmpVerdictGroups(aTicker, bTicker, groupedData);
+    }
+
     function filterAndRenderCards(searchTerm) {
         // Odfiltruj tickery ukryte po rename (zachowujemy wiersze w CSV, ale
         // w UI nie chcemy widzieć już starej nazwy).
@@ -846,6 +1003,36 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (tickerMatchesConsensus(rows)) {
                     allowedTickers.add(ticker);
                 }
+            });
+            filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
+        }
+
+        if (currentVerdictFilter && currentVerdictFilter !== 'all') {
+            const byTicker = new Map();
+            filteredData.forEach(row => {
+                const t = row['Ticker'] || '';
+                if (!byTicker.has(t)) byTicker.set(t, []);
+                byTicker.get(t).push(row);
+            });
+            const allowedTickers = new Set();
+            byTicker.forEach((rows, ticker) => {
+                if (getCompositeVerdict(rows) === currentVerdictFilter) {
+                    allowedTickers.add(ticker);
+                }
+            });
+            filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
+        }
+
+        if (fundFilterPeMax || fundFilterRoeMin || fundFilterFcfPositive || fundFilterDeMax) {
+            const byTicker = new Map();
+            filteredData.forEach(row => {
+                const t = row['Ticker'] || '';
+                if (!byTicker.has(t)) byTicker.set(t, []);
+                byTicker.get(t).push(row);
+            });
+            const allowedTickers = new Set();
+            byTicker.forEach((rows, ticker) => {
+                if (passesFundFilters(rows)) allowedTickers.add(ticker);
             });
             filteredData = filteredData.filter(row => allowedTickers.has(row['Ticker'] || ''));
         }
@@ -1366,6 +1553,12 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'consensus-bearish':
                 sortedKeys.sort((a, b) => cmpConsensusGroups(a, b, groupedData, 'bearish'));
                 break;
+            case 'verdict-kup-first':
+                sortedKeys.sort((a, b) => cmpVerdictGroups(a, b, groupedData));
+                break;
+            case 'composite-desc':
+                sortedKeys.sort((a, b) => cmpCompositeDesc(a, b, groupedData));
+                break;
             case 'ticker-asc':
                 sortedKeys.sort((a, b) => a.localeCompare(b));
                 break;
@@ -1393,6 +1586,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             cardClone.querySelector('.ticker-name').textContent = ticker;
+            addCompositeVerdictBadge(cardClone, rows);
             const companyEl = cardClone.querySelector('.company-name');
             const hasRealName = companyName && companyName !== '—'
                 && companyName.toUpperCase() !== ticker.toUpperCase();

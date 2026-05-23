@@ -555,6 +555,73 @@ body {
     display: none;
 }
 
+.composite-verdict-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    flex-shrink: 0;
+    border: 1px solid transparent;
+    cursor: help;
+}
+
+.composite-verdict-badge[hidden] {
+    display: none;
+}
+
+.composite-verdict-badge.verdict-kup {
+    background: rgba(16, 185, 129, 0.18);
+    color: #34d399;
+    border-color: rgba(16, 185, 129, 0.35);
+}
+
+.composite-verdict-badge.verdict-obserwuj {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.35);
+}
+
+.composite-verdict-badge.verdict-unikaj {
+    background: rgba(239, 68, 68, 0.18);
+    color: #f87171;
+    border-color: rgba(239, 68, 68, 0.35);
+}
+
+.fund-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.fund-filter-select {
+    min-width: 0;
+    padding-right: 24px;
+    font-size: 0.78rem;
+}
+
+.fund-filter-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    min-height: 40px;
+    padding: 0 4px;
+}
+
+.fund-filter-check input {
+    accent-color: var(--accent-primary);
+}
+
 /* Card collapsible mechanics */
 .card-chevron {
     font-size: 18px;
