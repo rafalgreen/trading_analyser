@@ -894,6 +894,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function getTickerFundRow(rows) {
         return (rows || []).find(r => r['Fund_PE'] != null || r['Fund_ROE'] != null || r['Fund_FCF'] != null
+            || r['Fund_DividendYield'] != null || r['Fund_DividendRate'] != null
             || (r['Fund_Source'] && String(r['Fund_Source']).toLowerCase() !== 'none'))
             || (rows && rows[0]) || null;
     }
@@ -1107,6 +1108,21 @@ document.addEventListener('DOMContentLoaded', () => {
         if (typeof syncRepairBtnVisibility === 'function') {
             try { syncRepairBtnVisibility(); } catch (e) { /* repair UI may not be wired yet */ }
         }
+    }
+
+    function formatFundDividendYield(val) {
+        const n = Number(val);
+        if (!Number.isFinite(n)) return null;
+        let pct = n;
+        if (Math.abs(pct) <= 1) pct *= 100;
+        const text = pct.toLocaleString('pl-PL', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+        return `${text}%`;
+    }
+
+    function formatFundDividendRate(val) {
+        const n = Number(val);
+        if (!Number.isFinite(n)) return null;
+        return n.toLocaleString('pl-PL', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
     }
 
     function extractNumericField(row, fieldName) {
@@ -1748,6 +1764,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 setFund('.fund-margin', fundRow['Fund_NetMargin']);
                 setFund('.fund-de', fundRow['Fund_DE']);
                 setFund('.fund-fcf', fundRow['Fund_FCF']);
+                setFund('.fund-div-yield', formatFundDividendYield(fundRow['Fund_DividendYield']));
+                setFund('.fund-div-rate', formatFundDividendRate(fundRow['Fund_DividendRate']));
                 const fundUpdated = cardClone.querySelector('.fund-updated-at');
                 if (fundUpdated && fundRow['Fund_Updated_At']) {
                     fundUpdated.hidden = false;

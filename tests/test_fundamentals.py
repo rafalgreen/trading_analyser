@@ -86,6 +86,8 @@ def test_yf_fetch_maps_info_fields(monkeypatch):
         "profitMargins": 0.22,
         "debtToEquity": 45.0,
         "freeCashflow": 1_500_000_000,
+        "dividendYield": 0.025,
+        "dividendRate": 0.96,
     }
 
     class _FakeTicker:
@@ -104,6 +106,36 @@ def test_yf_fetch_maps_info_fields(monkeypatch):
     assert data["Fund_NetMargin"] == pytest.approx(0.22)
     assert data["Fund_DE"] == pytest.approx(45.0)
     assert data["Fund_FCF"] == pytest.approx(1_500_000_000.0)
+    assert data["Fund_DividendYield"] == pytest.approx(0.025)
+    assert data["Fund_DividendRate"] == pytest.approx(0.96)
+
+
+def test_yf_fetch_dividend_rate_fallback_to_trailing_annual(monkeypatch):
+    from fundamentals import _yf_fetch
+
+    fake_info = {
+        "trailingPE": 20.0,
+        "priceToBook": 3.0,
+        "enterpriseToEbitda": 10.0,
+        "returnOnEquity": 0.12,
+        "profitMargins": 0.15,
+        "debtToEquity": 30.0,
+        "freeCashflow": 500_000_000,
+        "dividendYield": 0.018,
+        "trailingAnnualDividendRate": 1.25,
+    }
+
+    class _FakeTicker:
+        def __init__(self, _sym):
+            self.info = fake_info
+
+    import yfinance  # type: ignore
+
+    monkeypatch.setattr(yfinance, "Ticker", _FakeTicker)
+    data = _yf_fetch("MSFT")
+    assert data is not None
+    assert data["Fund_DividendYield"] == pytest.approx(0.018)
+    assert data["Fund_DividendRate"] == pytest.approx(1.25)
 
 
 def test_yf_fetch_tolerates_missing_and_nan(monkeypatch):

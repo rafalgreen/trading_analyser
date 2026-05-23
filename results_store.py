@@ -748,6 +748,8 @@ FUNDAMENTALS_COLUMNS: List[str] = [
     "Fund_NetMargin",
     "Fund_DE",
     "Fund_FCF",
+    "Fund_DividendYield",
+    "Fund_DividendRate",
     "Fund_Source",
     "Fund_Updated_At",
 ]
