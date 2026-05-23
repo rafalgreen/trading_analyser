@@ -760,6 +760,28 @@ def fundamentals_csv_path(results_dir: str = "results") -> str:
 
 FUNDAMENTALS_CSV = fundamentals_csv_path()
 
+_fundamentals_read_notices: set = set()
+
+
+def _empty_fundamentals_dataframe() -> pd.DataFrame:
+    return pd.DataFrame(columns=FUNDAMENTALS_COLUMNS)
+
+
+def _log_fundamentals_read_once(path: str, message: str) -> None:
+    if path in _fundamentals_read_notices:
+        return
+    _fundamentals_read_notices.add(path)
+    logger.debug("Fundamentals CSV (%s): %s", path, message)
+
+
+def _ensure_fundamentals_csv_header(path: str) -> None:
+    """Tworzy plik z samym nagłówkiem gdy brakuje lub jest pusty."""
+    if path and os.path.exists(path) and os.path.getsize(path) > 0:
+        return
+    target_dir = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    _empty_fundamentals_dataframe().to_csv(path, index=False, encoding="utf-8")
+
 
 def _normalize_cell(value) -> str:
     """Konwertuje wartość komórki do stringu nadającego się do CSV (None → "")."""
@@ -785,12 +807,21 @@ def load_fundamentals_dataframe(
     """Wczytuje plik z fundamentami; gdy nie istnieje, zwraca pusty DataFrame z kolumnami."""
     p = path or FUNDAMENTALS_CSV
     if not p or not os.path.exists(p):
-        return pd.DataFrame(columns=FUNDAMENTALS_COLUMNS)
+        return _empty_fundamentals_dataframe()
     try:
+        if os.path.getsize(p) == 0:
+            _log_fundamentals_read_once(p, "pusty plik — zwracam pusty DataFrame")
+            return _empty_fundamentals_dataframe()
         df = pd.read_csv(p, encoding="utf-8", on_bad_lines="skip")
+    except pd.errors.EmptyDataError:
+        _log_fundamentals_read_once(p, "brak kolumn (pusty/nagłówek) — zwracam pusty DataFrame")
+        return _empty_fundamentals_dataframe()
     except Exception as e:  # noqa: BLE001
-        logger.warning("Nie można odczytać fundamentals.csv (%s): %s", p, e)
-        return pd.DataFrame(columns=FUNDAMENTALS_COLUMNS)
+        _log_fundamentals_read_once(p, f"nie można odczytać: {e}")
+        return _empty_fundamentals_dataframe()
+    if df.empty:
+        _log_fundamentals_read_once(p, "brak wierszy danych — zwracam pusty DataFrame z kolumnami")
+        return _empty_fundamentals_dataframe()
     for col in FUNDAMENTALS_COLUMNS:
         if col not in df.columns:
             df[col] = ""
@@ -817,6 +848,7 @@ def save_fundamentals_row(
     target = path or FUNDAMENTALS_CSV
     target_dir = os.path.dirname(os.path.abspath(target)) or "."
     os.makedirs(target_dir, exist_ok=True)
+    _ensure_fundamentals_csv_header(target)
 
     df = load_fundamentals_dataframe(target)
     if df is None or df.empty:
