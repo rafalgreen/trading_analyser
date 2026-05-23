@@ -83,9 +83,10 @@ document.addEventListener('DOMContentLoaded', () => {
         ev_ebitda: 'Fund_EV_EBITDA',
         roe: 'Fund_ROE',
         fcf: 'Fund_FCF',
+        current_price: 'Current_Price',
     };
 
-    const FUND_CHART_METRICS = new Set(['pe', 'pb', 'ev_ebitda', 'roe', 'fcf']);
+    const FUND_CHART_METRICS = new Set(['pe', 'pb', 'ev_ebitda', 'roe', 'fcf', 'current_price']);
 
     const METRIC_LABELS = {
         pca: 'PCA',
@@ -98,6 +99,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ev_ebitda: 'EV/EBITDA',
         roe: 'ROE',
         fcf: 'FCF',
+        current_price: 'Cena aktualna',
     };
 
     const ALLOWED_SORT = new Set([
@@ -814,6 +816,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const companyName = entry.company_name || ticker;
             const exchange = entry.exchange || '';
             const fundamentals = entry.fundamentals || {};
+            const tickerCurrentPrice = String(entry.current_price || '').trim();
             const intervals = entry.intervals || {};
             Object.entries(intervals).forEach(([interval, bucket]) => {
                 const base = bucket?.row ? { ...bucket.row } : {
@@ -827,6 +830,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 base.Company_Name = base.Company_Name || companyName;
                 base.Exchange = base.Exchange || exchange;
                 base.Interval = base.Interval || interval;
+                if (tickerCurrentPrice && !String(base.Current_Price || '').trim()) {
+                    base.Current_Price = tickerCurrentPrice;
+                }
                 base.In_Config = true;
                 base.Config_Match = ticker;
                 base.Config_Status = 'exact';
@@ -1471,6 +1477,54 @@ document.addEventListener('DOMContentLoaded', () => {
         return '';
     }
 
+    function exchangeToCurrency(exchange, ticker) {
+        const exch = String(exchange || '').trim().toUpperCase();
+        if (exch === 'GPW') return 'PLN';
+        if (['NYSE', 'NASDAQ', 'AMEX', 'OTC', 'BATS'].includes(exch)) return 'USD';
+        if (exch === 'LSE') return 'GBP';
+        if (exch === 'XETR' || exch === 'FWB') return 'EUR';
+        if (exch === 'TSE' || exch === 'JPX') return 'JPY';
+        if (exch === 'HKEX') return 'HKD';
+        if (exch === 'SSE' || exch === 'SZSE') return 'CNY';
+        if (exch === 'SGX') return 'SGD';
+        const t = String(ticker || '').toUpperCase();
+        if (t.endsWith('.WA')) return 'PLN';
+        if (t.endsWith('.L')) return 'GBP';
+        if (t.endsWith('.DE')) return 'EUR';
+        if (t.endsWith('.T')) return 'JPY';
+        if (t.endsWith('.HK')) return 'HKD';
+        if (t.endsWith('.SS') || t.endsWith('.SZ')) return 'CNY';
+        if (t.endsWith('.SI')) return 'SGD';
+        return 'USD';
+    }
+
+    function pickBestCurrentPrice(rows) {
+        const prefer = ['1D', '1W', '1M'];
+        for (const iv of prefer) {
+            const row = (rows || []).find(r => (r['Interval'] || '').toUpperCase() === iv);
+            const price = row && String(row['Current_Price'] || '').trim();
+            if (price) return price;
+        }
+        for (const row of rows || []) {
+            const price = String(row['Current_Price'] || '').trim();
+            if (price) return price;
+        }
+        return '';
+    }
+
+    function formatCurrentPriceDisplay(priceRaw, exchange, ticker) {
+        const raw = String(priceRaw || '').trim();
+        if (!raw) return '—';
+        const num = parsePolishDecimal(raw);
+        if (!Number.isFinite(num)) return raw;
+        const formatted = num.toLocaleString('pl-PL', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+        const currency = exchangeToCurrency(exchange, ticker);
+        return `${formatted} ${currency}`;
+    }
+
     function isConfigPresentValue(value) {
         return value === true || String(value || '').toLowerCase() === 'true';
     }
@@ -1661,6 +1715,22 @@ document.addEventListener('DOMContentLoaded', () => {
                     exchangeEl.textContent = '';
                     exchangeEl.hidden = true;
                     exchangeEl.removeAttribute('title');
+                }
+            }
+
+            const priceEl = cardClone.querySelector('.current-price-badge');
+            if (priceEl) {
+                const exch = pickBestExchange(rows, ticker);
+                const priceRaw = pickBestCurrentPrice(rows);
+                const priceLabel = formatCurrentPriceDisplay(priceRaw, exch, ticker);
+                if (priceRaw) {
+                    priceEl.textContent = priceLabel;
+                    priceEl.title = `Cena aktualna: ${priceLabel}`;
+                    priceEl.hidden = false;
+                } else {
+                    priceEl.textContent = '';
+                    priceEl.hidden = true;
+                    priceEl.removeAttribute('title');
                 }
             }
 

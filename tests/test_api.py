@@ -275,6 +275,94 @@ def test_build_dashboard_helper_directly(app_env, monkeypatch):
     assert entry["intervals"]["1D"]["last_refresh"] == "2026-05-22"
 
 
+def test_dashboard_includes_current_price(app_env, monkeypatch):
+    """Dashboard zwraca Current_Price w tickers i płaskich wierszach."""
+    m, res, _dat = app_env
+    fields = [
+        "Ticker",
+        "Company_Name",
+        "Exchange",
+        "Current_Price",
+        "Interval",
+        "PCA_Values",
+        "Scrape_Status",
+    ]
+    fp = res / "tradingview_results_2026-05-22.csv"
+    with open(fp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({
+            "Ticker": "GPW:ATC",
+            "Company_Name": "Arctic Paper",
+            "Exchange": "GPW",
+            "Current_Price": "42,50",
+            "Interval": "1D",
+            "PCA_Values": "5",
+            "Scrape_Status": "OK",
+        })
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {
+            "tickers": ["GPW:ATC"],
+            "intervals": ["1D", "1W"],
+            "indicators": ["PCA"],
+        },
+    )
+    result = m.build_dashboard()
+    entry = result["tickers"][0]
+    assert entry["current_price"] == "42,50"
+    row_1d = next(r for r in result["data"] if r["Interval"] == "1D")
+    assert row_1d["Current_Price"] == "42,50"
+
+
+def test_dashboard_current_price_fallback_to_other_interval(app_env, monkeypatch):
+    """Gdy 1D brak ceny, bierzemy z pierwszego dostępnego interwału."""
+    m, res, _dat = app_env
+    fields = [
+        "Ticker",
+        "Company_Name",
+        "Exchange",
+        "Current_Price",
+        "Interval",
+        "PCA_Values",
+        "Scrape_Status",
+    ]
+    fp = res / "tradingview_results_2026-05-22.csv"
+    with open(fp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerow({
+            "Ticker": "GPW:ATC",
+            "Company_Name": "Arctic Paper",
+            "Exchange": "GPW",
+            "Current_Price": "",
+            "Interval": "1D",
+            "PCA_Values": "5",
+            "Scrape_Status": "OK",
+        })
+        w.writerow({
+            "Ticker": "GPW:ATC",
+            "Company_Name": "Arctic Paper",
+            "Exchange": "GPW",
+            "Current_Price": "8,10",
+            "Interval": "1W",
+            "PCA_Values": "6",
+            "Scrape_Status": "OK",
+        })
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {
+            "tickers": ["GPW:ATC"],
+            "intervals": ["1D", "1W"],
+            "indicators": ["PCA"],
+        },
+    )
+    result = m.build_dashboard()
+    assert result["tickers"][0]["current_price"] == "8,10"
+
+
 def test_dashboard_marks_all_rows_in_config(client: TestClient, app_env, monkeypatch):
     """Dashboard budowany z configu — każdy wiersz ma In_Config=True."""
     m, _res, _dat = app_env
