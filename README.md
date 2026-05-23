@@ -252,6 +252,16 @@ Konfiguracja domyślna jest w **`scraper_config.json`**. Kluczowe sekcje:
 - **Liczby z TV** — obsługa separatorów PL/US, NBSP i **unicode minus** (`U+2212`, np. `−3,88`) w scraperze i w UI (wykresy MacD).
 - **HTS Panel** — parser czyta sloty wstęg z legendy (pomija wiersze „trend change"); akceptuje **częściowe wstęgi** (brak Slow High itd.) zamiast odrzucać cały wskaźnik.
 
+## Architektura danych
+
+Aplikacja korzysta z **dwóch uzupełniających się źródeł**, a nie z jednego rejestru tickerów:
+
+- **`scraper_config.json`** — **intencja**: co scrapować (lista tickerów, interwały, wskaźniki, harmonogram, CDP). To **źródło prawdy dla listy tickerów na dashboardzie** — panel zawsze pokazuje wszystkie symbole z configu, nawet gdy w CSV brakuje świeżych wierszy.
+- **`results/tradingview_results_YYYY-MM-DD.csv`** — **historia techniczna**: płaskie wiersze (ticker × interwał × data scrapu) z PCA, HTS, MacD itd. Jeden plik na dzień uruchomienia; backend scala najnowsze sensowne wiersze per (ticker, interwał). CSV **nie jest rejestrem tickerów** — wiersze bez dopasowania w configu są ignorowane (np. stary symbol po rename).
+- **`results/fundamentals.csv`** + **`data/.fundamentals_cache.json`** — wolniej zmieniające się dane fundamentalne (P/E, P/B, …), odświeżane osobnym cyklem.
+
+**Dlaczego nie jeden plik?** Config to JSON z zagnieżdżonymi ustawieniami (harmonogram, wskaźniki, CDP); CSV to szeregi czasowe — połączenie albo utraciłoby historię (nadpisywanie jednego wiersza dziennie), albo rozdmuchałoby config setkami kolumn i dat. W praktyce: edytujesz listę tickerów w configu; scraper dopisuje wyniki do dziennego CSV; dashboard łączy oba. Ewentualna przyszłość: osobny lekki rejestr `tickers.json` zsynchronizowany z configu — ale pliki dzienne CSV nadal służą do historii wykresów.
+
 ## Wyniki
 
 Pliki techniczne zapisywane są w katalogu **`results/`**, nazwa w stylu:
@@ -353,7 +363,7 @@ Pozostałe skrypty (`debug_tv_*.py`, `inspect_dom.py`, …) służą do lokalneg
 PYTHONPATH=. pytest -q
 ```
 
-Obecnie **273 testy** przechodzą (1 skipped). Testy jednostkowe nie wymagają uruchomionej przeglądarki. Skrypty integracyjne Playwright w `tests/` są wyłączone z domyślnego zbierania testów (patrz `tests/conftest.py`).
+Obecnie **294 testy** przechodzą (1 skipped). Testy jednostkowe nie wymagają uruchomionej przeglądarki. Skrypty integracyjne Playwright w `tests/` są wyłączone z domyślnego zbierania testów (patrz `tests/conftest.py`).
 
 ## Struktura modułów
 
