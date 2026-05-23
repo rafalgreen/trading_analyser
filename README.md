@@ -2,6 +2,10 @@
 
 Zestaw do automatycznego odczytu wskaźników z wykresów **TradingView** (PCA, HTS Panel, MacD) oraz **fundamentali** (P/E, P/B, EV/EBITDA, ROE, Net Margin, D/E, FCF) z przeglądaniem w **panelu web**. Skrypt `tv_scraper.py` korzysta z **Playwright** i podłącza się do już uruchomionej przeglądarki (Brave / Chrome) w trybie zdalnego debugowania (CDP). Aplikacja **FastAPI** (`app.py`) serwuje REST API i statyczny **dashboard** — zawsze wszystkie tickery z konfiguracji, wykres wielu metryk, odświeżanie per wskaźnik i konfiguracja scrapera.
 
+## Podgląd
+
+![Trading Analyser — dashboard z werdyktem Kup/Obserwuj/Unikaj, filtrami fundamentalnymi i wykresem PCA](docs/screenshots/dashboard-composite-score.png)
+
 ## Wymagania
 
 - Python 3.10+ (w projekcie często używane jest środowisko wirtualne `venv`)
