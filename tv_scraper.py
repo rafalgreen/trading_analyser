@@ -6,7 +6,7 @@ import argparse
 import logging
 import urllib.request
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from playwright.sync_api import sync_playwright
@@ -376,20 +376,70 @@ def _format_duration(seconds: float) -> str:
     return f"{h}h {m}m {s}s"
 
 
-def _format_scraper_progress(
+def scraper_overall_progress(
     ticker_idx: int,
     n_tickers: int,
     ind_idx: int,
     n_inds: int,
-    ind_name: str = "",
-) -> str:
-    """Postęp łączny (monotoniczny) + szczegóły fazy wskaźnika i tickera."""
+) -> Tuple[int, int]:
+    """Monotoniczny licznik kroków scrapera (ticker × faza wskaźnika)."""
     n_tickers = max(int(n_tickers), 1)
     n_inds = max(int(n_inds), 1)
     ticker_idx = max(int(ticker_idx), 0)
     ind_idx = max(int(ind_idx), 0)
     overall_done = ind_idx * n_tickers + ticker_idx + 1
     overall_total = n_tickers * n_inds
+    return overall_done, overall_total
+
+
+def format_scraper_eta_label(eta_seconds: float) -> str:
+    """Czytelna etykieta ETA (np. ``< 1 min``, ``~12 min``, ``~1h 05m``)."""
+    if eta_seconds < 60:
+        return "< 1 min"
+    total_min = int(round(eta_seconds / 60))
+    if total_min < 60:
+        return f"~{total_min} min"
+    h, m = divmod(total_min, 60)
+    return f"~{h}h {m:02d}m"
+
+
+def compute_scraper_eta(
+    overall_done: int,
+    overall_total: int,
+    elapsed_seconds: float,
+    *,
+    min_steps: int = 3,
+) -> Tuple[Optional[float], str]:
+    """Szacuje pozostały czas na podstawie średniego czasu na krok."""
+    overall_done = max(int(overall_done), 0)
+    overall_total = max(int(overall_total), 1)
+    elapsed_seconds = max(float(elapsed_seconds or 0.0), 0.0)
+    if overall_done < min_steps:
+        return None, "szacowanie…"
+    if overall_done >= overall_total:
+        return 0.0, ""
+    remaining = overall_total - overall_done
+    avg_per_step = elapsed_seconds / overall_done
+    eta_seconds = avg_per_step * remaining
+    return eta_seconds, format_scraper_eta_label(eta_seconds)
+
+
+def _format_scraper_progress(
+    ticker_idx: int,
+    n_tickers: int,
+    ind_idx: int,
+    n_inds: int,
+    ind_name: str = "",
+    eta_label: str = "",
+) -> str:
+    """Postęp łączny (monotoniczny) + szczegóły fazy wskaźnika i tickera."""
+    n_tickers = max(int(n_tickers), 1)
+    n_inds = max(int(n_inds), 1)
+    ticker_idx = max(int(ticker_idx), 0)
+    ind_idx = max(int(ind_idx), 0)
+    overall_done, overall_total = scraper_overall_progress(
+        ticker_idx, n_tickers, ind_idx, n_inds
+    )
     parts = [
         f"{overall_done}/{overall_total}",
         f"ticker {ticker_idx + 1}/{n_tickers}",
@@ -397,7 +447,48 @@ def _format_scraper_progress(
     ]
     if ind_name:
         parts.append(str(ind_name))
+    if eta_label:
+        parts.append(eta_label)
     return " · ".join(parts)
+
+
+def _scraper_elapsed_seconds(
+    session_started_at: Optional[float],
+    run_t0: Optional[float] = None,
+) -> float:
+    if session_started_at is not None:
+        return max(0.0, time.time() - float(session_started_at))
+    if run_t0 is not None:
+        return max(0.0, time.perf_counter() - run_t0)
+    return 0.0
+
+
+def _build_running_scraper_progress(
+    ticker_idx: int,
+    n_tickers: int,
+    ind_idx: int,
+    n_inds: int,
+    ind_name: str,
+    *,
+    session_started_at: Optional[float] = None,
+    run_t0: Optional[float] = None,
+) -> Tuple[str, Optional[float], str]:
+    overall_done, overall_total = scraper_overall_progress(
+        ticker_idx, n_tickers, ind_idx, n_inds
+    )
+    elapsed = _scraper_elapsed_seconds(session_started_at, run_t0)
+    eta_seconds, eta_label = compute_scraper_eta(
+        overall_done, overall_total, elapsed
+    )
+    progress = _format_scraper_progress(
+        ticker_idx,
+        n_tickers,
+        ind_idx,
+        n_inds,
+        ind_name,
+        eta_label=eta_label,
+    )
+    return progress, eta_seconds, eta_label
 
 
 def resolve_run_indicators(
@@ -443,6 +534,8 @@ def write_scraper_status(
     duration_seconds=None,
     duration_human=None,
     current_indicator="",
+    eta_seconds=None,
+    eta_label=None,
 ):
     """Write scraper status to JSON file for web UI polling."""
     data = {
@@ -457,6 +550,10 @@ def write_scraper_status(
         data["duration_seconds"] = round(float(duration_seconds), 2)
     if duration_human:
         data["duration_human"] = duration_human
+    if eta_seconds is not None:
+        data["eta_seconds"] = round(float(eta_seconds), 1)
+    if eta_label:
+        data["eta_label"] = eta_label
     try:
         with open(STATUS_FILE, "w") as f:
             json.dump(data, f)
@@ -1581,6 +1678,7 @@ def run_scraper(
     state_file = "scraper_state.json"
     processed_combos = set()
     current_run_file = None
+    session_started_at: Optional[float] = None
 
     if not is_partial and os.path.exists(state_file):
         try:
@@ -1591,6 +1689,14 @@ def run_scraper(
                     processed_combos = set(
                         tuple(x) for x in state.get("processed", [])
                     )
+                    raw_started = state.get("session_started_at")
+                    if raw_started is not None:
+                        session_started_at = float(raw_started)
+                    else:
+                        try:
+                            session_started_at = os.path.getmtime(state_file)
+                        except OSError:
+                            pass
                     logger.info(
                         "Wznawiam pracę z poprzedniej sesji. Plik: %s (pominięto %d kombinacji)",
                         current_run_file,
@@ -1609,6 +1715,9 @@ def run_scraper(
             "Rozpoczynam nową sesję pobierania. Plik docelowy: %s", current_run_file
         )
 
+    if not is_partial and session_started_at is None:
+        session_started_at = time.time()
+
     def update_state(ticker_val, interval_val):
         if is_partial:
             return
@@ -1619,6 +1728,7 @@ def run_scraper(
                     {
                         "current_file": current_run_file,
                         "processed": list(processed_combos),
+                        "session_started_at": session_started_at,
                     },
                     f,
                 )
@@ -1752,18 +1862,22 @@ def run_scraper(
                 )
 
                 for ticker_idx, ticker in enumerate(tickers):
-                    progress_str = _format_scraper_progress(
+                    progress_str, eta_seconds, eta_label = _build_running_scraper_progress(
                         ticker_idx,
                         len(tickers),
                         ind_idx,
                         n_inds,
                         ind_name,
+                        session_started_at=session_started_at if not is_partial else None,
+                        run_t0=run_t0,
                     )
                     write_scraper_status(
                         "running",
                         progress_str,
                         ticker,
                         current_indicator=ind_name,
+                        eta_seconds=eta_seconds,
+                        eta_label=eta_label or None,
                     )
 
                     existing_df = load_results_dataframe(current_run_file)
@@ -2288,10 +2402,16 @@ if __name__ == "__main__":
 
     n_tickers = max(len(TICKERS), 1)
     n_inds = max(len(INDICATORS), 1)
+    ind0 = INDICATORS[0] if INDICATORS else ""
+    progress_str, eta_seconds, eta_label = _build_running_scraper_progress(
+        0, n_tickers, 0, n_inds, ind0
+    )
     write_scraper_status(
         "running",
-        _format_scraper_progress(0, n_tickers, 0, n_inds, INDICATORS[0] if INDICATORS else ""),
-        current_indicator=INDICATORS[0] if INDICATORS else "",
+        progress_str,
+        current_indicator=ind0,
+        eta_seconds=eta_seconds,
+        eta_label=eta_label or None,
     )
     try:
         run_scraper(

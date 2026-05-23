@@ -2283,6 +2283,14 @@ input[type="text"]:focus {
     animation: spinLoader 0.85s linear infinite;
 }
 
+.global-scrape-banner .banner-eta {
+    font-weight: 600;
+    color: var(--accent-primary);
+    white-space: nowrap;
+    margin-left: auto;
+    padding-left: 12px;
+}
+
 .global-scrape-banner .banner-progress {
     flex: 0 0 180px;
     height: 4px;
