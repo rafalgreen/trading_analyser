@@ -27,13 +27,23 @@ playwright install chromium
 
 ### Uruchom aplikację (panel + API)
 
-Najprościej:
+Najprościej (zalecane przy długim scrape — patrz niżej):
 
 ```bash
-./scripts/start_app.sh
+caffeinate -dims ./scripts/start_app.sh
 ```
 
+Bez blokady ekranu wystarczy `./scripts/start_app.sh`.
+
 Otwórz panel w przeglądarce: `http://127.0.0.1:8000`
+
+#### Długi scrape a blokada ekranu
+
+Przy wielu tickerach scraper może trwać godzinami. Gdy Mac **blokuje ekran** lub przechodzi w **sen**, Playwright/CDP często traci sesję — w logu widać m.in. *„Target page, context or browser has been closed"*.
+
+**Zalecane:** uruchom aplikację przez `caffeinate -dims ./scripts/start_app.sh`. Flagi: **`-d`** display (nie wyłączaj ekranu), **`-i`** idle (bez usypiania przy bezczynności), **`-m`** disk (bez usypiania dysku), **`-s`** system sleep (bez usypiania systemu — na zasilaniu AC).
+
+**Alternatywa:** w osobnym terminalu trzymaj `caffeinate -dims` w tle, a aplikację startuj normalnie (`./scripts/start_app.sh`).
 
 ### Scraper i przeglądarka (CDP / remote debug)
 
@@ -93,10 +103,10 @@ CDP (Brave/Chrome) na porcie 9222:
 ./scripts/start_browser_debug.sh
 ```
 
-Start aplikacji (uvicorn):
+Start aplikacji (uvicorn; przy długim scrape dodaj `caffeinate -dims`):
 
 ```bash
-./scripts/start_app.sh
+caffeinate -dims ./scripts/start_app.sh
 ```
 
 ## Panel web — funkcjonalność
