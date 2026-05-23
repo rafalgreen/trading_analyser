@@ -28,7 +28,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -62,7 +62,27 @@ _YF_FIELD_MAP = {
     "Fund_DividendRate": "dividendRate",
 }
 
-_YF_DIVIDEND_RATE_FALLBACK = "trailingAnnualDividendRate"
+_YF_DIVIDEND_RATE_KEYS = (
+    "dividendRate",
+    "trailingAnnualDividendRate",
+)
+
+_YF_PRICE_KEYS = (
+    "regularMarketPrice",
+    "currentPrice",
+    "previousClose",
+)
+
+_YF_DIVIDEND_FREQ_ANNUAL = {
+    "annual": 1,
+    "yearly": 1,
+    "annually": 1,
+    "semi-annual": 2,
+    "semiannual": 2,
+    "semi annual": 2,
+    "quarterly": 4,
+    "monthly": 12,
+}
 
 _TV_ROW_LABELS = {
     "Fund_PE": ("price to earnings ratio", "p/e ratio", "price-to-earnings"),
@@ -413,6 +433,70 @@ def _normalize_dividend_yield(value: Optional[float]) -> Optional[float]:
     return value
 
 
+def _yf_price_from_info(info: Dict[str, Any]) -> Optional[float]:
+    for key in _YF_PRICE_KEYS:
+        price = _coerce_number(info.get(key))
+        if price is not None and price > 0:
+            return price
+    return None
+
+
+def _annual_dividends_from_history(tkr: Any) -> Optional[float]:
+    """Suma dywidend z ostatnich 365 dni (ETF-y z nieregularnymi wypłatami)."""
+    try:
+        divs = getattr(tkr, "dividends", None)
+        if divs is None or len(divs) == 0:
+            return None
+        idx = divs.index
+        if getattr(idx, "tz", None) is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=365)
+            recent = divs[divs.index >= cutoff]
+        else:
+            recent = divs.tail(4)
+        if recent is None or len(recent) == 0:
+            return None
+        total = float(recent.sum())
+        if total <= 0 or math.isnan(total) or math.isinf(total):
+            return None
+        return total
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_dividend_rate(
+    info: Dict[str, Any],
+    dividend_yield: Optional[float],
+    *,
+    tkr: Any = None,
+) -> Optional[float]:
+    """Wybiera roczną dywidendę / akcję z wielu pól yfinance lub oblicza z yield × cena."""
+    for key in _YF_DIVIDEND_RATE_KEYS:
+        rate = _coerce_number(info.get(key))
+        if rate is not None and rate > 0:
+            return rate
+
+    last_div = _coerce_number(info.get("lastDividendValue"))
+    if last_div is not None and last_div > 0:
+        freq_raw = str(info.get("dividendFrequency") or info.get("payoutFrequency") or "").strip().lower()
+        multiplier = _YF_DIVIDEND_FREQ_ANNUAL.get(freq_raw)
+        if multiplier:
+            return last_div * multiplier
+        return last_div
+
+    quote_type = str(info.get("quoteType") or "").strip().upper()
+    if quote_type == "ETF" and tkr is not None:
+        annual_divs = _annual_dividends_from_history(tkr)
+        if annual_divs is not None:
+            return annual_divs
+
+    if dividend_yield is not None and dividend_yield > 0:
+        price = _yf_price_from_info(info)
+        if price is not None:
+            return dividend_yield * price
+
+    return None
+
+
 def _is_sane_fund_value(fund_key: str, value: Optional[float]) -> bool:
     if value is None:
         return False
@@ -516,9 +600,14 @@ def _yf_fetch(symbol: str) -> Optional[Dict[str, Optional[float]]]:
     out: Dict[str, Optional[float]] = {}
     for fund_key, yf_field in _YF_FIELD_MAP.items():
         out[fund_key] = _coerce_number(info.get(yf_field))
-    if out.get("Fund_DividendRate") is None:
-        out["Fund_DividendRate"] = _coerce_number(info.get(_YF_DIVIDEND_RATE_FALLBACK))
     out["Fund_DividendYield"] = _normalize_dividend_yield(out.get("Fund_DividendYield"))
+    if out.get("Fund_DividendYield") is None:
+        out["Fund_DividendYield"] = _normalize_dividend_yield(_coerce_number(info.get("yield")))
+    out["Fund_DividendRate"] = _resolve_dividend_rate(
+        info,
+        out.get("Fund_DividendYield"),
+        tkr=tkr,
+    )
     sanitized = _sanitize_fund_values(out)
     if not any(v is not None for v in sanitized.values()):
         return None

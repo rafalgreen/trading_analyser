@@ -138,6 +138,68 @@ def test_yf_fetch_dividend_rate_fallback_to_trailing_annual(monkeypatch):
     assert data["Fund_DividendRate"] == pytest.approx(1.25)
 
 
+def test_yf_fetch_dividend_rate_computed_from_yield_and_price(monkeypatch):
+    """Gdy dividendRate brak, oblicz rate = yield × cena."""
+    from fundamentals import _yf_fetch
+
+    fake_info = {
+        "trailingPE": 12.19,
+        "priceToBook": None,
+        "enterpriseToEbitda": None,
+        "returnOnEquity": None,
+        "profitMargins": None,
+        "debtToEquity": None,
+        "freeCashflow": None,
+        "dividendYield": 4.56,
+        "regularMarketPrice": 45.61,
+        "quoteType": "ETF",
+    }
+
+    class _FakeTicker:
+        def __init__(self, _sym):
+            self.info = fake_info
+            self.dividends = None
+
+    import yfinance  # type: ignore
+
+    monkeypatch.setattr(yfinance, "Ticker", _FakeTicker)
+    data = _yf_fetch("VNQI")
+    assert data is not None
+    assert data["Fund_DividendYield"] == pytest.approx(0.0456)
+    assert data["Fund_DividendRate"] == pytest.approx(0.0456 * 45.61)
+
+
+def test_yf_fetch_vnqi_like_etf_uses_dividend_history(monkeypatch):
+    """ETF z dywidendą w historii — preferuj sumę z ostatnich 365 dni."""
+    import pandas as pd
+    from fundamentals import _yf_fetch
+
+    fake_info = {
+        "trailingPE": 12.19,
+        "dividendYield": 4.56,
+        "regularMarketPrice": 45.61,
+        "quoteType": "ETF",
+    }
+    div_index = pd.DatetimeIndex(
+        [pd.Timestamp("2025-12-19", tz="America/New_York")],
+        name="Date",
+    )
+    fake_dividends = pd.Series([2.156], index=div_index, name="Dividends")
+
+    class _FakeTicker:
+        def __init__(self, _sym):
+            self.info = fake_info
+            self.dividends = fake_dividends
+
+    import yfinance  # type: ignore
+
+    monkeypatch.setattr(yfinance, "Ticker", _FakeTicker)
+    data = _yf_fetch("VNQI")
+    assert data is not None
+    assert data["Fund_DividendYield"] == pytest.approx(0.0456)
+    assert data["Fund_DividendRate"] == pytest.approx(2.156)
+
+
 def test_yf_fetch_tolerates_missing_and_nan(monkeypatch):
     from fundamentals import _yf_fetch
 

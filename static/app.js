@@ -1126,8 +1126,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function formatFundDividendRate(val) {
+        if (val == null || val === '') return null;
         const n = Number(val);
-        if (!Number.isFinite(n)) return null;
+        if (!Number.isFinite(n) || n <= 0) return null;
         return n.toLocaleString('pl-PL', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
     }
 
