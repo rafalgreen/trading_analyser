@@ -189,6 +189,18 @@ document.addEventListener('DOMContentLoaded', () => {
         renamedHidden[String(oldTicker).toUpperCase()] = String(newTicker || '').toUpperCase();
         persistRenamedHidden();
     }
+    function clearRenamedHiddenForNewTicker(newTicker) {
+        const newU = String(newTicker || '').toUpperCase();
+        if (!newU) return;
+        let changed = false;
+        Object.keys(renamedHidden).forEach((key) => {
+            if (renamedHidden[key] === newU) {
+                delete renamedHidden[key];
+                changed = true;
+            }
+        });
+        if (changed) persistRenamedHidden();
+    }
     function isTickerHidden(ticker) {
         return Object.prototype.hasOwnProperty.call(renamedHidden, String(ticker || '').toUpperCase());
     }
@@ -3417,39 +3429,46 @@ document.addEventListener('DOMContentLoaded', () => {
             // symbol z configu (np. LULU.O → LULU), żeby nic nie zostało.
             const matchedOld = (data && typeof data.old === 'string' && data.old) || oldTicker;
             const openedOld = renameOpenedTicker;
-            markTickerRenamed(oldTicker, newTicker);
-            if (matchedOld && matchedOld.toUpperCase() !== oldTicker) {
-                markTickerRenamed(matchedOld, newTicker);
-            }
-            if (openedOld && openedOld !== oldTicker && openedOld !== String(matchedOld || '').toUpperCase()) {
-                markTickerRenamed(openedOld, newTicker);
-            }
-            // Dodatkowo ukryj wszystkie wiersze z tą samą bazą (prefiks przed
-            // pierwszą kropką) — spójnie z logiką fuzzy-match w backendzie.
-            const baseOld = (openedOld || oldTicker).split('.', 1)[0];
-            if (baseOld) {
-                (currentData || []).forEach(row => {
-                    const t = String(row['Ticker'] || '').toUpperCase();
-                    if (t && t.split('.', 1)[0] === baseOld) {
-                        markTickerRenamed(t, newTicker);
-                    }
-                });
+            const migratedRows = Number(data?.csv_rows_affected || 0);
+            if (!migratedRows) {
+                markTickerRenamed(oldTicker, newTicker);
+                if (matchedOld && matchedOld.toUpperCase() !== oldTicker) {
+                    markTickerRenamed(matchedOld, newTicker);
+                }
+                if (openedOld && openedOld !== oldTicker && openedOld !== String(matchedOld || '').toUpperCase()) {
+                    markTickerRenamed(openedOld, newTicker);
+                }
+                // Ukryj wiersze z tą samą bazą przed pierwszą kropką (LULU.O → LULU).
+                const baseOld = (openedOld || oldTicker).split('.', 1)[0];
+                if (baseOld) {
+                    (currentData || []).forEach(row => {
+                        const t = String(row['Ticker'] || '').toUpperCase();
+                        if (t && t.split('.', 1)[0] === baseOld) {
+                            markTickerRenamed(t, newTicker);
+                        }
+                    });
+                }
+            } else {
+                clearRenamedHiddenForNewTicker(newTicker);
             }
 
             showToast({
                 type: 'success',
                 title: 'Nazwa zmieniona',
-                message: `${matchedOld} → ${newTicker}. Pobieram dane dla nowej nazwy…`,
+                message: migratedRows
+                    ? `${matchedOld} → ${newTicker}. Zaktualizowano ${migratedRows} wierszy w historii CSV.`
+                    : `${matchedOld} → ${newTicker}. Pobieram dane dla nowej nazwy…`,
             });
             closeRenameModal();
 
-            // Odśwież widok kart natychmiast, żeby stara karta zniknęła
-            // jeszcze przed pojawieniem się nowych danych.
-            filterAndRenderCards(searchInput?.value || '');
+            await fetchDashboard();
+            filterAndRenderCards(searchInput?.value?.toLowerCase().trim() || '');
 
-            // Automatycznie zleć pobranie nowego tickera, aby użytkownik od razu
-            // zobaczył, czy nowy symbol działa.
-            requestRescrapeTicker(newTicker, null);
+            if (!migratedRows) {
+                // Automatycznie zleć pobranie nowego tickera, aby użytkownik od razu
+                // zobaczył, czy nowy symbol działa.
+                requestRescrapeTicker(newTicker, null);
+            }
         } catch (err) {
             setRenameError(String(err?.message || err || 'Błąd połączenia'));
             if (renameSubmitBtn) renameSubmitBtn.disabled = false;

@@ -135,8 +135,8 @@ Diagnostyka braków wskaźników: `/api/results/{date_id}` i `/api/dashboard` zw
 
 - Walidacja symbolu przez regex `^[A-Z0-9._:\-]{1,24}$` (obsługuje prefix giełdy, np. `GPW:ATC`).
 - Fuzzy match starej nazwy: najpierw **dokładne trafienie**, potem **bazowy symbol** (prefiks przed pierwszą kropką, np. `LULU.O` ↔ `LULU`) i bezpieczny wariant bez prefixu giełdy (`ATC` ↔ `GPW:ATC`). Jeśli karta pochodzi ze starego CSV i tickera nie ma już w configu (np. `DIAP`, a w configu jest `GPW:DIA`), endpoint zwraca `404` z tym samym formatem kandydatów, którego używa `/api/results`. UI pokazuje wtedy czytelny komunikat i przy jednym kandydacie przycisk „Użyj ...".
-- CSV-y historyczne **nie są modyfikowane** (stare wiersze zostają jako audyt).
-- W UI stara karta jest ukrywana w `localStorage`, żeby reload jej nie przywrócił; przyciskiem „(pokaż)" przy liczniku rekordów można przywrócić ukryte symbole. Backend dokleja też do wyników pola `In_Config`, `Config_Match`, `Config_Status` i `Config_Candidates`, żeby łatwiej odróżnić symbol z historycznego CSV od aktualnej konfiguracji.
+- CSV-y historyczne i `results/fundamentals.csv` są **przepisywane** ze starego symbolu na nowy (wiersze z tym samym interwałem, które już istnieją pod nową nazwą, są scalane — stary duplikat wypada).
+- W UI stara karta jest chwilowo ukrywana w `localStorage` tylko gdy backend nie znalazł wierszy do migracji; po udanej migracji widok od razu pokazuje nowy symbol z danymi. Przyciskiem „(pokaż)" przy liczniku rekordów można przywrócić ręcznie ukryte symbole. Backend dokleja też do wyników pola `In_Config`, `Config_Match`, `Config_Status` i `Config_Candidates`, żeby łatwiej odróżnić symbol z historycznego CSV od aktualnej konfiguracji.
 - Gdy karta z CSV nie istnieje w aktualnym `scraper_config.json`, panel pokazuje baner „Stary symbol z CSV" / „Symbol z CSV nie jest w konfiguracji". Przy jednym kandydacie z configu akcja **„Użyj <ticker>"** ukrywa starą kartę i odpala ponowne pobranie poprawnego symbolu; bez kandydata dostępne jest **„Ukryj z widoku"**.
 
 ### Trwałe usuwanie tickera z historii

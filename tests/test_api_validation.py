@@ -427,6 +427,76 @@ def test_rename_ticker_same_name(client):
     assert r.status_code == 400
 
 
+def test_rename_ticker_migrates_csv_and_fundamentals(
+    client, app_env, tmp_path, monkeypatch
+):
+    m, res, dat = app_env
+    cfg_file = tmp_path / "scraper_config.json"
+    cfg_file.write_text(
+        json.dumps({
+            "tickers": ["AAPL", "ASBP", "MSFT"],
+            "intervals": ["1D", "1W"],
+            "indicators": ["PCA"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_file))
+
+    csv_path = res / "tradingview_results_2026-05-22.csv"
+    csv_path.write_text(
+        "Ticker,Company_Name,Interval,Scrape_Status,Scrape_Error,PCA_Values\n"
+        "ASBP,Asseco BS,1D,OK,,0.4 (Zielony)\n"
+        "ASBP,Asseco BS,1W,OK,,0.5 (Zielony)\n"
+        "AAPL,Apple,1D,OK,,0.6\n",
+        encoding="utf-8",
+    )
+    fund_path = res / "fundamentals.csv"
+    fund_path.write_text(
+        "Ticker,Fund_PE,Fund_PB,Fund_EV_EBITDA,Fund_ROE,Fund_NetMargin,Fund_DE,Fund_FCF,Fund_Source,Fund_Updated_At\n"
+        "ASBP,14.0,1.2,8.0,0.12,0.08,0.3,1.0e8,yfinance,2026-05-22T10:00:00Z\n",
+        encoding="utf-8",
+    )
+    cache_path = dat / ".fundamentals_cache.json"
+    cache_path.write_text(
+        json.dumps({
+            "ASBP": {
+                "Ticker": "ASBP",
+                "Fund_PE": 14.0,
+                "Fund_Source": "yfinance",
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    r = client.post("/api/tickers/rename", json={"old": "ASBP", "new": "GPW:ASB"})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "renamed"
+    assert data["new"] == "GPW:ASB"
+    assert data["csv_rows_affected"] == 2
+    assert data["csv_files_modified"] == 1
+    assert data["fundamentals_migrated"] is True
+    assert data["fundamentals_cache_migrated"] is True
+
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "ASBP" not in csv_text
+    assert "GPW:ASB" in csv_text
+
+    dash = client.get("/api/dashboard")
+    assert dash.status_code == 200
+    gpw_rows = [
+        row for row in dash.json()["data"] if row["Ticker"] == "GPW:ASB"
+    ]
+    assert len(gpw_rows) == 2
+    by_interval = {row["Interval"]: row for row in gpw_rows}
+    assert by_interval["1D"]["PCA_Values"] == "0.4 (Zielony)"
+    assert by_interval["1W"]["PCA_Values"] == "0.5 (Zielony)"
+
+    fund = client.get("/api/fundamentals/GPW:ASB")
+    assert fund.status_code == 200
+    assert fund.json()["Fund_PE"] == 14.0
+
+
 # --- Missing_Indicators annotation in /api/results ------------------------
 
 def test_results_annotates_missing_indicators(client, app_env, monkeypatch):

@@ -239,6 +239,133 @@ def remove_ticker_rows_from_csv(path: str, ticker: str) -> Tuple[int, int]:
     return removed, int(len(out))
 
 
+def rename_ticker_rows_in_csv(path: str, old_ticker: str, new_ticker: str) -> Tuple[int, int]:
+    """Przepisuje wiersze tickera w CSV na nowy symbol (case-insensitive).
+
+    Gdy dla tego samego ``Interval`` istnieje już wiersz z ``new_ticker``,
+    stary wiersz jest usuwany zamiast duplikować parę (ticker, interval).
+    Zwraca ``(rows_affected, remaining_rows)``.
+    """
+    if not path or not os.path.exists(path):
+        return 0, 0
+    old_u = str(old_ticker or "").strip().upper()
+    new_u = str(new_ticker or "").strip().upper()
+    if not old_u or not new_u or old_u == new_u:
+        return 0, 0
+
+    try:
+        df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+    except Exception as e:
+        logger.warning(
+            "Nie można odczytać CSV do rename tickera (%s): %s", path, e
+        )
+        return 0, 0
+
+    if df.empty or "Ticker" not in df.columns:
+        return 0, int(len(df))
+
+    ticker_col = df["Ticker"].astype(str).str.strip().str.upper()
+    old_mask = ticker_col == old_u
+    affected = int(old_mask.sum())
+    if affected <= 0:
+        return 0, int(len(df))
+
+    if "Interval" in df.columns:
+        new_mask = ticker_col == new_u
+        new_intervals = set(
+            df.loc[new_mask, "Interval"].astype(str).str.strip().tolist()
+        )
+        drop_old = []
+        rename_idx = []
+        for idx in df.index[old_mask]:
+            interval = str(df.at[idx, "Interval"] or "").strip()
+            if interval and interval in new_intervals:
+                drop_old.append(idx)
+            else:
+                rename_idx.append(idx)
+        if drop_old:
+            df = df.drop(index=drop_old)
+            old_mask = df["Ticker"].astype(str).str.strip().str.upper() == old_u
+        for idx in rename_idx:
+            if idx in df.index:
+                df.at[idx, "Ticker"] = new_u
+    else:
+        df.loc[old_mask, "Ticker"] = new_u
+
+    dir_name = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".rename-ticker-", suffix=".csv", dir=dir_name)
+    os.close(fd)
+    try:
+        df.to_csv(tmp_path, index=False, encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        finally:
+            raise
+    return affected, int(len(df))
+
+
+def rename_fundamentals_ticker(
+    old_ticker: str,
+    new_ticker: str,
+    *,
+    path: Optional[str] = None,
+) -> bool:
+    """Przepisuje wiersz fundamentów ze starego tickera na nowy.
+
+    Gdy docelowy ticker już istnieje, scalamy wartości ze starego wiersza tylko
+    tam, gdzie nowy nie ma danych. Zwraca ``True`` gdy plik został zmieniony.
+    """
+    old_u = str(old_ticker or "").strip().upper()
+    new_u = str(new_ticker or "").strip().upper()
+    if not old_u or not new_u or old_u == new_u:
+        return False
+
+    target = path or FUNDAMENTALS_CSV
+    df = load_fundamentals_dataframe(target)
+    if df is None or df.empty or "Ticker" not in df.columns:
+        return False
+
+    ticker_col = df["Ticker"].astype(str).str.strip().str.upper()
+    old_mask = ticker_col == old_u
+    if not old_mask.any():
+        return False
+
+    new_mask = ticker_col == new_u
+    old_row = df.loc[old_mask].iloc[0]
+    changed = False
+
+    if new_mask.any():
+        new_idx = df.index[new_mask][0]
+        for col in FUNDAMENTALS_COLUMNS:
+            if col in ("Ticker",):
+                continue
+            new_val = df.at[new_idx, col] if col in df.columns else ""
+            old_val = old_row[col] if col in old_row.index else ""
+            new_empty = pd.isna(new_val) or str(new_val).strip() == ""
+            old_has = not (pd.isna(old_val) or str(old_val).strip() == "")
+            if new_empty and old_has:
+                df.at[new_idx, col] = old_val
+                changed = True
+        df = df.loc[~old_mask].copy()
+        changed = True
+    else:
+        df.loc[old_mask, "Ticker"] = new_u
+        changed = True
+
+    if not changed:
+        return False
+
+    extras = [c for c in df.columns if c not in FUNDAMENTALS_COLUMNS]
+    df = df[FUNDAMENTALS_COLUMNS + extras]
+    target_dir = os.path.dirname(os.path.abspath(target)) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    df.to_csv(target, index=False, encoding="utf-8")
+    return True
+
+
 def get_row_for_ticker_interval(df, ticker: str, interval: str):
     if df is None or "Ticker" not in df.columns or "Interval" not in df.columns:
         return None
