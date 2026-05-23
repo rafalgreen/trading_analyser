@@ -32,6 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const strategyEmptyBannerEl = document.getElementById('strategy-empty-banner');
     const globalBanner = document.getElementById('global-scrape-banner');
     const globalBannerText = document.getElementById('global-scrape-banner-text');
+    const globalBannerEta = document.getElementById('global-scrape-banner-eta');
     const globalBannerFill = document.getElementById('global-scrape-banner-fill');
     const toastContainer = document.getElementById('toast-container');
 
@@ -484,11 +485,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function setGlobalBanner(visible, { text = 'Scraper w toku…', progressPct = null } = {}) {
+    function setGlobalBanner(visible, { text = 'Scraper w toku…', progressPct = null, etaLabel = '' } = {}) {
         if (!globalBanner) return;
         if (visible) {
             globalBanner.classList.add('visible');
             if (globalBannerText) globalBannerText.textContent = text;
+            if (globalBannerEta) {
+                globalBannerEta.textContent = etaLabel || '';
+                globalBannerEta.classList.toggle('hidden', !etaLabel);
+            }
             if (globalBannerFill) {
                 if (progressPct != null && Number.isFinite(progressPct)) {
                     globalBannerFill.style.width = Math.min(100, Math.max(0, progressPct)) + '%';
@@ -2621,6 +2626,12 @@ document.addEventListener('DOMContentLoaded', () => {
         return progressStr;
     }
 
+    function formatScraperEtaSuffix(data) {
+        const label = data?.eta_label;
+        if (label && typeof label === 'string') return label;
+        return '';
+    }
+
     function formatScraperStartToast(tickers, indicators) {
         const indList = Array.isArray(indicators)
             ? indicators.filter(Boolean)
@@ -3313,9 +3324,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const parts = [];
             if (overall) parts.push(overall);
             if (detail) parts.push(detail);
+            const eta = formatScraperEtaSuffix(data);
             setGlobalBanner(true, {
                 text: `Scraper w toku${parts.length ? ' — ' + parts.join(' · ') : ''}`,
                 progressPct: pct,
+                etaLabel: eta,
             });
         } else {
             setGlobalBanner(false);

@@ -1485,7 +1485,7 @@ def get_results(date_id: str):
             row["Indicator_Errors"] = build_indicator_errors(row, indicators)
 
             try:
-                sig_map = compute_row_signals(row)
+                sig_map = compute_row_signals(row, indicators=indicators)
             except Exception:
                 sig_map = {}
             for strat_id in SIGNAL_STRATEGIES.keys():
@@ -1821,7 +1821,7 @@ def _flatten_dashboard_to_rows(
         )
         row["Indicator_Errors"] = build_indicator_errors(row, indicators)
         try:
-            sig_map = compute_row_signals(row)
+            sig_map = compute_row_signals(row, indicators=indicators)
         except Exception:
             sig_map = {}
         for strat_id in SIGNAL_STRATEGIES.keys():
@@ -1912,7 +1912,9 @@ def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
             raw = (bucket or {}).get("row")
             if raw:
                 interval_rows[iv] = raw
-        composite = compute_composite_verdict(ticker, interval_rows, fundamentals)
+        composite = compute_composite_verdict(
+            ticker, interval_rows, fundamentals, indicators=indicators
+        )
         current_price = _pick_current_price_from_intervals(intervals_data, intervals)
         dashboard_tickers.append(
             {

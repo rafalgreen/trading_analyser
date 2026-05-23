@@ -21,6 +21,7 @@ def _row(
     return {
         "HTS Panel_Trend": hts,
         "MacD_Trend": macd,
+        "MacD_Line": "1.0 (Zielony)",
         "PCA_Values": pca,
     }
 
@@ -124,3 +125,41 @@ def test_fcf_negative_high_de_red_flag():
     result = compute_composite_verdict("X", intervals, fundamentals)
     assert "FCF<0&D/E>200" in result["flags"]
     assert result["verdict"] == VERDICT_UNIKAJ
+
+
+def _partial_pca_only_row(pca: str = "22.0") -> dict:
+    return {"PCA_Values": pca}
+
+
+def test_fundamentals_only_never_kup_without_technical_data():
+    """Fundamentals alone (or stale PCA partial merge) must not yield Kup."""
+    intervals = {
+        "1D": _partial_pca_only_row("22.0"),
+        "1W": _partial_pca_only_row("22.0"),
+        "1M": _partial_pca_only_row("22.0"),
+    }
+    result = compute_composite_verdict("KWEB", intervals, _quality_fundamentals())
+    assert result["verdict"] != VERDICT_KUP
+    assert result["verdict"] == VERDICT_OBSERWUJ
+    assert "Brak danych technicznych" in result["flags"]
+    assert result["breakdown"]["tech"] == 0.0
+    assert result["breakdown"]["consensus"] == 0.0
+    assert result["breakdown"]["fund"] > 0
+
+
+def test_kweb_like_partial_merge_stale_pca_no_buy_badges():
+    """One interval with only PCA (HTS/MacD missing) — tech layers stay neutral."""
+    intervals = {
+        "1W": {
+            "PCA_Values": "18.5 (Niebieski)",
+            "HTS Panel_Trend": "",
+            "MacD_Trend": "",
+        },
+    }
+    indicators = ["PCA", "HTS Panel", "MacD"]
+    result = compute_composite_verdict(
+        "KWEB", intervals, _quality_fundamentals(), indicators=indicators
+    )
+    assert result["verdict"] == VERDICT_OBSERWUJ
+    assert result["breakdown"]["tech"] == 0.0
+    assert result["breakdown"]["consensus"] == 0.0

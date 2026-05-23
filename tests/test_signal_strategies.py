@@ -117,3 +117,23 @@ def test_compute_signals_returns_all_strategies():
     assert out["scoring"] == "strong buy"  # +1 +1 +1 (PCA<=40) = 3
     assert out["pca_buckets"] == "buy"  # 35 ∈ (20, 40]
     assert out["cross_priority"] == "buy"  # brak crossów, fallback do trendu
+
+
+def test_compute_signals_empty_when_any_indicator_missing():
+    """Stale PCA alone must not produce buy badges (KWEB-like partial merge)."""
+    row = _row(pca="15.0")
+    indicators = ["PCA", "HTS Panel", "MacD"]
+    out = compute_signals(row, indicators=indicators)
+    assert all(v == "" for v in out.values())
+    assert strategy_scoring(row, indicators=indicators) == ""
+
+
+def test_compute_signals_requires_macd_line_not_trend_only():
+    row = _row(
+        hts_trend="Wzrostowy",
+        macd_trend="Wzrostowy",
+        pca="35.0",
+    )
+    indicators = ["PCA", "HTS Panel", "MacD"]
+    out = compute_signals(row, indicators=indicators)
+    assert all(v == "" for v in out.values())
