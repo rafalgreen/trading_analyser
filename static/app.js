@@ -393,8 +393,9 @@ document.addEventListener('DOMContentLoaded', () => {
      * Resolve: 'resume' | 'fresh' | 'cancel'.
      * `pending` to obiekt z /api/scraper/pending_run.
      */
-    function pendingRunDialog(pending) {
+    function pendingRunDialog(pending, options = {}) {
         return new Promise((resolve) => {
+            const isNoData = Boolean(options?.noData || pending?.no_data_only);
             let overlay = document.getElementById('app-pending-run-dialog');
             if (!overlay) {
                 overlay = document.createElement('div');
@@ -431,21 +432,40 @@ document.addEventListener('DOMContentLoaded', () => {
             const cancelBtn = overlay.querySelector('[data-role="cancel"]');
             const closeBtn = overlay.querySelector('[data-role="close"]');
 
-            msgEl.textContent =
-                'Wykryto niedokończony run scrapera (po crashu lub po Stop). ' +
-                'Wznowienie dopisze do tego samego pliku — „Od nowa" utworzy nowy z dzisiejszą datą.';
+            msgEl.textContent = isNoData
+                ? (
+                    'Wykryto niedokończony run „Odśwież Brak Danych”. Wznowienie kontynuuje '
+                    + 'od zapisanego tickera — liczba 163 nie spada, dopóki wszystkie 3 wskaźniki '
+                    + 'nie będą OK dla danego symbolu.'
+                )
+                : (
+                    'Wykryto niedokończony run scrapera (po crashu lub po Stop). '
+                    + 'Wznowienie dopisze do tego samego pliku — „Od nowa" utworzy nowy z dzisiejszą datą.'
+                );
 
             const file = (pending?.current_file || '').replace(/^results\//, '');
             const fileDate = pending?.current_file_date || '';
             const proc = Number(pending?.processed_count || 0);
             const total = Number(pending?.total_in_config || 0);
             const remaining = Number(pending?.remaining_count || (total - proc));
+            const runTickers = Number(pending?.run_tickers_count || 0);
+            const tickerIdx = Number(pending?.ticker_idx || 0);
+            const indIdx = Number(pending?.ind_idx || 0);
 
             const lines = [];
             if (file) {
                 lines.push(`<div><span class="pending-run-label">Plik:</span> <code>${escapeHtml(file)}</code>${fileDate ? ` <span class="pending-run-meta-date">(${escapeHtml(fileDate)})</span>` : ''}</div>`);
             }
-            if (total > 0) {
+            if (isNoData && runTickers > 0) {
+                lines.push(
+                    `<div><span class="pending-run-label">Postęp:</span> ticker ${tickerIdx + 1}/${runTickers}`
+                    + ` · wsk. ${indIdx + 1}/${Math.max((pending?.run_indicators || []).length, 1)}`
+                    + ` (pozostało kroków: ${remaining})</div>`
+                );
+                lines.push(
+                    '<div class="pending-run-hint">Ticker znika z „Brak danych” dopiero po komplecie wszystkich wskaźników (PCA, HTS, MacD).</div>'
+                );
+            } else if (total > 0) {
                 lines.push(`<div><span class="pending-run-label">Postęp:</span> ${proc}/${total} (pozostało: ${remaining})</div>`);
             } else if (proc > 0) {
                 lines.push(`<div><span class="pending-run-label">Przetworzonych:</span> ${proc}</div>`);
@@ -2781,12 +2801,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     ? data.tickers
                     : tickersOverride;
                 if (options?.noDataOnly && Number.isFinite(Number(data.count))) {
+                    const resumedHint = data.resumed ? ' (wznowiono)' : '';
                     showToast({
                         type: 'success',
-                        title: 'Odświeżanie Brak Danych',
+                        title: data.resumed ? 'Wznowiono Brak Danych' : 'Odświeżanie Brak Danych',
                         message: toastIndicators.length
-                            ? `${formatScraperStartToast(toastTickers.length ? toastTickers : [''], toastIndicators)} (${data.count} tickerów).`
-                            : `Uruchomiono scraper dla ${data.count} tickerów z „Brak danych”.`,
+                            ? `${formatScraperStartToast(toastTickers.length ? toastTickers : [''], toastIndicators)} (${data.count} tickerów${resumedHint}).`
+                            : `Uruchomiono scraper dla ${data.count} tickerów z „Brak danych”${resumedHint}.`,
                     });
                 } else if (toastIndicators.length || (toastTickers && toastTickers.length)) {
                     showToast({
@@ -2822,7 +2843,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) { /* ignore — fallback do confirmDialog */ }
 
         let fresh = false;
-        if (pending && pending.has_pending) {
+        if (pending && pending.has_pending && !pending.no_data_only) {
             const choice = await pendingRunDialog(pending);
             if (choice === 'cancel') return;
             fresh = (choice === 'fresh');
@@ -2853,6 +2874,25 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     async function runNoDataScrape(indicators) {
+        let pending = null;
+        try {
+            const pendingRes = await fetch('/api/scraper/pending_run');
+            if (pendingRes.ok) pending = await pendingRes.json();
+        } catch (e) { /* ignore */ }
+
+        let fresh = false;
+        if (pending && pending.has_pending && pending.no_data_only) {
+            const choice = await pendingRunDialog(pending, { noData: true });
+            if (choice === 'cancel') return;
+            fresh = (choice === 'fresh');
+            startScraper([], {
+                noDataOnly: true,
+                fresh,
+                indicators: indicators.length ? indicators.join(',') : undefined,
+            });
+            return;
+        }
+
         let previewCount = null;
         try {
             const previewRes = await fetch('/api/tickers/no_data');

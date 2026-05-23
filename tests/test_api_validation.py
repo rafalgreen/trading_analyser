@@ -67,14 +67,16 @@ def test_scraper_run_no_data_only_starts_subset(client, app_env, monkeypatch):
 
     called = {}
 
-    def fake(tickers=None, indicators=None):
+    def fake(tickers=None, indicators=None, no_data_only=False):
         called["tickers"] = list(tickers or [])
+        called["no_data_only"] = no_data_only
         return {"status": "started", "pid": 321, "count": len(tickers or []), "scope": "subset"}
 
     monkeypatch.setattr(m, "start_scraper_subprocess", fake)
     r = client.post("/api/scraper/run", json={"no_data_only": True})
     assert r.status_code == 200
     assert called["tickers"] == ["AAA", "BBB", "CCC"]
+    assert called["no_data_only"] is True
     body = r.json()
     assert body["status"] == "started"
     assert body["scope"] == "subset"
@@ -806,8 +808,9 @@ def test_repair_no_data_apply_rerun_triggers_scraper(client, app_env, tmp_path, 
 
     started = {"tickers": None}
 
-    def fake_start(tickers=None, indicators=None):
+    def fake_start(tickers=None, indicators=None, no_data_only=False):
         started["tickers"] = list(tickers or [])
+        started["no_data_only"] = no_data_only
         return {"status": "started", "pid": 999}
 
     monkeypatch.setattr(m, "start_scraper_subprocess", fake_start)
@@ -1128,23 +1131,172 @@ def test_scraper_run_fresh_ignored_for_partial(client, app_env, tmp_path, monkey
     assert state_path.exists(), "Subset run nie powinien ruszać state'u"
 
 
-def test_scraper_run_fresh_ignored_for_no_data_only(client, app_env, tmp_path, monkeypatch):
-    """no_data_only NIE czyści state'u nawet z fresh=true."""
+def test_scraper_run_fresh_clears_no_data_state(client, app_env, tmp_path, monkeypatch):
+    """fresh=true przy no_data_only usuwa zapisany stan no_data przed startem."""
     m, res, _dat = app_env
     state_path = tmp_path / "scraper_state.json"
+    csv_path = res / "tradingview_results_2026-05-11.csv"
+    csv_path.write_text("Ticker,Interval\n", encoding="utf-8")
     state_path.write_text(
-        json.dumps({"current_file": "results/x.csv", "processed": []}),
+        json.dumps(
+            {
+                "current_file": str(csv_path),
+                "processed": [],
+                "no_data_only": True,
+                "tickers": ["AAA", "BBB"],
+                "ticker_idx": 45,
+                "ind_idx": 0,
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(m, "STATE_FILE", str(state_path))
-    # Brak no-data tickerów → endpoint zwróci no_data_empty bez wołania subprocesu
     monkeypatch.setattr(
-        m, "start_scraper_subprocess", lambda tickers=None, indicators=None: {"status": "started"}
+        m,
+        "load_config",
+        lambda: {"tickers": ["AAA"], "intervals": ["1D"], "indicators": ["PCA"]},
+    )
+    monkeypatch.setattr(
+        m,
+        "_resolve_no_data_tickers",
+        lambda date_id, requested: ["AAA"],
+    )
+    monkeypatch.setattr(
+        m,
+        "start_scraper_subprocess",
+        lambda tickers=None, indicators=None, no_data_only=False: {
+            "status": "started",
+            "scope": "no_data_only",
+        },
     )
 
     r = client.post("/api/scraper/run", json={"fresh": True, "no_data_only": True})
     assert r.status_code == 200
-    assert state_path.exists(), "no_data_only nie powinien ruszać state'u"
+    assert not state_path.exists(), "fresh=true powinno usunąć scraper_state.json no_data"
+
+
+def test_no_data_run_resumes_saved_tickers_not_recomputed(
+    client, app_env, tmp_path, monkeypatch
+):
+    """Resume no_data_only używa zapisanej listy tickerów i indeksu, nie _resolve od zera."""
+    m, res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    csv_path = res / "tradingview_results_2026-05-11.csv"
+    csv_path.write_text("Ticker,Interval\n", encoding="utf-8")
+    saved_tickers = [f"T{i:03d}" for i in range(163)]
+    state_path.write_text(
+        json.dumps(
+            {
+                "current_file": str(csv_path),
+                "processed": [],
+                "no_data_only": True,
+                "tickers": saved_tickers,
+                "indicators": ["PCA", "HTS Panel", "MacD"],
+                "ticker_idx": 45,
+                "ind_idx": 0,
+                "session_started_at": 1000.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+
+    called = {}
+
+    def fake_start(tickers=None, indicators=None, no_data_only=False):
+        called["tickers"] = list(tickers or [])
+        called["no_data_only"] = no_data_only
+        return {"status": "started", "pid": 999}
+
+    monkeypatch.setattr(m, "start_scraper_subprocess", fake_start)
+    monkeypatch.setattr(
+        m,
+        "_resolve_no_data_tickers",
+        lambda date_id, requested: (_ for _ in ()).throw(
+            AssertionError("resume nie powinien recomputować listy no_data")
+        ),
+    )
+
+    r = client.post("/api/scraper/run", json={"no_data_only": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "started"
+    assert body["resumed"] is True
+    assert body["ticker_idx"] == 45
+    assert called["tickers"] == saved_tickers
+    assert called["no_data_only"] is True
+
+
+def test_pending_run_no_data_includes_checkpoint(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    csv_path = res / "tradingview_results_2026-05-11.csv"
+    csv_path.write_text("Ticker,Interval\n", encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "current_file": str(csv_path),
+                "processed": [],
+                "no_data_only": True,
+                "tickers": ["A", "B", "C"],
+                "indicators": ["PCA", "HTS Panel", "MacD"],
+                "ticker_idx": 1,
+                "ind_idx": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+
+    r = client.get("/api/scraper/pending_run")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["has_pending"] is True
+    assert body["no_data_only"] is True
+    assert body["run_tickers_count"] == 3
+    assert body["ticker_idx"] == 1
+    assert body["processed_count"] == 2  # ind0 ticker1 → krok 2/9
+    assert body["remaining_count"] == 7
+
+
+def test_stop_checkpoints_state_from_status(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    status_path = tmp_path / "scraper_status.json"
+    csv_path = res / "tradingview_results_2026-05-11.csv"
+    csv_path.write_text("Ticker,Interval\n", encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "current_file": str(csv_path),
+                "processed": [],
+                "no_data_only": True,
+                "tickers": ["A"] * 163,
+                "indicators": ["PCA", "HTS Panel", "MacD"],
+                "ticker_idx": 0,
+                "ind_idx": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "progress": "46/489 · ticker 46/163 · wsk. 1/3 · PCA",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+    monkeypatch.setattr(m, "STATUS_FILE", str(status_path))
+
+    m._checkpoint_scraper_state_from_status()
+    with open(state_path, encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["ticker_idx"] == 45
+    assert saved["ind_idx"] == 0
+    assert saved["resumed"] is True
 
 
 # --- /api/results pass-through Exchange + backfill ------------------------

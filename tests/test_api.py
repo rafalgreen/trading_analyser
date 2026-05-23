@@ -869,8 +869,9 @@ def test_scraper_run_no_data_only_includes_never_scraped(
     )
     called = {}
 
-    def fake(tickers=None, indicators=None):
+    def fake(tickers=None, indicators=None, no_data_only=False):
         called["tickers"] = list(tickers or [])
+        called["no_data_only"] = no_data_only
         return {"status": "started", "pid": 999, "count": len(tickers or [])}
 
     monkeypatch.setattr(m, "start_scraper_subprocess", fake)

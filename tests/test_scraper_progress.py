@@ -89,3 +89,38 @@ def test_build_running_scraper_progress_with_eta():
     progress = tv._format_scraper_progress(8, 163, 0, 3, "PCA", eta_label=eta_label)
     assert progress == "9/489 · ticker 9/163 · wsk. 1/3 · PCA · ~13h 20m"
     assert eta_seconds == 48000.0
+
+
+def test_format_scraper_progress_with_resumed():
+    assert tv._format_scraper_progress(45, 163, 0, 3, "PCA", resumed=True) == (
+        "46/489 · ticker 46/163 · wsk. 1/3 · (wznowiono) · PCA"
+    )
+
+
+def test_parse_progress_checkpoint():
+    ticker_idx, ind_idx = tv._parse_progress_checkpoint(
+        "46/489 · ticker 46/163 · wsk. 1/3 · PCA"
+    )
+    assert ticker_idx == 45
+    assert ind_idx == 0
+
+
+def test_write_and_read_run_state_file(tmp_path):
+    state_path = tmp_path / "scraper_state.json"
+    tv._write_run_state_file(
+        str(state_path),
+        current_run_file="results/x.csv",
+        processed_combos={("AAPL", "1D")},
+        session_started_at=1234.5,
+        ticker_idx=45,
+        ind_idx=0,
+        tickers=["AAPL", "MSFT"],
+        indicators=["PCA"],
+        no_data_only=True,
+        resumed=True,
+    )
+    loaded = tv._load_run_state_file(str(state_path))
+    assert loaded["ticker_idx"] == 45
+    assert loaded["no_data_only"] is True
+    assert loaded["tickers"] == ["AAPL", "MSFT"]
+    assert loaded["resumed"] is True
