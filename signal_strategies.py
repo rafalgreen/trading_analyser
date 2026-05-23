@@ -9,9 +9,9 @@ Identyfikatory strategii i ich semantyka są spójne z UI (filtr/badże).
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Iterable, Optional
 
-from results_store import parse_pca_number
+from results_store import parse_pca_number, row_has_all_configured_indicators
 
 
 SIGNAL_STRONG_BUY = "strong buy"
@@ -63,6 +63,15 @@ def _pca_value(row: Dict[str, object]) -> Optional[float]:
         if v is not None:
             return float(v)
     return None
+
+
+def row_signals_allowed(
+    row: Dict[str, object], indicators: Optional[Iterable[str]] = None
+) -> bool:
+    """True when every configured indicator has parseable data in the row."""
+    if not indicators:
+        return True
+    return row_has_all_configured_indicators(row, indicators)
 
 
 def _row_inputs(row: Dict[str, object]) -> Dict[str, Optional[object]]:
@@ -166,8 +175,12 @@ def strategy_pca_buckets(row: Dict[str, object]) -> str:
     return SIGNAL_STRONG_SELL
 
 
-def strategy_scoring(row: Dict[str, object]) -> str:
+def strategy_scoring(
+    row: Dict[str, object], *, indicators: Optional[Iterable[str]] = None
+) -> str:
     """HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1, inaczej 0). Suma ∈ [−3..+3]."""
+    if not row_signals_allowed(row, indicators):
+        return ""
     i = _row_inputs(row)
     score = 0.0
     have_any = False
@@ -210,8 +223,12 @@ STRATEGY_LABELS: Dict[str, str] = {
 }
 
 
-def compute_signals(row: Dict[str, object]) -> Dict[str, str]:
+def compute_signals(
+    row: Dict[str, object], *, indicators: Optional[Iterable[str]] = None
+) -> Dict[str, str]:
     """Zwraca słownik ``{strategy_id: signal}`` dla wszystkich strategii."""
+    if not row_signals_allowed(row, indicators):
+        return {name: "" for name in STRATEGIES}
     out: Dict[str, str] = {}
     for name, fn in STRATEGIES.items():
         try:

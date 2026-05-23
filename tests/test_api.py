@@ -1079,3 +1079,71 @@ def test_no_data_tickers_includes_stale_btcusdt(client: TestClient, app_env, mon
     assert r.status_code == 200
     assert "BTCUSDT" in r.json()["tickers"]
     assert "FRESH" not in r.json()["tickers"]
+
+
+def test_dashboard_kweb_like_stale_pca_no_buy_signals(
+    client: TestClient, app_env, monkeypatch
+):
+    """Partial merge: stale PCA without HTS/MacD must not show Kup or buy badges."""
+    m, res, _dat = app_env
+    fields = [
+        "Ticker",
+        "Company_Name",
+        "Interval",
+        "Scrape_Status",
+        "PCA_Values",
+        "HTS Panel_Trend",
+        "MacD_Line",
+    ]
+    fp_new = res / "tradingview_results_2026-05-22.csv"
+    with open(fp_new, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for iv in ("1D", "1W", "1M"):
+            w.writerow({
+                "Ticker": "KWEB",
+                "Company_Name": "KraneShares CSI China Internet ETF",
+                "Interval": iv,
+                "Scrape_Status": "NO_DATA",
+                "PCA_Values": "",
+                "HTS Panel_Trend": "",
+                "MacD_Line": "",
+            })
+    fp_old = res / "tradingview_results_2026-05-18.csv"
+    with open(fp_old, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for iv in ("1D", "1W", "1M"):
+            w.writerow({
+                "Ticker": "KWEB",
+                "Company_Name": "KraneShares CSI China Internet ETF",
+                "Interval": iv,
+                "Scrape_Status": "NO_DATA",
+                "PCA_Values": "18.5 (Niebieski)",
+                "HTS Panel_Trend": "",
+                "MacD_Line": "",
+            })
+    monkeypatch.setattr(
+        m,
+        "load_config",
+        lambda: {
+            "tickers": ["KWEB"],
+            "intervals": ["1D", "1W", "1M"],
+            "indicators": ["PCA", "HTS Panel", "MacD"],
+        },
+    )
+    monkeypatch.setattr(m, "_sync_missing_fundamentals_for_dashboard", lambda *a, **k: None)
+    r = client.get("/api/dashboard")
+    assert r.status_code == 200
+    body = r.json()
+    ticker_entry = body["tickers"][0]
+    assert ticker_entry["ticker"] == "KWEB"
+    composite = ticker_entry["composite"]
+    assert composite["verdict"] != "kup"
+    assert composite["verdict"] == "obserwuj"
+    assert "Brak danych technicznych" in composite["flags"]
+    for row in body["data"]:
+        assert set(row.get("Missing_Indicators") or []) >= {"HTS Panel", "MacD"}
+        for sid in ("trend_only", "cross_priority", "pca_buckets", "scoring"):
+            sig = (row.get(f"Computed_Signal_{sid}") or "").strip()
+            assert sig not in ("buy", "strong buy", "sell", "strong sell")

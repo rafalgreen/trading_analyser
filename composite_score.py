@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fundamentals import FUND_KEYS
+from results_store import row_has_all_configured_indicators
 from signal_strategies import strategy_scoring
 
 
@@ -23,6 +24,9 @@ WEIGHT_CONSENSUS = 0.20
 VERDICT_KUP = "kup"
 VERDICT_OBSERWUJ = "obserwuj"
 VERDICT_UNIKAJ = "unikaj"
+
+DEFAULT_INDICATORS: Tuple[str, ...] = ("PCA", "HTS Panel", "MacD")
+FLAG_NO_TECH_DATA = "Brak danych technicznych"
 
 
 def _num(value: Any) -> Optional[float]:
@@ -160,20 +164,45 @@ def compute_fundamentals_layer_score(fundamentals: Dict[str, Any]) -> float:
     return (avg - 50.0) * 2.0
 
 
-def compute_technical_layer_score(interval_rows: Dict[str, Dict[str, Any]]) -> float:
-    row = interval_rows.get("1W") or interval_rows.get("1w")
+def _interval_has_complete_technical(
+    row: Optional[Dict[str, Any]], indicators: Iterable[str]
+) -> bool:
     if not row:
+        return False
+    return row_has_all_configured_indicators(row, indicators)
+
+
+def any_interval_has_complete_technical(
+    interval_rows: Dict[str, Dict[str, Any]], indicators: Iterable[str]
+) -> bool:
+    return any(
+        _interval_has_complete_technical(row, indicators)
+        for row in interval_rows.values()
+    )
+
+
+def compute_technical_layer_score(
+    interval_rows: Dict[str, Dict[str, Any]],
+    indicators: Optional[Iterable[str]] = None,
+) -> float:
+    inds = indicators or DEFAULT_INDICATORS
+    row = interval_rows.get("1W") or interval_rows.get("1w")
+    if not _interval_has_complete_technical(row, inds):
         return 0.0
-    return signal_to_layer_score(strategy_scoring(row))
+    return signal_to_layer_score(strategy_scoring(row, indicators=inds))
 
 
-def compute_consensus_layer_score(interval_rows: Dict[str, Dict[str, Any]]) -> float:
+def compute_consensus_layer_score(
+    interval_rows: Dict[str, Dict[str, Any]],
+    indicators: Optional[Iterable[str]] = None,
+) -> float:
+    inds = indicators or DEFAULT_INDICATORS
     nums: List[float] = []
     for iv in ("1D", "1W", "1M"):
         row = interval_rows.get(iv)
-        if not row:
+        if not _interval_has_complete_technical(row, inds):
             continue
-        n = signal_to_numeric(strategy_scoring(row))
+        n = signal_to_numeric(strategy_scoring(row, indicators=inds))
         if n is not None:
             nums.append(n)
     if not nums:
@@ -207,16 +236,25 @@ def compute_composite_verdict(
     ticker: str,
     interval_rows: Dict[str, Dict[str, Any]],
     fundamentals: Dict[str, Any],
+    *,
+    indicators: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Composite Kup / Obserwuj / Unikaj for one ticker."""
     del ticker  # reserved for logging / future use
 
+    inds = indicators or DEFAULT_INDICATORS
     fund = compute_fundamentals_layer_score(fundamentals)
-    tech = compute_technical_layer_score(interval_rows)
-    consensus = compute_consensus_layer_score(interval_rows)
+    tech = compute_technical_layer_score(interval_rows, indicators=inds)
+    consensus = compute_consensus_layer_score(interval_rows, indicators=inds)
     score = round(WEIGHT_FUND * fund + WEIGHT_TECH * tech + WEIGHT_CONSENSUS * consensus, 2)
-    flags = check_red_flags(fundamentals)
-    verdict = compute_verdict(score, flags)
+    red_flags = check_red_flags(fundamentals)
+    has_complete_technical = any_interval_has_complete_technical(interval_rows, inds)
+    verdict = compute_verdict(score, red_flags)
+    if not has_complete_technical and verdict == VERDICT_KUP:
+        verdict = VERDICT_OBSERWUJ
+    flags = list(red_flags)
+    if not has_complete_technical and FLAG_NO_TECH_DATA not in flags:
+        flags.append(FLAG_NO_TECH_DATA)
 
     return {
         "verdict": verdict,
