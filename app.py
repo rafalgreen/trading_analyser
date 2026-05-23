@@ -70,7 +70,7 @@ from company_names import (
     lookup_exchange,
     lookup_symbol_match,
 )
-from tv_scraper import cdp_find_tradingview_chart_url
+from tv_scraper import cdp_find_tradingview_chart_url, _parse_progress_checkpoint
 
 logger = logging.getLogger("trading_analyser.app")
 if not logger.handlers:
@@ -704,9 +704,62 @@ def _normalize_scraper_indicators(
     return out
 
 
+def _read_scraper_state() -> Optional[Dict[str, Any]]:
+    if not os.path.exists(STATE_FILE):
+        return None
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("read_scraper_state: cannot read %s: %s", STATE_FILE, exc)
+        return None
+    if not str(state.get("current_file") or "").strip():
+        return None
+    return state
+
+
+def _remove_scraper_state() -> None:
+    try:
+        if os.path.exists(STATE_FILE):
+            os.remove(STATE_FILE)
+            logger.info("Usunięto %s", STATE_FILE)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Nie udało się usunąć %s: %s", STATE_FILE, exc)
+
+
+def _checkpoint_scraper_state_from_status() -> None:
+    """Po Stop zapisz ostatni znany checkpoint (ticker_idx/ind_idx) z pliku statusu."""
+    state = _read_scraper_state()
+    if not state:
+        return
+    if not os.path.exists(STATUS_FILE):
+        return
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+            status = json.load(f) or {}
+    except Exception:
+        return
+    if (status.get("status") or "").lower() != "running":
+        return
+    ticker_idx, ind_idx = _parse_progress_checkpoint(str(status.get("progress") or ""))
+    if ticker_idx is None and ind_idx is None:
+        return
+    if ticker_idx is not None:
+        state["ticker_idx"] = ticker_idx
+    if ind_idx is not None:
+        state["ind_idx"] = ind_idx
+    state["resumed"] = True
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("checkpoint_scraper_state_from_status: %s", exc)
+
+
 def start_scraper_subprocess(
     tickers: Optional[List[str]] = None,
     indicators: Optional[List[str]] = None,
+    no_data_only: bool = False,
 ) -> Dict[str, Any]:
     """Uruchamia `tv_scraper.py` w tle. Pusta lista tickerów = pełna lista z konfiguracji."""
     global _scraper_process
@@ -726,6 +779,8 @@ def start_scraper_subprocess(
             cmd.extend(["--ticker", ",".join(tickers)])
         if indicators:
             cmd.extend(["--indicators", ",".join(indicators)])
+        if no_data_only:
+            cmd.append("--no-data-only")
         # Przytnij poprzedni log scrapera, jeśli urósł — chcemy zobaczyć
         # przebieg bieżącego runu bez mieszania z setkami starych linii.
         try:
@@ -791,7 +846,9 @@ def start_scraper_subprocess(
             except Exception:
                 pass
             scope = "all"
-            if tickers and indicators:
+            if no_data_only:
+                scope = "no_data_only"
+            elif tickers and indicators:
                 scope = "subset_indicators"
             elif tickers:
                 scope = "subset"
@@ -803,6 +860,7 @@ def start_scraper_subprocess(
                 "count": count,
                 "scope": scope,
                 "indicators": indicators or [],
+                "no_data_only": no_data_only,
             }
         except Exception as e:
             logger.exception("Nie udało się uruchomić scrapera: %s", e)
@@ -2043,7 +2101,27 @@ def run_scraper(body: ScraperRunRequest):
     tickers = [t.strip() for t in body.tickers if t and t.strip()]
     run_indicators = _normalize_scraper_indicators(body.indicators)
     if body.no_data_only:
-        target_tickers = _resolve_no_data_tickers(body.date_id, tickers or None)
+        saved_state = _read_scraper_state()
+        if body.fresh and saved_state and saved_state.get("no_data_only"):
+            _remove_scraper_state()
+            saved_state = None
+
+        resumed = False
+        if (
+            saved_state
+            and saved_state.get("no_data_only")
+            and saved_state.get("tickers")
+            and not body.fresh
+        ):
+            target_tickers = [
+                str(t).strip()
+                for t in (saved_state.get("tickers") or [])
+                if str(t).strip()
+            ]
+            resumed = True
+        else:
+            target_tickers = _resolve_no_data_tickers(body.date_id, tickers or None)
+
         if not target_tickers:
             return {
                 "status": "no_data_empty",
@@ -2054,24 +2132,23 @@ def run_scraper(body: ScraperRunRequest):
                     "Brak tickerów z „Brak danych” na dashboardzie (0 do odświeżenia)."
                 ),
             }
-        started = start_scraper_subprocess(target_tickers, run_indicators)
+        started = start_scraper_subprocess(
+            target_tickers, run_indicators, no_data_only=True
+        )
         if isinstance(started, dict):
             started.setdefault("scope", "no_data_only")
             started["count"] = len(target_tickers)
             started["tickers"] = target_tickers
+            started["resumed"] = resumed
+            if resumed:
+                started["ticker_idx"] = saved_state.get("ticker_idx", 0)
+                started["ind_idx"] = saved_state.get("ind_idx", 0)
         return started
 
     # Fresh start dla pełnego runu (bez tickers / bez subset wskaźników) — usuwamy
     # ewentualny pending state, żeby scraper nie dopisywał do wczorajszego pliku.
     if body.fresh and not tickers and not run_indicators:
-        try:
-            if os.path.exists(STATE_FILE):
-                os.remove(STATE_FILE)
-                logger.info("Fresh start: usunięto %s", STATE_FILE)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Fresh start: nie udało się usunąć %s: %s", STATE_FILE, exc
-            )
+        _remove_scraper_state()
     return start_scraper_subprocess(
         tickers if tickers else None,
         run_indicators,
@@ -2117,6 +2194,23 @@ def scraper_pending_run():
     total_in_config = len(cfg_tickers) * max(len(cfg_intervals), 1)
     remaining_count = max(total_in_config - processed_count, 0)
 
+    no_data_only = bool(state.get("no_data_only"))
+    run_tickers = [
+        str(t).strip() for t in (state.get("tickers") or []) if str(t).strip()
+    ]
+    run_indicators = [
+        str(i).strip() for i in (state.get("indicators") or []) if str(i).strip()
+    ]
+    ticker_idx = max(int(state.get("ticker_idx") or 0), 0)
+    ind_idx = max(int(state.get("ind_idx") or 0), 0)
+    run_ticker_total = len(run_tickers)
+    run_ind_total = max(len(run_indicators), 1)
+    if no_data_only and run_ticker_total:
+        total_in_config = run_ticker_total * run_ind_total
+        overall_done = ind_idx * run_ticker_total + ticker_idx + 1
+        remaining_count = max(total_in_config - overall_done, 0)
+        processed_count = overall_done
+
     mtime = None
     try:
         mtime = os.path.getmtime(STATE_FILE)
@@ -2132,6 +2226,12 @@ def scraper_pending_run():
         "total_in_config": total_in_config,
         "remaining_count": remaining_count,
         "state_mtime": mtime,
+        "no_data_only": no_data_only,
+        "run_tickers_count": run_ticker_total,
+        "run_indicators": run_indicators,
+        "ticker_idx": ticker_idx,
+        "ind_idx": ind_idx,
+        "resumed": bool(state.get("resumed")),
     }
 
 
@@ -2303,6 +2403,7 @@ async def stop_scraper():
                 orphan_killed = await asyncio.to_thread(_kill_all)
 
             if (cur.get("status") or "").lower() == "running" or orphan_killed:
+                _checkpoint_scraper_state_from_status()
                 _write_status("stopped")
         except Exception:
             logger.exception("Błąd porządkowania orphan scrapera")
@@ -2355,6 +2456,7 @@ async def stop_scraper():
             logger.warning("Błąd zatrzymywania procesu scrapera: %s", exc)
 
     await asyncio.to_thread(_terminate_and_wait)
+    _checkpoint_scraper_state_from_status()
     _write_status("stopped")
     _scraper_process = None
     return {"status": "stopped"}
@@ -2968,7 +3070,7 @@ def repair_no_data_apply(body: RepairNoDataRequest):
         new_names = [a["new"] for a in applied]
         target_tickers = _resolve_no_data_tickers(body.date_id, new_names)
         if target_tickers:
-            started = start_scraper_subprocess(target_tickers)
+            started = start_scraper_subprocess(target_tickers, no_data_only=True)
             if isinstance(started, dict):
                 started.setdefault("scope", "no_data_only")
                 started["count"] = len(target_tickers)

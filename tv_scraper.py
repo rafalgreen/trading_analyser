@@ -431,6 +431,7 @@ def _format_scraper_progress(
     n_inds: int,
     ind_name: str = "",
     eta_label: str = "",
+    resumed: bool = False,
 ) -> str:
     """Postęp łączny (monotoniczny) + szczegóły fazy wskaźnika i tickera."""
     n_tickers = max(int(n_tickers), 1)
@@ -445,11 +446,74 @@ def _format_scraper_progress(
         f"ticker {ticker_idx + 1}/{n_tickers}",
         f"wsk. {ind_idx + 1}/{n_inds}",
     ]
+    if resumed:
+        parts.append("(wznowiono)")
     if ind_name:
         parts.append(str(ind_name))
     if eta_label:
         parts.append(eta_label)
     return " · ".join(parts)
+
+
+def _write_run_state_file(
+    state_file: str,
+    *,
+    current_run_file: str,
+    processed_combos,
+    session_started_at: Optional[float],
+    ticker_idx: int,
+    ind_idx: int,
+    tickers: List[str],
+    indicators: List[str],
+    no_data_only: bool,
+    resumed: bool = False,
+) -> None:
+    payload: Dict[str, Any] = {
+        "current_file": current_run_file,
+        "processed": [list(x) for x in processed_combos],
+        "session_started_at": session_started_at,
+        "ticker_idx": max(int(ticker_idx), 0),
+        "ind_idx": max(int(ind_idx), 0),
+        "tickers": list(tickers or []),
+        "indicators": list(indicators or []),
+        "no_data_only": bool(no_data_only),
+    }
+    if resumed:
+        payload["resumed"] = True
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+
+def _load_run_state_file(
+    state_file: str,
+) -> Optional[Dict[str, Any]]:
+    if not os.path.exists(state_file):
+        return None
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f) or {}
+    except Exception:
+        return None
+    if not str(state.get("current_file") or "").strip():
+        return None
+    return state
+
+
+def _parse_progress_checkpoint(progress: str) -> Tuple[Optional[int], Optional[int]]:
+    """Parsuje ticker_idx i ind_idx (0-based) z łańcucha postępu statusu."""
+    if not progress or not isinstance(progress, str):
+        return None, None
+    m = re.search(
+        r"ticker\s+(\d+)\s*/\s*\d+.*?wsk\.\s*(\d+)\s*/\s*\d+",
+        progress,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None, None
+    try:
+        return max(int(m.group(1)) - 1, 0), max(int(m.group(2)) - 1, 0)
+    except (TypeError, ValueError):
+        return None, None
 
 
 def _scraper_elapsed_seconds(
@@ -472,6 +536,7 @@ def _build_running_scraper_progress(
     *,
     session_started_at: Optional[float] = None,
     run_t0: Optional[float] = None,
+    resumed: bool = False,
 ) -> Tuple[str, Optional[float], str]:
     overall_done, overall_total = scraper_overall_progress(
         ticker_idx, n_tickers, ind_idx, n_inds
@@ -487,6 +552,7 @@ def _build_running_scraper_progress(
         n_inds,
         ind_name,
         eta_label=eta_label,
+        resumed=resumed,
     )
     return progress, eta_seconds, eta_label
 
@@ -1654,6 +1720,7 @@ def run_scraper(
     is_indicator_subset=False,
     all_config_indicators=None,
     indicator_search: Optional[Dict[str, str]] = None,
+    no_data_only: bool = False,
 ):
     _configure_logging()
     if indicator_search is None and os.path.exists(CONFIG_FILE):
@@ -1670,6 +1737,9 @@ def run_scraper(
     ]
     if not status_indicators:
         status_indicators = list(indicators or [])
+    is_subset_run = bool(is_partial and not no_data_only)
+    persist_state = (not is_partial) or no_data_only
+    respect_csv_data = (not is_partial) or no_data_only
     # Use 127.0.0.1 (not "localhost"): on many systems localhost resolves to ::1 first,
     # while Chromium's CDP often listens only on IPv4 — then connect_over_cdp fails with ECONNREFUSED ::1:9222.
     cdp_url = f"http://127.0.0.1:{port}"
@@ -1679,29 +1749,73 @@ def run_scraper(
     processed_combos = set()
     current_run_file = None
     session_started_at: Optional[float] = None
+    start_ind_idx = 0
+    start_ticker_idx = 0
+    resumed = False
+    show_resumed_label = False
 
-    if not is_partial and os.path.exists(state_file):
+    if persist_state and os.path.exists(state_file):
         try:
-            with open(state_file, "r") as f:
-                state = json.load(f)
-                if "current_file" in state and os.path.exists(state["current_file"]):
-                    current_run_file = state["current_file"]
-                    processed_combos = set(
-                        tuple(x) for x in state.get("processed", [])
-                    )
-                    raw_started = state.get("session_started_at")
-                    if raw_started is not None:
-                        session_started_at = float(raw_started)
+            state = _load_run_state_file(state_file) or {}
+            if state.get("current_file") and os.path.exists(state["current_file"]):
+                current_run_file = state["current_file"]
+                processed_combos = set(tuple(x) for x in state.get("processed", []))
+                raw_started = state.get("session_started_at")
+                if raw_started is not None:
+                    session_started_at = float(raw_started)
+                else:
+                    try:
+                        session_started_at = os.path.getmtime(state_file)
+                    except OSError:
+                        pass
+                if no_data_only and state.get("no_data_only") and state.get("tickers"):
+                    saved_inds = [
+                        str(i).strip()
+                        for i in (state.get("indicators") or [])
+                        if str(i).strip()
+                    ]
+                    if not saved_inds or saved_inds == list(indicators or []):
+                        tickers = list(state.get("tickers") or tickers)
+                        start_ind_idx = max(int(state.get("ind_idx") or 0), 0)
+                        start_ticker_idx = max(int(state.get("ticker_idx") or 0), 0)
+                        resumed = True
+                        show_resumed_label = bool(state.get("resumed")) or (
+                            start_ind_idx > 0 or start_ticker_idx > 0
+                        )
+                        logger.info(
+                            "Wznawiam no_data run: ticker %d/%d, wsk. %d/%d, plik: %s",
+                            start_ticker_idx + 1,
+                            len(tickers),
+                            start_ind_idx + 1,
+                            len(indicators),
+                            current_run_file,
+                        )
                     else:
-                        try:
-                            session_started_at = os.path.getmtime(state_file)
-                        except OSError:
-                            pass
+                        logger.info(
+                            "Zapisany stan no_data ma inne wskaźniki (%s ≠ %s) — start od początku.",
+                            ", ".join(saved_inds),
+                            ", ".join(indicators or []),
+                        )
+                elif not no_data_only and not state.get("no_data_only"):
                     logger.info(
                         "Wznawiam pracę z poprzedniej sesji. Plik: %s (pominięto %d kombinacji)",
                         current_run_file,
                         len(processed_combos),
                     )
+                elif no_data_only and not state.get("no_data_only"):
+                    logger.info(
+                        "Istniejący stan pełnego runu — rozpoczynam nową sesję no_data."
+                    )
+                    current_run_file = None
+                    processed_combos = set()
+                    session_started_at = None
+                elif not no_data_only and state.get("no_data_only"):
+                    logger.info(
+                        "Istniejący stan no_data — rozpoczynam pełny run od nowa."
+                    )
+                    current_run_file = None
+                    processed_combos = set()
+                    session_started_at = None
         except Exception as e:
             logger.warning("Błąd odczytu pliku stanu: %s", e)
 
@@ -1714,26 +1828,47 @@ def run_scraper(
         logger.info(
             "Rozpoczynam nową sesję pobierania. Plik docelowy: %s", current_run_file
         )
+        start_ind_idx = 0
+        start_ticker_idx = 0
+        resumed = False
+        show_resumed_label = False
 
-    if not is_partial and session_started_at is None:
+    if persist_state and session_started_at is None:
         session_started_at = time.time()
 
-    def update_state(ticker_val, interval_val):
-        if is_partial:
+    def persist_checkpoint(ticker_val_idx: int, ind_val_idx: int, *, mark_resumed: bool = False):
+        if not persist_state:
             return
-        processed_combos.add((ticker_val, interval_val))
         try:
-            with open(state_file, "w") as f:
-                json.dump(
-                    {
-                        "current_file": current_run_file,
-                        "processed": list(processed_combos),
-                        "session_started_at": session_started_at,
-                    },
-                    f,
-                )
+            _write_run_state_file(
+                state_file,
+                current_run_file=current_run_file,
+                processed_combos=processed_combos,
+                session_started_at=session_started_at,
+                ticker_idx=ticker_val_idx,
+                ind_idx=ind_val_idx,
+                tickers=tickers,
+                indicators=indicators,
+                no_data_only=no_data_only,
+                resumed=mark_resumed or show_resumed_label,
+            )
         except Exception as exc:
             logger.warning("Nie udało się zapisać stanu sesji: %s", exc)
+
+    def update_state(ticker_val, interval_val):
+        if not persist_state:
+            return
+        processed_combos.add((ticker_val, interval_val))
+        persist_checkpoint(
+            getattr(update_state, "_last_ticker_idx", 0),
+            getattr(update_state, "_last_ind_idx", 0),
+        )
+
+    update_state._last_ticker_idx = 0
+    update_state._last_ind_idx = 0
+
+    if persist_state and no_data_only and not resumed:
+        persist_checkpoint(0, 0)
 
     with sync_playwright() as p:
         run_t0 = None
@@ -1850,6 +1985,8 @@ def run_scraper(
             n_inds = len(indicators)
 
             for ind_idx, ind_name in enumerate(indicators):
+                if ind_idx < start_ind_idx:
+                    continue
                 logger.info(
                     "=== Faza wskaźnika: %s (%d/%d) ===",
                     ind_name,
@@ -1861,15 +1998,28 @@ def run_scraper(
                     target_page, ind_name, ind_name, indicator_search
                 )
 
-                for ticker_idx, ticker in enumerate(tickers):
+                ticker_begin = start_ticker_idx if ind_idx == start_ind_idx else 0
+                for ticker_idx in range(ticker_begin, len(tickers)):
+                    ticker = tickers[ticker_idx]
+                    update_state._last_ticker_idx = ticker_idx
+                    update_state._last_ind_idx = ind_idx
+                    persist_checkpoint(
+                        ticker_idx,
+                        ind_idx,
+                        mark_resumed=show_resumed_label and ticker_idx == ticker_begin and ind_idx == start_ind_idx,
+                    )
+                    progress_resumed = show_resumed_label and (
+                        ticker_idx == ticker_begin and ind_idx == start_ind_idx
+                    )
                     progress_str, eta_seconds, eta_label = _build_running_scraper_progress(
                         ticker_idx,
                         len(tickers),
                         ind_idx,
                         n_inds,
                         ind_name,
-                        session_started_at=session_started_at if not is_partial else None,
+                        session_started_at=session_started_at if persist_state else None,
                         run_t0=run_t0,
+                        resumed=progress_resumed,
                     )
                     write_scraper_status(
                         "running",
@@ -1882,7 +2032,7 @@ def run_scraper(
 
                     existing_df = load_results_dataframe(current_run_file)
 
-                    if not is_partial and ticker_fully_done_in_csv(
+                    if respect_csv_data and ticker_fully_done_in_csv(
                         existing_df, ticker, intervals, indicators
                     ):
                         logger.info(
@@ -2027,7 +2177,7 @@ def run_scraper(
                         )
 
                         if (
-                            not is_partial
+                            respect_csv_data
                             and erow is not None
                             and row_interval_complete(erow, indicators)
                         ):
@@ -2081,14 +2231,14 @@ def run_scraper(
                             row_data,
                             erow,
                             skip_indicator_merge=(
-                                is_partial and not is_indicator_subset
+                                is_subset_run and not is_indicator_subset
                             ),
                         )
 
                         should_parse = (
                             erow is None
                             or not row_has_indicator_data(erow, ind_name)
-                            or is_partial
+                            or is_subset_run
                         )
                         if not should_parse:
                             logger.info(
@@ -2276,7 +2426,7 @@ def run_scraper(
                 duration_seconds=elapsed,
                 duration_human=dh,
             )
-            if not is_partial and os.path.exists(state_file):
+            if persist_state and os.path.exists(state_file):
                 os.remove(state_file)
 
         except Exception as e:
@@ -2362,6 +2512,11 @@ if __name__ == "__main__":
         metavar="PORT",
         help="Port zdalnego debugowania przeglądarki (domyślnie: TV_CDP_PORT, potem cdp_port z JSON, 9222)",
     )
+    parser.add_argument(
+        "--no-data-only",
+        action="store_true",
+        help="Run resumable no-data refresh (persists scraper_state.json checkpoints)",
+    )
     args = parser.parse_args()
 
     if os.path.exists(CONFIG_FILE):
@@ -2390,6 +2545,7 @@ if __name__ == "__main__":
 
     cdp_port = resolve_cdp_port(config, cli_port=args.cdp_port)
 
+    no_data_only = bool(args.no_data_only)
     is_partial = False
     if args.ticker:
         TICKERS = [t.strip() for t in args.ticker.split(",")]
@@ -2422,6 +2578,7 @@ if __name__ == "__main__":
             is_partial=is_partial,
             is_indicator_subset=is_indicator_subset,
             all_config_indicators=ALL_CONFIG_INDICATORS,
+            no_data_only=no_data_only,
         )
     except Exception:
         # Błąd i ewentualny czas do `scraper_status.json` zapisuje już `run_scraper`.
