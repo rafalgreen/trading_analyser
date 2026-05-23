@@ -1704,6 +1704,21 @@ def _scan_latest_rows_per_ticker_interval(
     return found
 
 
+def _pick_current_price_from_intervals(
+    intervals_data: Dict[str, Any], intervals: List[str]
+) -> str:
+    """Prefer 1D, then first interval row with non-empty Current_Price."""
+    prefer = ["1D"] + [i for i in intervals if i != "1D"]
+    for iv in prefer:
+        bucket = intervals_data.get(iv) or {}
+        row = bucket.get("row") if bucket else None
+        if row:
+            price = str(row.get("Current_Price") or "").strip()
+            if price:
+                return price
+    return ""
+
+
 def _flatten_dashboard_to_rows(
     dashboard_tickers: List[Dict[str, Any]], indicators: List[str]
 ) -> List[Dict[str, Any]]:
@@ -1850,11 +1865,13 @@ def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
             if raw:
                 interval_rows[iv] = raw
         composite = compute_composite_verdict(ticker, interval_rows, fundamentals)
+        current_price = _pick_current_price_from_intervals(intervals_data, intervals)
         dashboard_tickers.append(
             {
                 "ticker": ticker,
                 "company_name": company_name,
                 "exchange": exchange,
+                "current_price": current_price,
                 "intervals": intervals_data,
                 "fundamentals": fundamentals,
                 "composite": composite,
