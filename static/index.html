@@ -14,7 +14,7 @@
     <!-- Phosphor Icons for modern iconography -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=13">
+    <link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body>
     <div id="global-scrape-banner" class="global-scrape-banner" aria-live="polite">
@@ -371,16 +371,12 @@
     <template id="ticker-card-template">
         <div class="ticker-card glass-panel collapsed" style="grid-column: 1 / -1;">
             <div class="card-header">
-                <div class="ticker-info">
-                    <div class="ticker-title-row">
-                        <h2 class="ticker-name">BTCUSDT</h2>
-                        <span class="composite-verdict-badge wl-badge" hidden></span>
-                        <span class="exchange-badge" hidden></span>
-                    </div>
-                    <span class="company-name">Nazwa Firmy</span>
+                <div class="ticker-title-row">
+                    <h2 class="ticker-name">BTCUSDT</h2>
+                    <span class="exchange-badge" hidden></span>
+                    <span class="composite-verdict-badge wl-badge" hidden></span>
                 </div>
                 <div class="card-header-right">
-                    <div class="watchlist-badges"></div>
                     <div class="card-summary"></div>
                     <button type="button" class="card-action-btn card-rename-btn" title="Zmień symbol tickera w konfiguracji" aria-label="Zmień nazwę tickera">
                         <i class="ph ph-pencil-simple"></i>
@@ -407,6 +403,8 @@
                     </button>
                     <i class="ph ph-caret-down card-chevron"></i>
                 </div>
+                <span class="company-name">Nazwa Firmy</span>
+                <div class="strategy-badges watchlist-badges"></div>
             </div>
             
             <div class="card-fundamentals">
@@ -641,6 +639,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=25"></script>
+    <script src="app.js?v=26"></script>
 </body>
 </html>
