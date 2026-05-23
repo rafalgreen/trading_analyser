@@ -47,8 +47,10 @@ from fundamentals import (
     FUND_KEYS,
     check_yfinance_available,
     fetch_fundamentals,
+    fundamentals_fetch_attempted,
     fundamentals_row_has_values,
     is_crypto,
+    configure_yfinance_logging,
 )
 from signal_strategies import (
     STRATEGIES as SIGNAL_STRATEGIES,
@@ -100,6 +102,7 @@ _scraper_lock = threading.Lock()
 
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
+    configure_yfinance_logging()
     _reset_stale_status_file()
     reschedule_auto_scraper()
     _scheduler.start()
@@ -1184,6 +1187,8 @@ def _refresh_fundamentals_batch(
             existing = get_fundamentals_for_ticker(t, path=csv_path)
             if _fundamentals_row_has_values(existing):
                 continue
+            if fundamentals_fetch_attempted(existing):
+                continue
         api_row = _fetch_and_persist_fundamentals(
             t, force_refresh=force_refresh, tv_http_fallback=tv_http
         )
@@ -1243,8 +1248,14 @@ def _sync_missing_fundamentals_for_dashboard(
         if not t or is_crypto(t):
             continue
         existing = get_fundamentals_for_ticker(t, path=csv_path)
-        if not _fundamentals_row_has_values(existing):
-            missing.append(t)
+        if _fundamentals_row_has_values(existing):
+            continue
+        if fundamentals_fetch_attempted(existing):
+            continue
+        cached = _fundamentals_from_cache(t)
+        if fundamentals_fetch_attempted(cached):
+            continue
+        missing.append(t)
 
     if not missing:
         return
@@ -1260,6 +1271,7 @@ def _sync_missing_fundamentals_for_dashboard(
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    synced = 0
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = [
             pool.submit(_fetch_and_persist_fundamentals, t, force_refresh=False)
@@ -1268,8 +1280,17 @@ def _sync_missing_fundamentals_for_dashboard(
         for fut in as_completed(futures):
             try:
                 fut.result()
+                synced += 1
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Dashboard fundamentals sync: %s", exc)
+
+    if synced:
+        logger.info(
+            "Dashboard fundamentals sync: pobrano %s/%s brakujących (pozostało %s)",
+            synced,
+            len(batch),
+            max(0, len(missing) - len(batch)),
+        )
 
 
 def _resolve_results_file_for_refresh(date_id: Optional[str]) -> Optional[str]:

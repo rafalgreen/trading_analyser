@@ -20,6 +20,7 @@ kluczy ``Fund_*`` (``None`` gdy brak wartości) plus ``Fund_Source`` oraz
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -29,7 +30,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,42 @@ _CRYPTO_SUFFIXES = ("USDT", "USD", "USDC", "BUSD")
 # konfiguracja zwykle używa wariantów ``BTCUSDT``.
 _CRYPTO_BASE_TOKENS = frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA"})
 
+_US_EXCHANGES = frozenset(
+    {"NASDAQ", "NYSE", "AMEX", "BATS", "ARCA", "OTC", "OTCQX", "OTCQB", "NCM", "NGM", "NMS"}
+)
+
+_EXCHANGE_YAHOO_SUFFIX: Dict[str, str] = {
+    "GPW": ".WA",
+    "XETR": ".DE",
+    "FWB": ".F",
+    "GETTEX": ".F",
+    "BER": ".BE",
+    "DUS": ".DU",
+    "HAM": ".HM",
+    "SWB": ".SG",
+    "KRX": ".KS",
+    "KOSDAQ": ".KQ",
+    "HKEX": ".HK",
+    "HK": ".HK",
+    "SSE": ".SS",
+    "SZSE": ".SZ",
+    "SGX": ".SI",
+    "LSE": ".L",
+    "TSX": ".TO",
+    "TSXV": ".V",
+    "ASX": ".AX",
+    "SIX": ".SW",
+    "MIL": ".MI",
+    "BME": ".MC",
+    "EPA": ".PA",
+    "PAR": ".PA",
+    "AMS": ".AS",
+    "BRU": ".BR",
+    "LIS": ".LS",
+}
+
+_yfinance_logging_configured = False
+
 
 def is_crypto(ticker: str) -> bool:
     """Czy ticker jest krypto (brak fundamentów)?
@@ -138,16 +175,83 @@ def is_crypto(ticker: str) -> bool:
     return False
 
 
+def configure_yfinance_logging() -> None:
+    global _yfinance_logging_configured
+    if _yfinance_logging_configured:
+        return
+    logging.getLogger("yfinance").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    _yfinance_logging_configured = True
+
+
+@contextlib.contextmanager
+def _suppress_yfinance_stderr():
+    """yfinance drukuje HTTP 404 bezpośrednio na stderr — tłumimy to przy pobieraniu."""
+    configure_yfinance_logging()
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        with contextlib.redirect_stderr(devnull):
+            yield
+
+
+def _exchange_to_yahoo_suffix(exchange: str) -> Optional[str]:
+    exch = str(exchange or "").strip().upper()
+    if not exch:
+        return None
+    if "AMSTERDAM" in exch:
+        return ".AS"
+    if "PARIS" in exch:
+        return ".PA"
+    if "BRUSSELS" in exch or "EURONEXT BR" in exch:
+        return ".BR"
+    if "LISBON" in exch:
+        return ".LS"
+    if exch.startswith("EURONEXT"):
+        if "AMSTERDAM" in exch:
+            return ".AS"
+        if "PARIS" in exch:
+            return ".PA"
+        if "BRUSSELS" in exch:
+            return ".BR"
+        return ".PA"
+    return _EXCHANGE_YAHOO_SUFFIX.get(exch)
+
+
+def _yahoo_symbol_with_suffix(symbol: str, suffix: str) -> str:
+    sym = str(symbol or "").strip().upper()
+    if not sym or not suffix:
+        return sym
+    if sym.endswith(suffix):
+        return sym
+    return f"{sym}{suffix}"
+
+
+def _bare_ticker_yahoo_suffix(symbol: str) -> Optional[str]:
+    sym = str(symbol or "").strip().upper()
+    if re.fullmatch(r"\d{6}", sym):
+        return ".KS"
+    if re.fullmatch(r"\d{4}", sym):
+        return ".HK"
+    return None
+
+
+def _lookup_yahoo_suffix(symbol: str) -> Optional[str]:
+    try:
+        from company_names import lookup_exchange
+
+        exch = lookup_exchange(symbol)
+    except Exception:  # noqa: BLE001
+        return None
+    return _exchange_to_yahoo_suffix(exch)
+
+
 def to_yahoo_symbol(ticker: str) -> Optional[str]:
     """Mapowanie tickerów configu na symbole Yahoo Finance.
 
     * Krypto → ``None`` (nie pobieramy fundamentów).
     * ``GPW:XXX`` → ``XXX.WA``.
     * ``NASDAQ:XXX`` / ``NYSE:XXX`` / ``BATS:XXX`` → ``XXX``.
-    * Inne ``EXCH:SYM`` → ``SYM`` (best effort — yahoo radzi sobie z większością
-      US/EU tickerów po samym kodzie, a my w razie ciszy traktujemy to jako
-      brak fundamentów).
-    * Plain ``XXX`` → ``XXX``.
+    * ``XETR:XXX`` / ``KRX:XXX`` / ``HKEX:XXX`` / … → ``XXX`` + sufiks giełdy Yahoo.
+    * Plain ``XXX`` → heurystyki (``000660`` → ``000660.KS``) lub lookup giełdy z TV REST.
     """
     if is_crypto(ticker):
         return None
@@ -162,11 +266,43 @@ def to_yahoo_symbol(ticker: str) -> Optional[str]:
         sym = sym.strip()
         if not sym:
             return None
-        if exch_u == "GPW":
-            return f"{sym}.WA"
-        # NASDAQ / NYSE / AMEX / BATS / OTC — yahoo używa samego symbolu
-        return sym
-    return t
+        if exch_u in _US_EXCHANGES:
+            return sym.upper()
+        suffix = _EXCHANGE_YAHOO_SUFFIX.get(exch_u) or _exchange_to_yahoo_suffix(exch_u)
+        if suffix:
+            return _yahoo_symbol_with_suffix(sym, suffix)
+        return sym.upper()
+    sym_u = t.upper()
+    bare_suffix = _bare_ticker_yahoo_suffix(sym_u)
+    if bare_suffix:
+        return _yahoo_symbol_with_suffix(sym_u, bare_suffix)
+    looked_up = _lookup_yahoo_suffix(sym_u)
+    if looked_up:
+        return _yahoo_symbol_with_suffix(sym_u, looked_up)
+    return sym_u
+
+
+def _yahoo_symbol_candidates(ticker: str) -> List[str]:
+    """Kolejność prób symboli Yahoo (primary + sensowne fallbacki)."""
+    primary = to_yahoo_symbol(ticker)
+    out: List[str] = []
+    if primary:
+        out.append(primary)
+    sym_u = str(ticker or "").strip().upper()
+    if ":" in sym_u:
+        sym_u = sym_u.split(":", 1)[1].strip().upper()
+    if not sym_u:
+        return out
+    bare_suffix = _bare_ticker_yahoo_suffix(sym_u)
+    if bare_suffix:
+        cand = _yahoo_symbol_with_suffix(sym_u, bare_suffix)
+        if cand not in out:
+            out.append(cand)
+    if primary and primary.endswith(".DE"):
+        alt = primary[:-3] + ".F"
+        if alt not in out:
+            out.append(alt)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +448,17 @@ def fundamentals_row_has_values(data: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def fundamentals_fetch_attempted(data: Optional[Dict[str, Any]]) -> bool:
+    """True gdy ticker był już pobierany (nawet bez sensownych wartości)."""
+    if not data:
+        return False
+    updated = str(data.get("Fund_Updated_At") or "").strip()
+    if updated:
+        return True
+    source = str(data.get("Fund_Source") or "").strip().lower()
+    return source in ("none", "yfinance", "tradingview", "n/a")
+
+
 def _yf_fetch(symbol: str) -> Optional[Dict[str, Optional[float]]]:
     """Czyta ``yfinance.Ticker(symbol).info`` i mapuje pola na ``Fund_*``.
 
@@ -331,14 +478,15 @@ def _yf_fetch(symbol: str) -> Optional[Dict[str, Optional[float]]]:
     _YF_IMPORT_ERROR = None
 
     try:
-        tkr = yfinance.Ticker(symbol)
-        info = getattr(tkr, "info", None)
+        with _suppress_yfinance_stderr():
+            tkr = yfinance.Ticker(symbol)
+            info = getattr(tkr, "info", None)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("yfinance Ticker(%s).info zawiódł: %s", symbol, exc)
+        logger.debug("yfinance Ticker(%s).info zawiódł: %s", symbol, exc)
         return None
 
-    if not isinstance(info, dict) or not info:
-        logger.info("yfinance Ticker(%s) zwrócił pusty info", symbol)
+    if not isinstance(info, dict) or len(info) <= 1:
+        logger.debug("yfinance Ticker(%s) bez danych (404 lub pusty info)", symbol)
         return None
 
     out: Dict[str, Optional[float]] = {}
@@ -348,6 +496,14 @@ def _yf_fetch(symbol: str) -> Optional[Dict[str, Optional[float]]]:
     if not any(v is not None for v in sanitized.values()):
         return None
     return sanitized
+
+
+def _yf_fetch_best(ticker: str) -> Optional[Dict[str, Optional[float]]]:
+    for symbol in _yahoo_symbol_candidates(ticker):
+        data = _yf_fetch(symbol)
+        if data and any(v is not None for v in data.values()):
+            return data
+    return None
 
 
 def _tv_financials_url(ticker: str) -> Optional[str]:
@@ -582,16 +738,16 @@ def fetch_fundamentals(
                     sanitized = _sanitize_fund_values({k: out.get(k) for k in FUND_KEYS})
                     for k in FUND_KEYS:
                         out[k] = sanitized.get(k)
-                    # Pusty cache (np. po nieudanym imporcie yfinance) nie blokuje
-                    # ponownych prób aż do wygaśnięcia TTL. Absurdalne wartości TV też.
                     if fundamentals_row_has_values(out):
+                        return out
+                    source = str(out.get("Fund_Source") or "").strip().lower()
+                    if source in ("none", "n/a"):
                         return out
 
     # 3) yfinance
-    yahoo_sym = to_yahoo_symbol(ticker_norm)
     yf_values: Optional[Dict[str, Optional[float]]] = None
-    if yahoo_sym:
-        yf_values = _yf_fetch(yahoo_sym)
+    if to_yahoo_symbol(ticker_norm):
+        yf_values = _yf_fetch_best(ticker_norm)
 
     used_source: Optional[str] = None
     values: Dict[str, Optional[float]] = {k: None for k in FUND_KEYS}

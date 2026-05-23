@@ -419,6 +419,46 @@ def test_get_fundamentals_for_ticker_returns_none_when_missing(tmp_path: Path):
     assert get_fundamentals_for_ticker("AAPL", path=str(tmp_path / "missing.csv")) is None
 
 
+def test_load_fundamentals_empty_file_returns_columns(tmp_path: Path):
+    from results_store import FUNDAMENTALS_COLUMNS, load_fundamentals_dataframe
+
+    empty = tmp_path / "fundamentals.csv"
+    empty.write_text("", encoding="utf-8")
+    df = load_fundamentals_dataframe(str(empty))
+    assert list(df.columns) == FUNDAMENTALS_COLUMNS
+    assert len(df) == 0
+
+
+def test_load_fundamentals_headers_only_returns_empty_rows(tmp_path: Path):
+    from results_store import FUNDAMENTALS_COLUMNS, load_fundamentals_dataframe
+
+    headers_only = tmp_path / "fundamentals.csv"
+    headers_only.write_text(",".join(FUNDAMENTALS_COLUMNS) + "\n", encoding="utf-8")
+    df = load_fundamentals_dataframe(str(headers_only))
+    assert list(df.columns) == FUNDAMENTALS_COLUMNS
+    assert len(df) == 0
+
+
+def test_save_fundamentals_row_creates_header_when_file_missing(tmp_path: Path):
+    from results_store import FUNDAMENTALS_COLUMNS, load_fundamentals_dataframe, save_fundamentals_row
+
+    path = tmp_path / "fundamentals.csv"
+    save_fundamentals_row(
+        {
+            "Ticker": "AAPL",
+            "Fund_PE": 12.0,
+            "Fund_Source": "yfinance",
+            "Fund_Updated_At": "2026-05-23T10:00:00Z",
+        },
+        path=str(path),
+    )
+    assert path.exists()
+    first_line = path.read_text(encoding="utf-8").splitlines()[0]
+    assert first_line == ",".join(FUNDAMENTALS_COLUMNS)
+    df = load_fundamentals_dataframe(str(path))
+    assert len(df) == 1
+
+
 def test_row_skipped_for_dashboard_allows_no_data_with_values():
     from results_store import normalize_served_scrape_status, row_skipped_for_dashboard
 

@@ -50,6 +50,26 @@ def test_to_yahoo_symbol_mappings():
     assert to_yahoo_symbol("BTCUSDT") is None
 
 
+def test_to_yahoo_symbol_exchange_suffixes():
+    from fundamentals import to_yahoo_symbol
+
+    assert to_yahoo_symbol("XETR:E3G1") == "E3G1.DE"
+    assert to_yahoo_symbol("KRX:000660") == "000660.KS"
+    assert to_yahoo_symbol("HKEX:0700") == "0700.HK"
+    assert to_yahoo_symbol("000660") == "000660.KS"
+    assert to_yahoo_symbol("0016") == "0016.HK"
+
+
+def test_to_yahoo_symbol_uses_lookup_exchange(monkeypatch):
+    from fundamentals import to_yahoo_symbol
+
+    monkeypatch.setattr(
+        "fundamentals._lookup_yahoo_suffix",
+        lambda _sym: ".F",
+    )
+    assert to_yahoo_symbol("E3G1") == "E3G1.F"
+
+
 # ---------------------------------------------------------------------------
 # _yf_fetch
 # ---------------------------------------------------------------------------
@@ -227,8 +247,8 @@ def test_fetch_fundamentals_cache_miss_after_ttl(tmp_path, monkeypatch):
     assert second["Fund_PE"] == pytest.approx(11.0)
 
 
-def test_fetch_fundamentals_empty_cache_not_hit_within_ttl(tmp_path, monkeypatch):
-    """Pusty wpis cache (source=none) nie blokuje ponownego pobrania w TTL."""
+def test_fetch_fundamentals_empty_cache_hit_within_ttl(tmp_path, monkeypatch):
+    """Pusty wpis cache (source=none) nie woła yfinance ponownie w TTL."""
     import fundamentals as mod
 
     cache = tmp_path / "cache.json"
@@ -251,7 +271,6 @@ def test_fetch_fundamentals_empty_cache_not_hit_within_ttl(tmp_path, monkeypatch
 
     monkeypatch.setattr(mod, "_yf_fetch", _fake_yf)
 
-    # Zapisz pusty wpis w cache (symulacja nieudanego refresh).
     cache.write_text(
         json.dumps(
             {
@@ -274,6 +293,57 @@ def test_fetch_fundamentals_empty_cache_not_hit_within_ttl(tmp_path, monkeypatch
     )
 
     data = fetch_fundamentals_local(mod, "AAPL", cache, ttl_hours=24)
+    assert data["Fund_Source"] == "none"
+    assert calls == []
+
+
+def test_fetch_fundamentals_empty_cache_retries_with_force_refresh(tmp_path, monkeypatch):
+    """force_refresh omija pusty cache w TTL."""
+    import fundamentals as mod
+
+    cache = tmp_path / "cache.json"
+    fake_clock = {"now": 1000.0}
+    monkeypatch.setattr(mod.time, "time", lambda: fake_clock["now"])
+
+    calls = []
+
+    def _fake_yf(symbol):
+        calls.append(symbol)
+        return {
+            "Fund_PE": 10.0,
+            "Fund_PB": None,
+            "Fund_EV_EBITDA": None,
+            "Fund_ROE": None,
+            "Fund_NetMargin": None,
+            "Fund_DE": None,
+            "Fund_FCF": None,
+        }
+
+    monkeypatch.setattr(mod, "_yf_fetch", _fake_yf)
+    cache.write_text(
+        json.dumps(
+            {
+                "AAPL": {
+                    "Ticker": "AAPL",
+                    "Fund_PE": None,
+                    "Fund_PB": None,
+                    "Fund_EV_EBITDA": None,
+                    "Fund_ROE": None,
+                    "Fund_NetMargin": None,
+                    "Fund_DE": None,
+                    "Fund_FCF": None,
+                    "Fund_Source": "none",
+                    "Fund_Updated_At": "2026-05-22T10:00:00Z",
+                    "_cached_at": fake_clock["now"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    data = fetch_fundamentals_local(
+        mod, "AAPL", cache, ttl_hours=24, force_refresh=True
+    )
     assert data["Fund_Source"] == "yfinance"
     assert data["Fund_PE"] == pytest.approx(10.0)
     assert calls == ["AAPL"]
@@ -284,11 +354,27 @@ def test_fetch_fundamentals_yfinance_then_none_records_source_none(tmp_path, mon
     import fundamentals as mod
 
     cache = tmp_path / "cache.json"
-    monkeypatch.setattr(mod, "_yf_fetch", lambda _sym: None)
+    monkeypatch.setattr(mod, "_yf_fetch_best", lambda _sym: None)
     data = fetch_fundamentals_local(mod, "GPW:UNKNOWN", cache)
     assert data["Fund_Source"] == "none"
     for key in mod.FUND_KEYS:
         assert data[key] is None
+
+
+def test_fetch_fundamentals_bad_symbol_returns_none_without_error(tmp_path, monkeypatch):
+    import fundamentals as mod
+
+    cache = tmp_path / "cache.json"
+
+    def _raise_on_fetch(_sym):
+        raise RuntimeError("should not propagate")
+
+    monkeypatch.setattr(mod, "_yf_fetch_best", lambda _sym: None)
+    monkeypatch.setattr(mod, "_yf_fetch", _raise_on_fetch)
+
+    data = mod.fetch_fundamentals("NOTAREALSYMBOL999", cache_path=cache, force_refresh=True)
+    assert data["Fund_Source"] == "none"
+    assert data["Ticker"] == "NOTAREALSYMBOL999"
 
 
 def test_fetch_fundamentals_persists_yfinance_values(tmp_path, monkeypatch):
@@ -365,13 +451,18 @@ def test_check_yfinance_available_when_import_fails(monkeypatch):
 
 
 def test_fundamentals_row_has_values():
-    from fundamentals import fundamentals_row_has_values
+    from fundamentals import fundamentals_fetch_attempted, fundamentals_row_has_values
 
     assert fundamentals_row_has_values({"Fund_PE": 10.0, "Fund_Source": "yfinance"}) is True
     assert fundamentals_row_has_values({"Fund_PE": 10.0, "Fund_Source": "none"}) is True
     assert fundamentals_row_has_values({"Fund_Source": "yfinance"}) is False
     assert fundamentals_row_has_values({"Fund_Source": "none"}) is False
     assert fundamentals_row_has_values(None) is False
+    assert fundamentals_fetch_attempted(
+        {"Fund_Source": "none", "Fund_Updated_At": "2026-05-22T10:00:00Z"}
+    ) is True
+    assert fundamentals_fetch_attempted({"Fund_Source": "none"}) is True
+    assert fundamentals_fetch_attempted(None) is False
     # Absurdalne P/E z TV nie liczy się jako sensowne dane.
     assert fundamentals_row_has_values(
         {"Fund_PE": 2.0132014201520162e51, "Fund_Source": "tradingview"}
