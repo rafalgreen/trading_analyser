@@ -37,6 +37,72 @@ Po zapisaniu reguła powinna pojawić się na liście jako pattern **`main`**.
 
 ---
 
+## Admin vs współpracownicy
+
+Model uprawnień i review dla **rafalgreen/trading_analyser**:
+
+| Rola w repo | Uprawnienia GitHub | Review / merge |
+|-------------|-------------------|----------------|
+| **Właściciel (admin)** — `@rafalgreen` | **Admin** | Może **sam zatwierdzić** własny PR i zmergować na `main` (Code Owner + autor). |
+| **Współpracownik** | **Write** (nie Admin) | PR wymaga **zatwierdzenia od Code Ownera** (`@rafalgreen`); sam nie może zatwierdzić własnego PR jako wystarczającego review. |
+
+### Plik CODEOWNERS
+
+W repozytorium jest plik [`.github/CODEOWNERS`](../.github/CODEOWNERS):
+
+```
+# All changes require review from repository owner
+* @rafalgreen
+```
+
+Wzorzec `*` oznacza, że **każda zmiana** w repo wymaga review od właściciela. GitHub automatycznie przypisuje `@rafalgreen` jako wymaganego recenzenta na PR.
+
+### Reguła gałęzi `main` — zalecane checkboxy
+
+W **Settings** → **Branches** → edytuj regułę dla **`main`** (lub utwórz nową) i włącz:
+
+| Cel | Nazwa w UI |
+|-----|------------|
+| Wymuszenie PR | **Require a pull request before merging** |
+| Jedno zatwierdzenie | **Require approvals** = **1** |
+| Review od Code Ownera | **Require review from Code Owners** |
+| Admin może zatwierdzić własny PR | **Allow authors to approve their own pull requests** — **zaznaczone** |
+| Brak bypass dla współpracowników | **Do not allow bypassing the above settings** — współpracownicy (Write) nie mogą omijać reguł; admin merge po własnym approve jako Code Owner |
+| Blokada force push | **Block force pushes** |
+| Blokada usuwania | **Block deletions** |
+
+**Uwaga:** **Do not allow bypassing the above settings** blokuje omijanie reguł przez osoby bez uprawnień admina. Właściciel repo (Admin) może nadal merge’ować PR po własnym approve — to zamierzony workflow dla admina.
+
+### Zaproszenie współpracowników
+
+1. **Settings** → **Collaborators** (lub **Manage access**).  
+2. Dodaj użytkownika z rolą **Write** — **nie** **Admin**.  
+3. Współpracownik tworzy branch → PR → czeka na **Approve** od `@rafalgreen` → merge.
+
+### Workflow
+
+```mermaid
+flowchart LR
+  A[Admin: branch → PR] --> B[Self-approve jako Code Owner]
+  B --> C[Merge na main]
+  D[Współpracownik: branch → PR] --> E[Czeka na approve @rafalgreen]
+  E --> F[Owner approve → merge]
+```
+
+- **Admin (`@rafalgreen`):** `git checkout -b feature/...` → commit → push → PR → **Approve** własnego PR → **Merge**.  
+- **Współpracownik (Write):** ten sam flow, ale merge możliwy dopiero po **Approve** od Code Ownera.
+
+### Rulesets — opcjonalna lista bypass tylko dla adminów
+
+Jeśli używasz **Rulesets** zamiast klasycznej reguły:
+
+1. **Settings** → **Rules** → **Rulesets** → edytuj ruleset dla **`main`**.  
+2. Włącz te same reguły co wyżej (PR, 1 approval, Code Owners, block force push/deletions).  
+3. W **Bypass list** / **Grant bypass permissions** możesz dodać **tylko** konto admina (`@rafalgreen`) lub rolę **Admin** — wtedy admin może w razie potrzeby ominąć reguły; **współpracownicy (Write) nie powinni być na liście bypass**.  
+4. Dla współpracowników bez bypass: PR + approve Code Ownera pozostaje obowiązkowy.
+
+---
+
 ## Blokada także dla administratorów
 
 **Tak — można zablokować nawet admina repo**, żeby nie mógł pushować bezpośrednio na `main` i musiał iść przez PR.
@@ -186,4 +252,4 @@ Wymaga zainstalowanego [GitHub CLI](https://cli.github.com/) i `gh auth login`.
 
 ## Status
 
-Reguła aktywna od 2026-05-23 (force push + deletions). Aby zablokować także admina i wymusić PR, włącz ustawienia z sekcji **Blokada także dla administratorów**.
+Reguła aktywna od 2026-05-23 (force push + deletions). Plik **CODEOWNERS** (`* @rafalgreen`) wymaga review właściciela na każdy PR. Pełny workflow admin vs współpracownicy: sekcja **Admin vs współpracownicy**. Aby wymusić PR dla wszystkich, włącz ustawienia z sekcji **Blokada także dla administratorów**.
