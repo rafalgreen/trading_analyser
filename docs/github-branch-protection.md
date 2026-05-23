@@ -86,3 +86,7 @@ EOF
 ```
 
 Wymaga zainstalowanego [GitHub CLI](https://cli.github.com/) i `gh auth login`.
+
+## Status
+
+Reguła aktywna od 2026-05-23.
