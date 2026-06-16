@@ -77,6 +77,33 @@ Najczęściej zmieniane:
 - `cdp_auto_quit_browser: false` → nie zamykaj automatycznie Brave; sam dbasz o to, żeby Brave nie działał, gdy włączasz scraper.
 - `cdp_user_data_dir: "/ścieżka/do/profilu"` → ręczny override.
 
+#### Wydajność scrapera (`scraper_performance`)
+
+Sekcja w `scraper_config.json` kontroluje opóźnienia i kolejność pętli scrapera:
+
+```json
+"scraper_performance": {
+  "mode": "normal",
+  "loop_mode": "ticker_first",
+  "max_indicators_on_chart": 2,
+  "keyboard_delay_ms": 30,
+  "max_compute_wait_s": 6,
+  "min_compute_wait_s": 0.5,
+  "poll_interval_s": 0.2,
+  "symbol_search_wait_ms": 4500
+}
+```
+
+| Pole | Opis |
+|------|------|
+| `mode` | `normal` (domyślne sleepy) lub `fast` (krótsze opóźnienia, ~30–40% szybciej) |
+| `loop_mode` | `ticker_first` — partie wskaźników na wykresie, jedno przełączenie tickera na partię (zalecane); `indicator_first` — stary tryb (faza wskaźnika × tickery) |
+| `max_indicators_on_chart` | Limit wskaźników na wykresie TV — **2** dla planu Free, **3+** dla płatnego |
+| `keyboard_delay_ms` | Opóźnienie między znakami przy wpisywaniu tickera/interwału (domyślnie 30 w fast) |
+| `max_compute_wait_s` / `min_compute_wait_s` | Adaptive wait na legendę wskaźnika zamiast stałego 4 s sleep |
+
+Przy ~174 tickerach i **TV Free (max 2 wskaźniki)** tryb `ticker_first` dzieli PCA+HTS i MacD na **2 partie** → ~348 przełączeń tickera zamiast 522. Razem z `fast`: ok. **1,5–2 h** (szacunek). Fundamenty podczas scrape korzystają z cache 24 h i HTTP fallback (bez nawigacji z wykresu).
+
 Możesz też wymusić ENV: `TV_AUTO_START_CDP=0` (wyłącz auto-start) / `TV_AUTO_START_CDP=1` (włącz).
 
 Jeśli chcesz uruchomić przeglądarkę ręcznie, użyj jednej z opcji poniżej.

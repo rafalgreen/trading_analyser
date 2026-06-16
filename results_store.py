@@ -695,6 +695,107 @@ def format_scrape_error_message(row_data: dict, indicators: Iterable[str]) -> st
     )
 
 
+def upsert_results_row_in_df(
+    df_existing: Optional[pd.DataFrame], row_data: dict
+) -> pd.DataFrame:
+    """Upsert jednego wiersza po (Ticker, Interval) w DataFrame (in-memory)."""
+    row_data = dict(row_data)
+    for c in CSV_META_COLUMNS:
+        row_data.setdefault(c, "")
+
+    if df_existing is None or df_existing.empty:
+        df_out = pd.DataFrame([row_data])
+        return df_out[order_result_columns(df_out.columns)]
+
+    df_existing = ensure_meta_columns(df_existing)
+    df_existing = df_existing.astype(object)
+    mask = (df_existing["Ticker"] == row_data["Ticker"]) & (
+        df_existing["Interval"] == row_data["Interval"]
+    )
+    if mask.any():
+        for col, val in row_data.items():
+            if col not in df_existing.columns:
+                df_existing[col] = ""
+            df_existing.loc[mask, col] = val
+    else:
+        df_new_row = pd.DataFrame([row_data])
+        for c in df_existing.columns:
+            if c not in df_new_row.columns:
+                df_new_row[c] = ""
+        for c in df_new_row.columns:
+            if c not in df_existing.columns:
+                df_existing[c] = ""
+        df_existing = pd.concat([df_existing, df_new_row], ignore_index=True)
+    return df_existing[order_result_columns(df_existing.columns)]
+
+
+def write_results_dataframe(current_run_file: str, df: pd.DataFrame) -> None:
+    """Zapisuje cały DataFrame wyników do pliku CSV."""
+    if df is None or df.empty:
+        return
+    df = ensure_meta_columns(df)
+    df = df[order_result_columns(df.columns)]
+    df.to_csv(current_run_file, index=False, mode="w", encoding="utf-8")
+
+
+class ResultsBuffer:
+    """Bufor in-memory dla wyników scrapera — mniej odczytów/zapisów dysku."""
+
+    def __init__(self, csv_path: str) -> None:
+        self.csv_path = csv_path
+        self._dirty = False
+        if os.path.exists(csv_path):
+            self._df = load_results_dataframe(csv_path)
+            if self._df is None:
+                self._df = pd.DataFrame(columns=CSV_META_COLUMNS)
+        else:
+            self._df = pd.DataFrame(columns=CSV_META_COLUMNS)
+
+    @property
+    def dataframe(self) -> pd.DataFrame:
+        return self._df
+
+    def upsert(self, row_data: dict) -> None:
+        self._df = upsert_results_row_in_df(self._df, row_data)
+        self._dirty = True
+
+    def flush(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            write_results_dataframe(self.csv_path, self._df)
+            self._dirty = False
+        except Exception as e:
+            logger.error("Błąd zapisu bufora CSV %s: %s", self.csv_path, e)
+            raise
+
+    def record_skipped(self, ticker: str, reason: str) -> None:
+        row_base = {
+            "Ticker": ticker,
+            "Company_Name": "\u2014",
+            "Exchange": "",
+            "Current_Price": "",
+            "Interval": "-",
+            "Scrape_Status": "SKIPPED",
+            "Scrape_Error": reason,
+        }
+        df = self._df
+        if df is not None and not df.empty:
+            df = ensure_meta_columns(df)
+            if "Scrape_Status" in df.columns:
+                mask_skip = (df["Ticker"].astype(str) == ticker) & (
+                    df["Scrape_Status"].astype(str) == "SKIPPED"
+                )
+                df = df[~mask_skip]
+            for col in df.columns:
+                row_base.setdefault(col, "")
+            ordered = {c: row_base.get(c, "") for c in df.columns}
+            self._df = pd.concat([df, pd.DataFrame([ordered])], ignore_index=True)
+        else:
+            self._df = pd.DataFrame([row_base])
+        self._dirty = True
+
+
 def save_results_row(current_run_file: str, row_data: dict) -> None:
     """Upsert jednego wiersza po (Ticker, Interval). Zawsze z kolumnami Scrape_* w nag\u0142\u00f3wku."""
     row_data = dict(row_data)
@@ -709,27 +810,8 @@ def save_results_row(current_run_file: str, row_data: dict) -> None:
 
     try:
         df_existing = pd.read_csv(current_run_file, encoding="utf-8", on_bad_lines="skip")
-        df_existing = ensure_meta_columns(df_existing)
-        df_existing = df_existing.astype(object)
-        mask = (df_existing["Ticker"] == row_data["Ticker"]) & (
-            df_existing["Interval"] == row_data["Interval"]
-        )
-        if mask.any():
-            for col, val in row_data.items():
-                if col not in df_existing.columns:
-                    df_existing[col] = ""
-                df_existing.loc[mask, col] = val
-        else:
-            df_new_row = pd.DataFrame([row_data])
-            for c in df_existing.columns:
-                if c not in df_new_row.columns:
-                    df_new_row[c] = ""
-            for c in df_new_row.columns:
-                if c not in df_existing.columns:
-                    df_existing[c] = ""
-            df_existing = pd.concat([df_existing, df_new_row], ignore_index=True)
-        df_existing = df_existing[order_result_columns(df_existing.columns)]
-        df_existing.to_csv(current_run_file, index=False, encoding="utf-8")
+        df_written = upsert_results_row_in_df(df_existing, row_data)
+        write_results_dataframe(current_run_file, df_written)
     except Exception as e:
         logger.error(
             "B\u0142\u0105d bezpiecznego zapisu (update) pliku CSV: %s. Zapisuj\u0119 kopi\u0119 awaryjn\u0105 obok.",
