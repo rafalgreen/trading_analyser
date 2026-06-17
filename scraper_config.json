@@ -216,6 +216,16 @@
   "cdp_user_data_dir": "",
   "cdp_profile_directory": "Default",
   "cdp_startup_url": "https://www.tradingview.com/chart/",
+  "scraper_performance": {
+    "mode": "normal",
+    "loop_mode": "ticker_first",
+    "max_indicators_on_chart": 2,
+    "keyboard_delay_ms": 30,
+    "max_compute_wait_s": 6,
+    "min_compute_wait_s": 0.5,
+    "poll_interval_s": 0.2,
+    "symbol_search_wait_ms": 4500
+  },
   "exchange_prefixes": [
     "GPW"
   ]
