@@ -1,6 +1,6 @@
 import pandas as pd
 
-from tv_scraper import record_skipped_ticker
+from results_store import record_skipped_ticker
 
 
 def test_record_skipped_ticker_writes_row(tmp_path):

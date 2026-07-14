@@ -14,7 +14,7 @@
     <!-- Phosphor Icons for modern iconography -->
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=14">
+    <link rel="stylesheet" href="styles.css?v=15">
 </head>
 <body>
     <div id="global-scrape-banner" class="global-scrape-banner" aria-live="polite">
@@ -208,6 +208,7 @@
                             <button type="button" class="filter-chip" data-filter-strategy="cross_priority" title="Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem; PCA jako tie-breaker (≥60 buy, ≤40 sell). Fallback na trend gdy brak crossów.">Crossy (priorytet)</button>
                             <button type="button" class="filter-chip" data-filter-strategy="pca_buckets" title="Tylko PCA: ≤20 Strong Buy, 20–40 Buy, 40–60 Neutral, 60–80 Sell, ≥80 Strong Sell.">PCA (kosze)</button>
                             <button type="button" class="filter-chip" data-filter-strategy="scoring" title="HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma ∈ [−3..+3] mapowana na 5 koszyków.">Punktowy</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="band_touch" title="Trend Wzrostowy + cena dotyka/prawie dotyka czerwonej wstęgi (HTS Slow) + PCA niski → KUP. Trend Spadkowy + dotknięcie wstęgi od dołu → SPRZEDAJ. Interwały D i W.">Wstęga (touch)</button>
                         </div>
                         <div class="filter-separator"></div>
                         <div class="filter-group">
@@ -482,6 +483,7 @@
                 <span class="card-last-refresh" data-role="last-refresh"></span>
             </h3>
             <div class="interval-missing hidden" data-role="interval-missing"></div>
+            <div class="band-touch-badge hidden" data-role="band-touch"></div>
             
             <!-- HTS Section -->
             <div class="indicator-section">
@@ -682,6 +684,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=26"></script>
+    <script src="app.js?v=27"></script>
 </body>
 </html>

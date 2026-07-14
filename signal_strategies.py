@@ -9,9 +9,13 @@ Identyfikatory strategii i ich semantyka są spójne z UI (filtr/badże).
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
-from results_store import parse_pca_number, row_has_all_configured_indicators
+from results_store import (
+    parse_legend_number,
+    parse_pca_number,
+    row_has_all_configured_indicators,
+)
 
 
 SIGNAL_STRONG_BUY = "strong buy"
@@ -208,11 +212,152 @@ def strategy_scoring(
     return _bucket_score(score)
 
 
+# ---------------------------------------------------------------------------
+# Dotknięcie czerwonej wstęgi (HTS Slow band) + strategia band_touch
+# ---------------------------------------------------------------------------
+
+# Progi domyślne strategii band_touch (nadpisywalne w scraper_config.json →
+# sekcja "signals").
+BAND_TOUCH_DEFAULTS: Dict[str, Any] = {
+    # „Prawie dotknięcie": odległość ceny od krawędzi wstęgi ≤ X% ceny.
+    "tolerance_pct": 2.0,
+    # „PCA prawie niebieskie" (niski risk) — warunek kupna.
+    "buy_pca_max": 35.0,
+    # Silne przegrzanie PCA wzmacnia sygnał sprzedaży.
+    "sell_pca_min": 60.0,
+    # Interwały, na których strategia generuje sygnały.
+    "intervals": ("1D", "1W"),
+}
+
+BAND_TOUCH_STATE_TOUCH = "touch"
+BAND_TOUCH_STATE_NEAR = "near"
+BAND_TOUCH_STATE_NONE = "none"
+
+
+def _pca_color_is_blueish(color: Optional[str]) -> bool:
+    """Czy kolor CSS ``rgb(...)`` z legendy PCA jest niebieskawy (niski risk)."""
+    if not color:
+        return False
+    import re as _re
+
+    m = _re.search(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", color)
+    if not m:
+        return False
+    r, g, b = (int(m.group(i)) for i in (1, 2, 3))
+    return b > 120 and b > r and b >= g
+
+
+def compute_band_touch(
+    row: Dict[str, object], *, tolerance_pct: float = 2.0
+) -> Dict[str, Any]:
+    """Wskaźnik „dotknięcie czerwonej wstęgi" (HTS Slow band) dla wiersza.
+
+    Zwraca dict:
+      - ``state``: ``"touch"`` (cena wewnątrz wstęgi / na krawędzi),
+        ``"near"`` (w odległości ≤ tolerance_pct% ceny od najbliższej
+        krawędzi), ``"none"`` (daleko) albo ``""`` gdy brak danych
+        (cena/wstęga nieparsowalne).
+      - ``distance_pct``: znormalizowana odległość od najbliższej krawędzi
+        w % ceny (0.0 przy dotknięciu; ``None`` gdy brak danych).
+      - ``side``: ``"above"`` (cena nad wstęgą — typowe dla trendu
+        wzrostowego), ``"below"`` (pod wstęgą), ``"inside"`` albo ``""``.
+    """
+    empty = {"state": "", "distance_pct": None, "side": ""}
+    price = parse_legend_number(row.get("Current_Price"))
+    slow_high = parse_legend_number(row.get("HTS Panel_Slow_High"))
+    slow_low = parse_legend_number(row.get("HTS Panel_Slow_Low"))
+    if price is None or price <= 0:
+        return empty
+    if slow_high is None and slow_low is None:
+        return empty
+    if slow_high is None:
+        slow_high = slow_low
+    if slow_low is None:
+        slow_low = slow_high
+    if slow_low > slow_high:
+        slow_low, slow_high = slow_high, slow_low
+
+    if slow_low <= price <= slow_high:
+        return {
+            "state": BAND_TOUCH_STATE_TOUCH,
+            "distance_pct": 0.0,
+            "side": "inside",
+        }
+
+    if price > slow_high:
+        distance = (price - slow_high) / price * 100.0
+        side = "above"
+    else:
+        distance = (slow_low - price) / price * 100.0
+        side = "below"
+
+    state = (
+        BAND_TOUCH_STATE_NEAR
+        if distance <= float(tolerance_pct)
+        else BAND_TOUCH_STATE_NONE
+    )
+    return {"state": state, "distance_pct": round(distance, 2), "side": side}
+
+
+def strategy_band_touch(
+    row: Dict[str, object], *, params: Optional[Dict[str, Any]] = None
+) -> str:
+    """Wstęga czerwona (HTS Slow) jako strefa wejścia/wyjścia.
+
+    KUP: trend HTS Wzrostowy + cena dotyka (lub prawie dotyka) czerwonej
+    wstęgi od góry + PCA Risk niski („prawie niebieski", ≤ buy_pca_max).
+    Dotknięcie (nie tylko zbliżenie) → Strong Buy.
+
+    SPRZEDAJ (odwrotność): trend HTS Spadkowy + cena dotyka / prawie dotyka
+    czerwonej wstęgi od dołu (wstęga działa jak opór). Dotknięcie + PCA
+    wysokie (≥ sell_pca_min) → Strong Sell.
+
+    Sygnały tylko na interwałach z ``intervals`` (domyślnie 1D i 1W) —
+    zgodnie z założeniem „D1 lub W1 musi być w trendzie".
+    """
+    p = dict(BAND_TOUCH_DEFAULTS)
+    if params:
+        p.update({k: v for k, v in params.items() if v is not None})
+
+    interval = str(row.get("Interval") or "").strip().upper()
+    allowed = {str(iv).strip().upper() for iv in (p.get("intervals") or ())}
+    if allowed and interval and interval not in allowed:
+        return ""
+
+    trend = _trend(row.get("HTS Panel_Trend"))
+    touch = compute_band_touch(row, tolerance_pct=float(p["tolerance_pct"]))
+    state = touch["state"]
+    if trend is None or not state:
+        return ""
+    if state == BAND_TOUCH_STATE_NONE:
+        return SIGNAL_NEUTRAL
+
+    pca_raw = row.get("PCA_Values") or row.get("PCA_Value")
+    pca_value, pca_color = parse_pca_number(pca_raw)
+
+    if trend == "up":
+        pca_low = (
+            pca_value is not None and pca_value <= float(p["buy_pca_max"])
+        ) or (pca_value is None and _pca_color_is_blueish(pca_color))
+        if not pca_low:
+            return SIGNAL_NEUTRAL
+        if state == BAND_TOUCH_STATE_TOUCH:
+            return SIGNAL_STRONG_BUY
+        return SIGNAL_BUY
+
+    # trend == "down": odwrotność — wstęga jako opór, dotknięcie = sprzedaż.
+    pca_high = pca_value is not None and pca_value >= float(p["sell_pca_min"])
+    if state == BAND_TOUCH_STATE_TOUCH and pca_high:
+        return SIGNAL_STRONG_SELL
+    return SIGNAL_SELL
+
+
 STRATEGIES: Dict[str, Callable[[Dict[str, object]], str]] = {
     "trend_only": strategy_trend_only,
     "cross_priority": strategy_cross_priority,
     "pca_buckets": strategy_pca_buckets,
     "scoring": strategy_scoring,
+    "band_touch": strategy_band_touch,
 }
 
 STRATEGY_LABELS: Dict[str, str] = {
@@ -220,19 +365,33 @@ STRATEGY_LABELS: Dict[str, str] = {
     "cross_priority": "Crossy (priorytet)",
     "pca_buckets": "PCA (kosze)",
     "scoring": "Punktowy",
+    "band_touch": "Wstęga (touch)",
 }
 
 
+# Strategie liczone nawet przy niekompletnym wierszu — mają własne wymagania
+# danych (band_touch nie używa MacD, więc jego brak nie powinien blokować).
+_GATE_EXEMPT_STRATEGIES = frozenset({"band_touch"})
+
+
 def compute_signals(
-    row: Dict[str, object], *, indicators: Optional[Iterable[str]] = None
+    row: Dict[str, object],
+    *,
+    indicators: Optional[Iterable[str]] = None,
+    band_touch_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """Zwraca słownik ``{strategy_id: signal}`` dla wszystkich strategii."""
-    if not row_signals_allowed(row, indicators):
-        return {name: "" for name in STRATEGIES}
+    allowed = row_signals_allowed(row, indicators)
     out: Dict[str, str] = {}
     for name, fn in STRATEGIES.items():
+        if not allowed and name not in _GATE_EXEMPT_STRATEGIES:
+            out[name] = ""
+            continue
         try:
-            out[name] = fn(row) or ""
+            if name == "band_touch":
+                out[name] = strategy_band_touch(row, params=band_touch_params) or ""
+            else:
+                out[name] = fn(row) or ""
         except Exception:
             out[name] = ""
     return out

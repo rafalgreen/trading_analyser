@@ -1,5 +1,7 @@
 from signal_strategies import (
+    compute_band_touch,
     compute_signals,
+    strategy_band_touch,
     strategy_cross_priority,
     strategy_pca_buckets,
     strategy_scoring,
@@ -112,6 +114,7 @@ def test_compute_signals_returns_all_strategies():
         "cross_priority",
         "pca_buckets",
         "scoring",
+        "band_touch",
     }
     assert out["trend_only"] == "strong buy"  # 2× Wzrostowy, PCA<=40
     assert out["scoring"] == "strong buy"  # +1 +1 +1 (PCA<=40) = 3
@@ -137,3 +140,117 @@ def test_compute_signals_requires_macd_line_not_trend_only():
     indicators = ["PCA", "HTS Panel", "MacD"]
     out = compute_signals(row, indicators=indicators)
     assert all(v == "" for v in out.values())
+
+
+# ---------------------------------------------------------------------------
+# Band touch (dotknięcie czerwonej wstęgi HTS Slow)
+# ---------------------------------------------------------------------------
+
+
+def _band_row(
+    price: str,
+    slow_high: str,
+    slow_low: str,
+    hts_trend: str = "Wzrostowy",
+    pca: str = "25.0",
+    interval: str = "1D",
+):
+    row = _row(hts_trend=hts_trend, pca=pca)
+    row["Current_Price"] = price
+    row["HTS Panel_Slow_High"] = slow_high
+    row["HTS Panel_Slow_Low"] = slow_low
+    row["Interval"] = interval
+    return row
+
+
+def test_band_touch_inside_band_is_touch():
+    out = compute_band_touch(_band_row("100", "101 (Czerwony)", "98 (Czerwony)"))
+    assert out["state"] == "touch"
+    assert out["side"] == "inside"
+    assert out["distance_pct"] == 0.0
+
+
+def test_band_touch_near_above_within_tolerance():
+    out = compute_band_touch(_band_row("101.5", "100", "97"), tolerance_pct=2.0)
+    assert out["state"] == "near"
+    assert out["side"] == "above"
+    assert out["distance_pct"] <= 2.0
+
+
+def test_band_touch_far_above_is_none():
+    out = compute_band_touch(_band_row("120", "100", "97"), tolerance_pct=2.0)
+    assert out["state"] == "none"
+    assert out["side"] == "above"
+
+
+def test_band_touch_polish_and_us_number_formats():
+    out = compute_band_touch(
+        _band_row("77 613,93", "77,613.93 (Niebieski)", "74 000,00")
+    )
+    assert out["state"] == "touch"
+
+
+def test_band_touch_empty_without_price_or_band():
+    assert compute_band_touch(_band_row("", "100", "97"))["state"] == ""
+    assert compute_band_touch(_band_row("100", "", ""))["state"] == ""
+
+
+def test_strategy_band_touch_strong_buy_uptrend_touch_low_pca():
+    r = _band_row("100", "101", "98", hts_trend="Wzrostowy", pca="25.0")
+    assert strategy_band_touch(r) == "strong buy"
+
+
+def test_strategy_band_touch_buy_uptrend_near_low_pca():
+    r = _band_row("101.5", "100", "97", hts_trend="Wzrostowy", pca="30.0")
+    assert strategy_band_touch(r) == "buy"
+
+
+def test_strategy_band_touch_neutral_when_pca_not_low():
+    r = _band_row("100", "101", "98", hts_trend="Wzrostowy", pca="55.0")
+    assert strategy_band_touch(r) == "neutral"
+
+
+def test_strategy_band_touch_sell_downtrend_near_band_from_below():
+    r = _band_row("99", "102", "100", hts_trend="Spadkowy", pca="50.0")
+    out = strategy_band_touch(r)
+    assert out == "sell"
+
+
+def test_strategy_band_touch_strong_sell_downtrend_touch_high_pca():
+    r = _band_row("101", "102", "100", hts_trend="Spadkowy", pca="70.0")
+    assert strategy_band_touch(r) == "strong sell"
+
+
+def test_strategy_band_touch_skips_monthly_interval():
+    r = _band_row("100", "101", "98", interval="1M")
+    assert strategy_band_touch(r) == ""
+
+
+def test_strategy_band_touch_weekly_interval_allowed():
+    r = _band_row("100", "101", "98", interval="1W")
+    assert strategy_band_touch(r) == "strong buy"
+
+
+def test_strategy_band_touch_neutral_when_far_from_band():
+    r = _band_row("150", "101", "98", hts_trend="Wzrostowy", pca="20.0")
+    assert strategy_band_touch(r) == "neutral"
+
+
+def test_strategy_band_touch_computed_even_without_macd():
+    """band_touch nie używa MacD — brak MacD_Line nie blokuje sygnału."""
+    r = _band_row("100", "101", "98", hts_trend="Wzrostowy", pca="25.0")
+    indicators = ["PCA", "HTS Panel", "MacD"]
+    out = compute_signals(r, indicators=indicators)
+    assert out["band_touch"] == "strong buy"
+    assert out["scoring"] == ""  # klasyczne strategie wciąż gate'owane
+
+
+def test_strategy_band_touch_custom_params():
+    r = _band_row("103", "100", "97", hts_trend="Wzrostowy", pca="40.0")
+    # Domyślnie: distance 3% > 2% tolerancji → neutral
+    assert strategy_band_touch(r) == "neutral"
+    # Luźniejsze progi: tolerance 4% i PCA max 45 → buy
+    out = strategy_band_touch(
+        r, params={"tolerance_pct": 4.0, "buy_pca_max": 45.0}
+    )
+    assert out == "buy"

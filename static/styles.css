@@ -2931,6 +2931,36 @@ input[type="text"]:focus {
     margin-right: 4px;
 }
 
+/* Band touch badge — dotknięcie czerwonej wstęgi (HTS Slow band) */
+.band-touch-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 2px 0 10px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1.35;
+    background: rgba(148, 163, 184, 0.10);
+    border: 1px solid rgba(148, 163, 184, 0.30);
+    color: var(--text-secondary, #94a3b8);
+}
+.band-touch-badge.hidden { display: none; }
+.band-touch-badge.band-touch-buy {
+    background: rgba(16, 185, 129, 0.10);
+    border-color: rgba(16, 185, 129, 0.40);
+    color: #34d399;
+}
+.band-touch-badge.band-touch-sell {
+    background: rgba(239, 68, 68, 0.10);
+    border-color: rgba(239, 68, 68, 0.40);
+    color: #f87171;
+}
+.band-touch-badge.band-touch-touch {
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.15);
+}
+
 /* Indicator section dimmed when it has no data */
 .indicator-section.no-data {
     opacity: 0.55;

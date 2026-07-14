@@ -538,6 +538,84 @@ def test_results_annotates_missing_indicators(client, app_env, monkeypatch):
     assert row.get("All_Indicators_Missing") is True
 
 
+# --- Band touch annotation in /api/results ---------------------------------
+
+def test_results_annotates_band_touch(client, app_env, monkeypatch):
+    """Wiersz z trendem wzrostowym, ceną na czerwonej wstędze i niskim PCA →
+    Band_Touch_State=touch i Computed_Signal_band_touch=strong buy."""
+    m, res, _dat = app_env
+    import json as _json
+    cfg_path = res.parent / "scraper_config.json"
+    cfg_path.write_text(
+        _json.dumps({
+            "tickers": ["WMT"],
+            "intervals": ["1D"],
+            "indicators": ["PCA", "HTS Panel"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+
+    date_id = "2026-07-14"
+    path = res / f"tradingview_results_{date_id}.csv"
+    header = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,"
+        "HTS Panel_Trend,HTS Panel_Slow_High,HTS Panel_Slow_Low,PCA_Values\n"
+    )
+    body = (
+        'WMT,Walmart,"114,54",1D,OK,,'
+        'Wzrostowy,"115,00 (Czerwony)","113,44 (Czerwony)","25,46 (Niebieski)"\n'
+    )
+    path.write_text(header + body, encoding="utf-8")
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    rows = r.json()["data"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.get("Band_Touch_State") == "touch"
+    assert row.get("Band_Touch_Side") == "inside"
+    assert row.get("Computed_Signal_band_touch") == "strong buy"
+    # band_touch jest też w liście strategii zwracanej przez API
+    strategy_ids = {s["id"] for s in r.json()["signal_strategies"]}
+    assert "band_touch" in strategy_ids
+
+
+def test_results_band_touch_sell_in_downtrend(client, app_env, monkeypatch):
+    """Trend spadkowy + cena prawie dotyka wstęgi od dołu → sygnał sell."""
+    m, res, _dat = app_env
+    import json as _json
+    cfg_path = res.parent / "scraper_config.json"
+    cfg_path.write_text(
+        _json.dumps({
+            "tickers": ["XYZ"],
+            "intervals": ["1D"],
+            "indicators": ["PCA", "HTS Panel"],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+
+    date_id = "2026-07-15"
+    path = res / f"tradingview_results_{date_id}.csv"
+    header = (
+        "Ticker,Company_Name,Current_Price,Interval,Scrape_Status,Scrape_Error,"
+        "HTS Panel_Trend,HTS Panel_Slow_High,HTS Panel_Slow_Low,PCA_Values\n"
+    )
+    body = (
+        'XYZ,Xyz Corp,99.0,1D,OK,,'
+        'Spadkowy,102.0 (Czerwony),100.0 (Czerwony),50.0 (Zielony)\n'
+    )
+    path.write_text(header + body, encoding="utf-8")
+
+    r = client.get(f"/api/results/{date_id}")
+    assert r.status_code == 200
+    row = r.json()["data"][0]
+    assert row.get("Band_Touch_State") == "near"
+    assert row.get("Band_Touch_Side") == "below"
+    assert row.get("Computed_Signal_band_touch") == "sell"
+
+
 # --- Stop scraper ---------------------------------------------------------
 
 def test_stop_scraper_when_idle(client, app_env, tmp_path, monkeypatch):

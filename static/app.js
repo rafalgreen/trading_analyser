@@ -122,7 +122,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const BUY_SIGNALS = new Set(['buy', 'strong buy']);
     const SELL_SIGNALS = new Set(['sell', 'strong sell']);
     const ALLOWED_CONSENSUS_FILTERS = new Set(['all', 'bullish', 'bearish', 'neutral']);
-    const ALL_STRATEGY_IDS = ['trend_only', 'cross_priority', 'pca_buckets', 'scoring'];
+    const ALL_STRATEGY_IDS = ['trend_only', 'cross_priority', 'pca_buckets', 'scoring', 'band_touch'];
     const ALLOWED_STRATEGIES = new Set([...ALL_STRATEGY_IDS, 'all']);
 
     const STRATEGY_LABEL_FALLBACK = {
@@ -130,13 +130,15 @@ document.addEventListener('DOMContentLoaded', () => {
         cross_priority: 'Crossy (priorytet)',
         pca_buckets: 'PCA (kosze)',
         scoring: 'Punktowy',
+        band_touch: 'Wstęga (touch)',
     };
     const STRATEGY_DESCRIPTIONS = {
-        all: 'Pokazuje wszystkie tickery — bez filtra strategii. Badże na karcie wyświetlają wynik każdej z 4 strategii.',
+        all: 'Pokazuje wszystkie tickery — bez filtra strategii. Badże na karcie wyświetlają wynik każdej ze strategii.',
         trend_only: '2× Wzrostowy + PCA ≤ 40 → Strong Buy; 2× Wzrostowy → Buy; mieszane → Neutral; 2× Spadkowy → Sell; 2× Spadkowy + PCA ≥ 60 → Strong Sell. PCA niskie = okazja, wysokie = drogo (jak kosze PCA).',
         cross_priority: 'Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem. PCA jako tie-breaker (≤40 → buy, ≥60 → sell). Gdy brak crossów — fallback na strategię trendową.',
         pca_buckets: 'Wyłącznie z wartości PCA: ≤20 → Strong Buy, 20–40 → Buy, 40–60 → Neutral, 60–80 → Sell, ≥80 → Strong Sell. Najprostsza i najbardziej kontr-trendowa.',
         scoring: 'HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma w zakresie [−3..+3] mapowana na 5 koszyków: ≥+2 Strong Buy, +1 Buy, 0 Neutral, −1 Sell, ≤−2 Strong Sell.',
+        band_touch: 'Wstęga czerwona (HTS Slow) jako strefa wejścia/wyjścia. KUP: trend Wzrostowy + cena dotyka lub prawie dotyka (≤2%) czerwonej wstęgi + PCA niski („prawie niebieski", ≤35); dotknięcie → Strong Buy. SPRZEDAJ: trend Spadkowy + cena dotyka/prawie dotyka wstęgi od dołu (opór); dotknięcie + PCA ≥ 60 → Strong Sell. Tylko interwały D i W.',
     };
 
     let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'data-status'))
@@ -582,9 +584,13 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // Debounce — pełny re-render kart przy każdym znaku jest kosztowny
+    // (przy ~170 tickerach to setki klonów DOM na keystroke).
+    let searchDebounceTimer = null;
     searchInput.addEventListener('input', (e) => {
         const term = e.target.value.toLowerCase().trim();
-        filterAndRenderCards(term);
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = setTimeout(() => filterAndRenderCards(term), 150);
     });
 
     sortSelect.addEventListener('change', (e) => {
@@ -2330,6 +2336,35 @@ document.addEventListener('DOMContentLoaded', () => {
                         `<span><span class="missing-label">Brak danych:</span>` +
                         ` ${detailHtml || escapeHtml(missing.join(', '))}</span>`;
                 }
+                // Badge „dotknięcie czerwonej wstęgi" (HTS Slow band).
+                const btEl = colClone.querySelector('[data-role="band-touch"]');
+                if (btEl) {
+                    const btState = String(row['Band_Touch_State'] || '');
+                    if (btState === 'touch' || btState === 'near') {
+                        const btDist = row['Band_Touch_Distance_Pct'];
+                        const btSide = String(row['Band_Touch_Side'] || '');
+                        const btSignal = rowSignalForStrategy(row, 'band_touch');
+                        btEl.classList.remove('hidden');
+                        btEl.classList.toggle('band-touch-touch', btState === 'touch');
+                        btEl.classList.toggle('band-touch-near', btState === 'near');
+                        btEl.classList.toggle('band-touch-buy', BUY_SIGNALS.has(btSignal));
+                        btEl.classList.toggle('band-touch-sell', SELL_SIGNALS.has(btSignal));
+                        const stateLabel = btState === 'touch'
+                            ? 'Dotknięcie czerwonej wstęgi'
+                            : 'Blisko czerwonej wstęgi';
+                        const distLabel = (btState === 'near' && btDist != null)
+                            ? ` (${btDist}%)` : '';
+                        btEl.textContent = `〰 ${stateLabel}${distLabel}`;
+                        const sideLabel = btSide === 'above' ? 'cena nad wstęgą'
+                            : btSide === 'below' ? 'cena pod wstęgą' : 'cena wewnątrz wstęgi';
+                        const sigLabel = btSignal ? ` · sygnał: ${signalLabelPl(btSignal)}` : '';
+                        btEl.title = `HTS Slow band — ${sideLabel}${sigLabel}`;
+                    } else {
+                        btEl.classList.add('hidden');
+                        btEl.textContent = '';
+                    }
+                }
+
                 // Wyszarz sekcje wskaźników bez danych (po nazwie w .section-title).
                 const missingSet = new Set(missing.map(s => String(s).toLowerCase()));
                 colClone.querySelectorAll('.indicator-section').forEach(sec => {

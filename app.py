@@ -59,8 +59,10 @@ from fundamentals import (
     enrich_fundamentals_with_sector_pe,
 )
 from signal_strategies import (
+    BAND_TOUCH_DEFAULTS,
     STRATEGIES as SIGNAL_STRATEGIES,
     STRATEGY_LABELS as SIGNAL_STRATEGY_LABELS,
+    compute_band_touch,
     compute_signals as compute_row_signals,
 )
 from composite_score import compute_composite_verdict
@@ -195,7 +197,50 @@ class FundamentalsRefreshRequest(BaseModel):
     all: bool = False
 
 
+# Cache configu po mtime — load_config() jest wołane przy niemal każdym
+# żądaniu API; parsowanie JSON za każdym razem to zbędny narzut I/O.
+_config_cache: Dict[str, Any] = {"path": None, "mtime": None, "data": None}
+_config_cache_lock = threading.Lock()
+
+
+def _invalidate_config_cache() -> None:
+    with _config_cache_lock:
+        _config_cache["path"] = None
+        _config_cache["mtime"] = None
+        _config_cache["data"] = None
+
+
 def load_config() -> Dict[str, Any]:
+    import copy as _copy
+
+    path = CONFIG_FILE
+    mtime: Optional[float] = None
+    try:
+        if os.path.exists(path):
+            mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    with _config_cache_lock:
+        if (
+            mtime is not None
+            and _config_cache["path"] == path
+            and _config_cache["mtime"] == mtime
+            and _config_cache["data"] is not None
+        ):
+            # Głęboka kopia — callerzy mutują config (save_config itd.).
+            return _copy.deepcopy(_config_cache["data"])
+
+    cfg = _load_config_uncached()
+
+    if mtime is not None:
+        with _config_cache_lock:
+            _config_cache["path"] = path
+            _config_cache["mtime"] = mtime
+            _config_cache["data"] = _copy.deepcopy(cfg)
+    return cfg
+
+
+def _load_config_uncached() -> Dict[str, Any]:
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             cfg = json.load(f)
@@ -232,12 +277,30 @@ def load_config() -> Dict[str, Any]:
     else:
         for k, v in DEFAULT_AUTO_SCHEDULE.items():
             cfg["auto_schedule"].setdefault(k, v)
+    # Progi sygnałów (band_touch itd.) — sekcja opcjonalna z defaultami.
+    signals = cfg.get("signals")
+    if not isinstance(signals, dict):
+        cfg["signals"] = {"band_touch": dict(BAND_TOUCH_DEFAULTS)}
+    else:
+        bt = signals.get("band_touch")
+        if not isinstance(bt, dict):
+            signals["band_touch"] = dict(BAND_TOUCH_DEFAULTS)
+        else:
+            for k, v in BAND_TOUCH_DEFAULTS.items():
+                bt.setdefault(k, v)
     return cfg
+
+
+def _band_touch_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cfg = config or load_config()
+    bt = ((cfg.get("signals") or {}).get("band_touch")) or {}
+    return {**BAND_TOUCH_DEFAULTS, **{k: v for k, v in bt.items() if v is not None}}
 
 
 def save_config(config: Dict[str, Any]):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+    _invalidate_config_cache()
 
 
 _scraper_process: Optional[subprocess.Popen] = None
@@ -1384,6 +1447,36 @@ def _sync_missing_fundamentals_for_dashboard(
         )
 
 
+_dashboard_fund_sync_lock = threading.Lock()
+
+
+def _kick_dashboard_fundamentals_sync(
+    tickers: List[str], *, priority: Optional[set] = None
+) -> None:
+    """Uruchamia sync brakujących fundamentów w tle (max 1 równolegle).
+
+    Dashboard nie czeka na yfinance — pierwsza odpowiedź jest szybka, a
+    brakujące fundamentale pojawią się przy kolejnym odświeżeniu.
+    """
+    if os.environ.get("PYTEST_RUNNING"):
+        # Deterministycznie w testach — bez wątku w tle.
+        _sync_missing_fundamentals_for_dashboard(tickers, priority=priority)
+        return
+    if not _dashboard_fund_sync_lock.acquire(blocking=False):
+        return  # poprzedni sync jeszcze trwa
+
+    def _run() -> None:
+        try:
+            _sync_missing_fundamentals_for_dashboard(tickers, priority=priority)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Background fundamentals sync: %s", exc)
+        finally:
+            _dashboard_fund_sync_lock.release()
+
+    t = threading.Thread(target=_run, name="dashboard-fund-sync", daemon=True)
+    t.start()
+
+
 def _resolve_results_file_for_refresh(date_id: Optional[str]) -> Optional[str]:
     """Date-scoped plik wynikowy; bez date_id bierze najnowszy."""
     if date_id:
@@ -1531,27 +1624,9 @@ def get_results(date_id: str):
 
                 results.append(row)
 
+        bt_params = _band_touch_params(config)
         for row in results:
-            # Per-row diagnostyka brakujących wskaźników (niezależnie od Scrape_Status w CSV)
-            try:
-                ser = pd.Series(row)
-                missing = [
-                    ind for ind in indicators if not row_has_indicator_data(ser, ind)
-                ]
-            except Exception:
-                missing = []
-            row["Missing_Indicators"] = missing
-            row["All_Indicators_Missing"] = bool(
-                indicators and len(missing) == len(indicators)
-            )
-            row["Indicator_Errors"] = build_indicator_errors(row, indicators)
-
-            try:
-                sig_map = compute_row_signals(row, indicators=indicators)
-            except Exception:
-                sig_map = {}
-            for strat_id in SIGNAL_STRATEGIES.keys():
-                row[f"Computed_Signal_{strat_id}"] = sig_map.get(strat_id, "")
+            _annotate_row_signals(row, indicators, bt_params)
     except HTTPException:
         raise
     except Exception as e:
@@ -1703,6 +1778,40 @@ def _config_ticker_for_csv_symbol(
     return None
 
 
+# Cache skanu CSV dashboardu: pełny skan czyta WSZYSTKIE historyczne pliki
+# wynikowe — bez cache każdy GET /api/dashboard płacił ten koszt od nowa.
+# Klucz: sygnatura plików (mtime+size) + argumenty skanu.
+_dashboard_scan_cache: Dict[str, Any] = {"key": None, "result": None}
+_dashboard_scan_cache_lock = threading.Lock()
+
+
+def _results_files_signature() -> tuple:
+    sig = []
+    for f in get_csv_files():
+        try:
+            st = os.stat(f)
+            sig.append((f, st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
+def _copy_scan_result(
+    found: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Kopia wyników skanu, żeby callerzy nie mutowali cache."""
+    return {
+        t: {
+            iv: {
+                "row": dict(bucket.get("row") or {}),
+                "last_refresh": bucket.get("last_refresh"),
+            }
+            for iv, bucket in buckets.items()
+        }
+        for t, buckets in found.items()
+    }
+
+
 def _scan_latest_rows_per_ticker_interval(
     tickers: List[str],
     intervals: List[str],
@@ -1710,9 +1819,38 @@ def _scan_latest_rows_per_ticker_interval(
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Dla każdej pary (ticker, interval) zwróć najlepszy wiersz (merge per wskaźnik).
 
-    Skanuje pliki ``results/tradingview_results_*.csv`` od najnowszego do
-    najstarszego. Najnowszy wiersz z kompletnymi lub częściowymi danymi jest
-    bazą; brakujące wskaźniki są uzupełniane ze starszych plików. Wiersze
+    Wynik jest cache'owany po sygnaturze plików (mtime/size) i argumentach —
+    kolejne żądania dashboardu nie skanują dysku, dopóki CSV się nie zmienią.
+    """
+    cache_key = (
+        _results_files_signature(),
+        tuple(tickers),
+        tuple(intervals),
+        tuple(indicators or ()),
+    )
+    with _dashboard_scan_cache_lock:
+        if _dashboard_scan_cache["key"] == cache_key:
+            return _copy_scan_result(_dashboard_scan_cache["result"])
+
+    found = _scan_latest_rows_per_ticker_interval_uncached(
+        tickers, intervals, indicators
+    )
+
+    with _dashboard_scan_cache_lock:
+        _dashboard_scan_cache["key"] = cache_key
+        _dashboard_scan_cache["result"] = _copy_scan_result(found)
+    return found
+
+
+def _scan_latest_rows_per_ticker_interval_uncached(
+    tickers: List[str],
+    intervals: List[str],
+    indicators: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Właściwy skan: od najnowszego do najstarszego pliku CSV.
+
+    Najnowszy wiersz z kompletnymi lub częściowymi danymi jest bazą;
+    brakujące wskaźniki są uzupełniane ze starszych plików. Wiersze
     ``Scrape_Status=SKIPPED`` oraz całkowicie puste są pomijane; częściowe
     wiersze z nowszego pliku nie blokują starszych wartości HTS/PCA/MacD.
     """
@@ -1823,6 +1961,44 @@ def _pick_current_price_from_intervals(
     return ""
 
 
+def _annotate_row_signals(
+    row: Dict[str, Any],
+    indicators: List[str],
+    bt_params: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Dokleja do wiersza diagnostykę wskaźników, sygnały strategii i band-touch."""
+    try:
+        ser = pd.Series(row)
+        missing = [ind for ind in indicators if not row_has_indicator_data(ser, ind)]
+    except Exception:
+        missing = []
+    row["Missing_Indicators"] = missing
+    row["All_Indicators_Missing"] = bool(
+        indicators and len(missing) == len(indicators)
+    )
+    row["Indicator_Errors"] = build_indicator_errors(row, indicators)
+
+    try:
+        sig_map = compute_row_signals(
+            row, indicators=indicators, band_touch_params=bt_params
+        )
+    except Exception:
+        sig_map = {}
+    for strat_id in SIGNAL_STRATEGIES.keys():
+        row[f"Computed_Signal_{strat_id}"] = sig_map.get(strat_id, "")
+
+    # Wskaźnik „dotknięcie czerwonej wstęgi" — niezależny od sygnału strategii,
+    # widoczny w UI per interwał.
+    try:
+        tol = float((bt_params or BAND_TOUCH_DEFAULTS).get("tolerance_pct", 2.0))
+        touch = compute_band_touch(row, tolerance_pct=tol)
+    except Exception:
+        touch = {"state": "", "distance_pct": None, "side": ""}
+    row["Band_Touch_State"] = touch.get("state") or ""
+    row["Band_Touch_Distance_Pct"] = touch.get("distance_pct")
+    row["Band_Touch_Side"] = touch.get("side") or ""
+
+
 def _flatten_dashboard_to_rows(
     dashboard_tickers: List[Dict[str, Any]], indicators: List[str]
 ) -> List[Dict[str, Any]]:
@@ -1869,25 +2045,9 @@ def _flatten_dashboard_to_rows(
             row["Composite_Flags"] = composite.get("flags") or []
             rows.append(row)
 
+    bt_params = _band_touch_params()
     for row in rows:
-        try:
-            ser = pd.Series(row)
-            missing = [
-                ind for ind in indicators if not row_has_indicator_data(ser, ind)
-            ]
-        except Exception:
-            missing = []
-        row["Missing_Indicators"] = missing
-        row["All_Indicators_Missing"] = bool(
-            indicators and len(missing) == len(indicators)
-        )
-        row["Indicator_Errors"] = build_indicator_errors(row, indicators)
-        try:
-            sig_map = compute_row_signals(row, indicators=indicators)
-        except Exception:
-            sig_map = {}
-        for strat_id in SIGNAL_STRATEGIES.keys():
-            row[f"Computed_Signal_{strat_id}"] = sig_map.get(strat_id, "")
+        _annotate_row_signals(row, indicators, bt_params)
 
     return rows
 
@@ -1907,9 +2067,7 @@ def build_dashboard(*, sync_fundamentals: bool = True) -> Dict[str, Any]:
     latest = _scan_latest_rows_per_ticker_interval(tickers, intervals, indicators)
 
     if sync_fundamentals:
-        _sync_missing_fundamentals_for_dashboard(
-            tickers, priority=set(latest.keys())
-        )
+        _kick_dashboard_fundamentals_sync(tickers, priority=set(latest.keys()))
 
     sector_medians = _load_sector_median_pe_map()
 

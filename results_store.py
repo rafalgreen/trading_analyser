@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import pandas as pd
@@ -892,6 +893,57 @@ def parse_pca_number(raw: object) -> Tuple[Optional[float], Optional[str]]:
         return None, color
 
 
+def parse_legend_number(raw: object) -> Optional[float]:
+    """Parsuje wartość legendy HTS/MacD lub cenę do float.
+
+    Radzi sobie z oboma formatami separatorów (PL ``162,92`` / ``1 234,56``
+    i US ``77,613.93``) po heurystyce ostatniego separatora — w
+    przeciwieństwie do ``parse_pca_number``, które zakłada format polski.
+    Część w nawiasie (kolor legendy, np. ``(Niebieski)``) jest ucinana.
+    """
+    if raw is None:
+        return None
+    try:
+        if pd.isna(raw):
+            return None
+    except Exception:
+        pass
+    s = str(raw).strip()
+    if not s:
+        return None
+    paren = s.find("(")
+    if paren >= 0:
+        s = s[:paren]
+    s = (
+        s.replace("\u00a0", "")
+        .replace("\u2212", "-")
+        .replace("'", "")
+        .replace(" ", "")
+    )
+    if not s or s.lower() in ("ok", "--", "\u2014", "-") or "brak" in s.lower():
+        return None
+    if "," in s and "." in s:
+        # Ostatni separator to separator dziesiętny, drugi — tysięcy.
+        if s.rfind(".") > s.rfind(","):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        parts = s.split(",")
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            s = "".join(parts)
+        else:
+            s = s.replace(",", ".")
+    elif "." in s:
+        parts = s.split(".")
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            s = "".join(parts)
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
 FUNDAMENTALS_COLUMNS: List[str] = [
     "Ticker",
     "Fund_PE",
@@ -959,13 +1011,44 @@ def _normalize_cell(value) -> str:
     return str(value)
 
 
+# Cache DataFrame'u fundamentów po (path, mtime, size) — dashboard czyta go
+# per ticker (O(N) odczytów pełnego CSV na request bez cache).
+_fundamentals_df_cache: dict = {}
+_fundamentals_df_cache_lock = threading.Lock()
+
+
 def load_fundamentals_dataframe(
     path: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Wczytuje plik z fundamentami; gdy nie istnieje, zwraca pusty DataFrame z kolumnami."""
+    """Wczytuje plik z fundamentami; gdy nie istnieje, zwraca pusty DataFrame z kolumnami.
+
+    Wynik jest cache'owany po mtime pliku; zwracana jest kopia, więc mutacje
+    po stronie callera nie psują cache.
+    """
     p = path or FUNDAMENTALS_CSV
     if not p or not os.path.exists(p):
         return _empty_fundamentals_dataframe()
+    try:
+        stat = os.stat(p)
+        cache_key = (os.path.abspath(p), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _fundamentals_df_cache_lock:
+            cached = _fundamentals_df_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+    df = _load_fundamentals_dataframe_uncached(p)
+
+    if cache_key is not None:
+        with _fundamentals_df_cache_lock:
+            _fundamentals_df_cache.clear()  # trzymamy tylko bieżącą wersję
+            _fundamentals_df_cache[cache_key] = df.copy()
+    return df
+
+
+def _load_fundamentals_dataframe_uncached(p: str) -> pd.DataFrame:
     try:
         if os.path.getsize(p) == 0:
             _log_fundamentals_read_once(p, "pusty plik — zwracam pusty DataFrame")
