@@ -741,13 +741,17 @@ def _checkpoint_scraper_state_from_status() -> None:
         return
     if (status.get("status") or "").lower() != "running":
         return
-    ticker_idx, ind_idx = _parse_progress_checkpoint(str(status.get("progress") or ""))
+    ticker_idx, ind_idx, interval_idx = _parse_progress_checkpoint(
+        str(status.get("progress") or "")
+    )
     if ticker_idx is None and ind_idx is None:
         return
     if ticker_idx is not None:
         state["ticker_idx"] = ticker_idx
     if ind_idx is not None:
         state["ind_idx"] = ind_idx
+    if interval_idx is not None:
+        state["interval_idx"] = interval_idx
     state["resumed"] = True
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:

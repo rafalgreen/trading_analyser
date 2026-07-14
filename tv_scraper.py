@@ -164,6 +164,7 @@ _NORMAL_TIMINGS = {
     "indicator_compute": 4.0,
     "ticker_enter": 3.0,
     "interval_change": 2.0,
+    "interval_settle": 0.5,
     "small_action": 1.0,
     "micro_action": 0.5,
 }
@@ -173,7 +174,8 @@ _FAST_TIMINGS = {
     "indicator_query": 2.0,
     "indicator_compute": 2.0,
     "ticker_enter": 1.5,
-    "interval_change": 1.0,
+    "interval_change": 2.0,
+    "interval_settle": 0.3,
     "small_action": 0.5,
     "micro_action": 0.25,
 }
@@ -206,7 +208,16 @@ class ScraperPerformance:
         self.indicator_query_s = float(base["indicator_query"])
         self.indicator_compute_s = float(base["indicator_compute"])
         self.ticker_enter_s = float(base["ticker_enter"])
-        self.interval_change_s = float(base["interval_change"])
+        self.interval_change_s = float(
+            cfg.get("interval_change_s", base["interval_change"])
+        )
+        self.interval_settle_s = float(
+            cfg.get("interval_settle_s", base["interval_settle"])
+        )
+        default_settle_active = 0.1 if mode == "fast" else 0.3
+        self.interval_settle_active_s = float(
+            cfg.get("interval_settle_active_s", default_settle_active)
+        )
         self.small_action_s = float(base["small_action"])
         self.micro_action_s = float(base["micro_action"])
 
@@ -263,8 +274,13 @@ def _adaptive_wait(
     max_wait_s: float,
     poll_s: Optional[float] = None,
 ) -> bool:
-    """Krótki sleep, potem polling do max_wait_s."""
+    """Polling do max_wait_s; min_wait_s tylko gdy pierwszy check nie gotowy."""
     poll = poll_s if poll_s is not None else scraper_perf().poll_interval_s
+    try:
+        if predicate():
+            return True
+    except Exception:
+        pass
     time.sleep(max(0.0, min_wait_s))
     deadline = time.time() + max(0.0, max_wait_s - min_wait_s)
     while time.time() < deadline:
@@ -274,7 +290,10 @@ def _adaptive_wait(
         except Exception:
             pass
         time.sleep(poll)
-    return predicate()
+    try:
+        return predicate()
+    except Exception:
+        return False
 
 
 def _wait_for_ticker_loaded(target_page, ticker: str) -> bool:
@@ -309,34 +328,124 @@ def _wait_for_ticker_loaded(target_page, ticker: str) -> bool:
     )
 
 
-def _wait_for_interval_loaded(target_page, interval: str) -> bool:
-    """Czeka na zmianę interwału — poll tytułu / toolbara."""
-    perf = scraper_perf()
-    iv = (interval or "").strip().upper()
-
-    def _loaded() -> bool:
+def _interval_button_is_active(target_page, interval: str) -> bool:
+    """True gdy interwał jest zaznaczony w toolbarze (nie tylko obecny w DOM)."""
+    iv = (interval or "").strip()
+    if not iv:
+        return False
+    active_selectors = [
+        f'button[data-value="{iv}"][aria-checked="true"]',
+        f'button[data-value="{iv}"][aria-pressed="true"]',
+        f'button[data-value="{iv}"][data-active="true"]',
+        f'button[data-value="{iv}"].isActive',
+        f'button[data-value="{iv}"].active',
+        f'button[aria-label*="{iv}"][aria-checked="true"]',
+        f'button[aria-label*="{iv}"][aria-pressed="true"]',
+    ]
+    for selector in active_selectors:
         try:
-            title = (target_page.title() or "").upper()
-            if iv and iv in title:
-                return True
-            btn = target_page.locator(
-                f'button[data-value="{interval}"], button[aria-label*="{interval}"]'
-            )
+            btn = target_page.locator(selector)
             if btn.count() > 0:
                 return True
         except Exception:
             pass
-        return False
+    try:
+        btn = target_page.locator(f'button[data-value="{iv}"]')
+        if btn.count() > 0:
+            cls = (btn.first.get_attribute("class") or "").lower()
+            if any(token in cls for token in ("active", "selected", "isactive")):
+                return True
+            aria = (
+                (btn.first.get_attribute("aria-checked") or "")
+                + (btn.first.get_attribute("aria-pressed") or "")
+            ).lower()
+            if aria in ("true", "1"):
+                return True
+    except Exception:
+        pass
+    return False
 
-    return _adaptive_wait(
+
+def _wait_for_interval_loaded(target_page, interval: str) -> bool:
+    """Czeka aż toolbar potwierdzi aktywny interwał, potem krótki settle."""
+    perf = scraper_perf()
+
+    def _loaded() -> bool:
+        return _interval_button_is_active(target_page, interval)
+
+    loaded = _adaptive_wait(
         _loaded,
         min_wait_s=perf.min_compute_wait_s,
         max_wait_s=perf.interval_change_s,
     )
+    if loaded:
+        time.sleep(perf.interval_settle_s)
+    else:
+        logger.warning(
+            "Interwał %s: nie potwierdzono aktywnego przycisku — kontynuuję po settle.",
+            interval,
+        )
+        time.sleep(perf.interval_settle_s)
+    return loaded
+
+
+def _legend_item_value_texts(item_locator) -> List[str]:
+    """Teksty valueValue z bloku legendy (locator, bez page.content())."""
+    texts: List[str] = []
+    try:
+        values_root = item_locator.locator('[data-qa-id="legend-source-values"]')
+        if values_root.count() == 0:
+            return texts
+        value_nodes = values_root.locator(".valueValue")
+        n = value_nodes.count()
+        for i in range(min(n, 20)):
+            try:
+                t = (value_nodes.nth(i).inner_text(timeout=500) or "").strip()
+                if t:
+                    texts.append(t)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return texts
+
+
+def _legend_value_text_nonempty(text: str) -> bool:
+    if not cell_nonempty(text):
+        return False
+    low = text.lower()
+    return (
+        "brak danych na wykresie" not in low
+        and "brak poprawnych danych" not in low
+    )
+
+
+def _legend_has_nonempty_values_locator(target_page, ind_name: str) -> bool:
+    """Czy legenda wskaźnika ma niepuste wartości — poll przez locatory (bez HTML dump)."""
+    try:
+        items = target_page.locator('[data-qa-id="legend-source-item"]')
+        n = items.count()
+        for i in range(min(n, 40)):
+            item = items.nth(i)
+            tw = item.locator(
+                '[data-qa-id="title-wrapper legend-source-title"]'
+            )
+            if tw.count() == 0:
+                continue
+            title = tw.inner_text(timeout=800)
+            if not indicator_title_matches(title, ind_name):
+                continue
+            texts = _legend_item_value_texts(item)
+            return any(_legend_value_text_nonempty(t) for t in texts)
+    except Exception:
+        return False
+    return False
 
 
 def _legend_has_nonempty_values(target_page, ind_name: str) -> bool:
-    """Czy legenda wskaźnika ma niepuste wartości (nie tylko tytuł)."""
+    """Czy legenda wskaźnika ma niepuste wartości (locator, fallback HTML parse)."""
+    if _legend_has_nonempty_values_locator(target_page, ind_name):
+        return True
     try:
         html = target_page.content()
         data = parse_indicators(html, [ind_name])
@@ -356,16 +465,9 @@ def _legend_has_nonempty_values(target_page, ind_name: str) -> bool:
 def _wait_for_legend_values(target_page, ind_name: str) -> bool:
     """Czeka na widoczną legendę z niepustymi wartościami wskaźnika."""
     perf = scraper_perf()
-    if not _wait_for_legend_indicator_ready(
-        target_page,
-        ind_name,
-        max_attempts=5,
-        delay_s=min(1.0, perf.poll_interval_s * 5),
-    ):
-        return False
 
     def _ready() -> bool:
-        return _legend_has_nonempty_values(target_page, ind_name)
+        return _legend_has_nonempty_values_locator(target_page, ind_name)
 
     return _adaptive_wait(
         _ready,
@@ -377,6 +479,43 @@ def _wait_for_legend_values(target_page, ind_name: str) -> bool:
 def _wait_compute_for_indicator(target_page, ind_name: str) -> bool:
     """Adaptive wait zamiast stałego sleep po zmianie tickera/interwału."""
     return _wait_for_legend_values(target_page, ind_name)
+
+
+def _wait_compute_for_indicators(
+    target_page, indicators: List[str]
+) -> bool:
+    """Czeka aż wszystkie wskaźniki w partii mają niepuste wartości w legendzie."""
+    if not indicators:
+        return True
+    perf = scraper_perf()
+
+    def _all_ready() -> bool:
+        return all(
+            _legend_has_nonempty_values_locator(target_page, ind_name)
+            for ind_name in indicators
+        )
+
+    return _adaptive_wait(
+        _all_ready,
+        min_wait_s=perf.min_compute_wait_s,
+        max_wait_s=perf.max_compute_wait_s,
+    )
+
+
+def _switch_chart_interval(target_page, interval: str) -> float:
+    """Ustawia interwał wykresu; pomija wpisywanie gdy już aktywny. Zwraca czas w s."""
+    perf = scraper_perf()
+    t0 = time.perf_counter()
+    if _interval_button_is_active(target_page, interval):
+        logger.debug("Interwał %s już aktywny — pomijam wpisywanie.", interval)
+        time.sleep(perf.interval_settle_active_s)
+    else:
+        logger.info("Ustawiam interwał: %s", interval)
+        target_page.keyboard.type(interval, delay=perf.keyboard_delay_ms)
+        time.sleep(perf.small_action_s)
+        target_page.keyboard.press("Enter")
+        _wait_for_interval_loaded(target_page, interval)
+    return time.perf_counter() - t0
 
 logger = logging.getLogger("tv_scraper")
 
@@ -629,20 +768,49 @@ def compute_scraper_eta(
     overall_total: int,
     elapsed_seconds: float,
     *,
-    min_steps: int = 3,
-) -> Tuple[Optional[float], str]:
-    """Szacuje pozostały czas na podstawie średniego czasu na krok."""
+    min_steps: int = 10,
+) -> Tuple[Optional[float], str, str]:
+    """Szacuje pozostały czas i całość na podstawie średniego czasu na krok."""
     overall_done = max(int(overall_done), 0)
     overall_total = max(int(overall_total), 1)
     elapsed_seconds = max(float(elapsed_seconds or 0.0), 0.0)
     if overall_done < min_steps:
-        return None, "szacowanie…"
+        return None, "szacowanie…", ""
     if overall_done >= overall_total:
-        return 0.0, ""
+        return 0.0, "", format_scraper_eta_label(elapsed_seconds)
     remaining = overall_total - overall_done
     avg_per_step = elapsed_seconds / overall_done
     eta_seconds = avg_per_step * remaining
-    return eta_seconds, format_scraper_eta_label(eta_seconds)
+    total_seconds = elapsed_seconds + eta_seconds
+    return (
+        eta_seconds,
+        format_scraper_eta_label(eta_seconds),
+        format_scraper_eta_label(total_seconds),
+    )
+
+
+def compute_scraper_eta_segment(
+    overall_done: int,
+    overall_total: int,
+    elapsed_seconds: float,
+    *,
+    baseline_done: int = 0,
+    baseline_elapsed_s: float = 0.0,
+    min_steps: int = 10,
+) -> Tuple[Optional[float], str, str]:
+    """ETA z tempa bieżącego segmentu (po Stop/wznowieniu), całość z pełnego elapsed."""
+    segment_done = max(int(overall_done) - int(baseline_done), 0)
+    segment_total = max(int(overall_total) - int(baseline_done), 1)
+    segment_elapsed = max(
+        float(elapsed_seconds) - float(baseline_elapsed_s or 0.0), 0.0
+    )
+    eta_seconds, eta_label, _ = compute_scraper_eta(
+        segment_done, segment_total, segment_elapsed, min_steps=min_steps
+    )
+    if eta_seconds is None:
+        return None, eta_label, ""
+    total_seconds = max(float(elapsed_seconds), 0.0) + eta_seconds
+    return eta_seconds, eta_label, format_scraper_eta_label(total_seconds)
 
 
 def _format_scraper_progress(
@@ -682,17 +850,22 @@ def _write_run_state_file(
     current_run_file: str,
     processed_combos,
     session_started_at: Optional[float],
+    active_elapsed_s: Optional[float] = None,
     ticker_idx: int,
     ind_idx: int,
     tickers: List[str],
     indicators: List[str],
     no_data_only: bool,
     resumed: bool = False,
+    interval_idx: Optional[int] = None,
+    eta_baseline_done: Optional[int] = None,
+    eta_baseline_elapsed_s: Optional[float] = None,
 ) -> None:
     payload: Dict[str, Any] = {
         "current_file": current_run_file,
         "processed": [list(x) for x in processed_combos],
         "session_started_at": session_started_at,
+        "active_elapsed_s": round(float(active_elapsed_s or 0.0), 3),
         "ticker_idx": max(int(ticker_idx), 0),
         "ind_idx": max(int(ind_idx), 0),
         "tickers": list(tickers or []),
@@ -701,6 +874,12 @@ def _write_run_state_file(
     }
     if resumed:
         payload["resumed"] = True
+    if interval_idx is not None:
+        payload["interval_idx"] = max(int(interval_idx), 0)
+    if eta_baseline_done is not None:
+        payload["eta_baseline_done"] = max(int(eta_baseline_done), 0)
+    if eta_baseline_elapsed_s is not None:
+        payload["eta_baseline_elapsed_s"] = round(float(eta_baseline_elapsed_s), 3)
     with open(state_file, "w", encoding="utf-8") as f:
         json.dump(payload, f)
 
@@ -720,32 +899,69 @@ def _load_run_state_file(
     return state
 
 
-def _parse_progress_checkpoint(progress: str) -> Tuple[Optional[int], Optional[int]]:
-    """Parsuje ticker_idx i ind_idx (0-based) z łańcucha postępu statusu."""
+def _parse_progress_checkpoint(
+    progress: str,
+) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+    """Parsuje ticker_idx, ind_idx (0-based) i opcjonalnie interval_idx z postępu statusu."""
     if not progress or not isinstance(progress, str):
-        return None, None
-    m = re.search(
+        return None, None, None
+
+    interval_idx: Optional[int] = None
+    m_iv = re.search(r" · (1D|1W|1M)(?: · |$)", progress, flags=re.IGNORECASE)
+    if m_iv:
+        interval_idx = {"1D": 0, "1W": 1, "1M": 2}.get(m_iv.group(1).upper())
+
+    m_partia = re.search(
+        r"ticker\s+(\d+)\s*/\s*\d+.*?partia\s+(\d+)\s*/\s*\d+",
+        progress,
+        flags=re.IGNORECASE,
+    )
+    if m_partia:
+        try:
+            return (
+                max(int(m_partia.group(1)) - 1, 0),
+                max(int(m_partia.group(2)) - 1, 0),
+                interval_idx,
+            )
+        except (TypeError, ValueError):
+            return None, None, interval_idx
+
+    m_wsk = re.search(
         r"ticker\s+(\d+)\s*/\s*\d+.*?wsk\.\s*(\d+)\s*/\s*\d+",
         progress,
         flags=re.IGNORECASE,
     )
-    if not m:
-        return None, None
-    try:
-        return max(int(m.group(1)) - 1, 0), max(int(m.group(2)) - 1, 0)
-    except (TypeError, ValueError):
-        return None, None
+    if m_wsk:
+        try:
+            return (
+                max(int(m_wsk.group(1)) - 1, 0),
+                max(int(m_wsk.group(2)) - 1, 0),
+                interval_idx,
+            )
+        except (TypeError, ValueError):
+            return None, None, interval_idx
+
+    return None, None, interval_idx
 
 
 def _scraper_elapsed_seconds(
-    session_started_at: Optional[float],
+    active_elapsed_s: Optional[float] = None,
     run_t0: Optional[float] = None,
 ) -> float:
-    if session_started_at is not None:
-        return max(0.0, time.time() - float(session_started_at))
+    """Czas aktywnego scrapowania (bez przerw między Stop a wznowieniem)."""
+    base = max(float(active_elapsed_s or 0.0), 0.0)
     if run_t0 is not None:
-        return max(0.0, time.perf_counter() - run_t0)
-    return 0.0
+        return base + max(0.0, time.perf_counter() - run_t0)
+    return base
+
+
+def format_scraper_eta_display(eta_label: str, eta_total_label: str = "") -> str:
+    """Czytelna etykieta ETA dla UI (pozostało + opcjonalnie całość)."""
+    if not eta_label or eta_label == "szacowanie…":
+        return eta_label or "szacowanie…"
+    if eta_total_label:
+        return f"pozostało {eta_label} (całość {eta_total_label})"
+    return f"pozostało {eta_label}"
 
 
 def scraper_overall_progress_ticker_first(
@@ -753,13 +969,20 @@ def scraper_overall_progress_ticker_first(
     n_tickers: int,
     batch_idx: int = 0,
     n_batches: int = 1,
+    interval_idx: int = 0,
+    n_intervals: int = 1,
 ) -> Tuple[int, int]:
     n_tickers = max(int(n_tickers), 1)
     n_batches = max(int(n_batches), 1)
+    n_intervals = max(int(n_intervals), 1)
     ticker_idx = max(int(ticker_idx), 0)
     batch_idx = max(int(batch_idx), 0)
-    overall_done = batch_idx * n_tickers + ticker_idx + 1
-    overall_total = n_tickers * n_batches
+    interval_idx = max(int(interval_idx), 0)
+    steps_per_batch = n_tickers * n_intervals
+    overall_done = (
+        batch_idx * steps_per_batch + ticker_idx * n_intervals + interval_idx + 1
+    )
+    overall_total = n_batches * steps_per_batch
     return overall_done, overall_total
 
 
@@ -779,20 +1002,31 @@ def _format_scraper_progress_ticker_first(
     n_tickers: int,
     interval_name: str = "",
     eta_label: str = "",
+    eta_total_label: str = "",
     resumed: bool = False,
     batch_idx: int = 0,
     n_batches: int = 1,
+    interval_idx: int = 0,
+    n_intervals: int = 1,
+    phase: str = "",
 ) -> str:
     done, total = scraper_overall_progress_ticker_first(
-        ticker_idx, n_tickers, batch_idx, n_batches
+        ticker_idx,
+        n_tickers,
+        batch_idx,
+        n_batches,
+        interval_idx,
+        n_intervals,
     )
     base = f"{done}/{total} · ticker {ticker_idx + 1}/{n_tickers}"
     if n_batches > 1:
         base += f" · partia {batch_idx + 1}/{n_batches}"
     if interval_name:
         base += f" · {interval_name}"
+    if phase:
+        base += f" · {phase}"
     if eta_label:
-        base += f" · ETA {eta_label}"
+        base += f" · {format_scraper_eta_display(eta_label, eta_total_label)}"
     if resumed:
         base += " · wznowiono"
     return base
@@ -803,29 +1037,52 @@ def _build_running_scraper_progress_ticker_first(
     n_tickers: int,
     interval_name: str,
     *,
-    session_started_at: Optional[float] = None,
+    active_elapsed_s: Optional[float] = None,
     run_t0: Optional[float] = None,
     resumed: bool = False,
     batch_idx: int = 0,
     n_batches: int = 1,
-) -> Tuple[str, Optional[float], str]:
+    interval_idx: int = 0,
+    n_intervals: int = 1,
+    phase: str = "",
+    eta_baseline_done: int = 0,
+    eta_baseline_elapsed_s: float = 0.0,
+) -> Tuple[str, Optional[float], str, str]:
     overall_done, overall_total = scraper_overall_progress_ticker_first(
-        ticker_idx, n_tickers, batch_idx, n_batches
+        ticker_idx,
+        n_tickers,
+        batch_idx,
+        n_batches,
+        interval_idx,
+        n_intervals,
     )
-    elapsed = _scraper_elapsed_seconds(session_started_at, run_t0)
-    eta_seconds, eta_label = compute_scraper_eta(
-        overall_done, overall_total, elapsed
-    )
+    elapsed = _scraper_elapsed_seconds(active_elapsed_s, run_t0)
+    if eta_baseline_done > 0 or eta_baseline_elapsed_s > 0:
+        eta_seconds, eta_label, eta_total_label = compute_scraper_eta_segment(
+            overall_done,
+            overall_total,
+            elapsed,
+            baseline_done=eta_baseline_done,
+            baseline_elapsed_s=eta_baseline_elapsed_s,
+        )
+    else:
+        eta_seconds, eta_label, eta_total_label = compute_scraper_eta(
+            overall_done, overall_total, elapsed
+        )
     progress = _format_scraper_progress_ticker_first(
         ticker_idx,
         n_tickers,
         interval_name,
         eta_label=eta_label,
+        eta_total_label=eta_total_label,
         resumed=resumed,
         batch_idx=batch_idx,
         n_batches=n_batches,
+        interval_idx=interval_idx,
+        n_intervals=n_intervals,
+        phase=phase,
     )
-    return progress, eta_seconds, eta_label
+    return progress, eta_seconds, eta_label, eta_total_label
 
 
 def _build_running_scraper_progress(
@@ -835,27 +1092,38 @@ def _build_running_scraper_progress(
     n_inds: int,
     ind_name: str,
     *,
-    session_started_at: Optional[float] = None,
+    active_elapsed_s: Optional[float] = None,
     run_t0: Optional[float] = None,
     resumed: bool = False,
-) -> Tuple[str, Optional[float], str]:
+    eta_baseline_done: int = 0,
+    eta_baseline_elapsed_s: float = 0.0,
+) -> Tuple[str, Optional[float], str, str]:
     overall_done, overall_total = scraper_overall_progress(
         ticker_idx, n_tickers, ind_idx, n_inds
     )
-    elapsed = _scraper_elapsed_seconds(session_started_at, run_t0)
-    eta_seconds, eta_label = compute_scraper_eta(
-        overall_done, overall_total, elapsed
-    )
+    elapsed = _scraper_elapsed_seconds(active_elapsed_s, run_t0)
+    if eta_baseline_done > 0 or eta_baseline_elapsed_s > 0:
+        eta_seconds, eta_label, eta_total_label = compute_scraper_eta_segment(
+            overall_done,
+            overall_total,
+            elapsed,
+            baseline_done=eta_baseline_done,
+            baseline_elapsed_s=eta_baseline_elapsed_s,
+        )
+    else:
+        eta_seconds, eta_label, eta_total_label = compute_scraper_eta(
+            overall_done, overall_total, elapsed
+        )
     progress = _format_scraper_progress(
         ticker_idx,
         n_tickers,
         ind_idx,
         n_inds,
         ind_name,
-        eta_label=eta_label,
+        eta_label=format_scraper_eta_display(eta_label, eta_total_label),
         resumed=resumed,
     )
-    return progress, eta_seconds, eta_label
+    return progress, eta_seconds, eta_label, eta_total_label
 
 
 def resolve_run_indicators(
@@ -903,6 +1171,7 @@ def write_scraper_status(
     current_indicator="",
     eta_seconds=None,
     eta_label=None,
+    eta_total_label=None,
 ):
     """Write scraper status to JSON file for web UI polling."""
     data = {
@@ -921,6 +1190,12 @@ def write_scraper_status(
         data["eta_seconds"] = round(float(eta_seconds), 1)
     if eta_label:
         data["eta_label"] = eta_label
+    if eta_total_label:
+        data["eta_total_label"] = eta_total_label
+    if eta_label or eta_total_label:
+        data["eta_display"] = format_scraper_eta_display(
+            str(eta_label or ""), str(eta_total_label or "")
+        )
     try:
         with open(STATUS_FILE, "w") as f:
             json.dump(data, f)
@@ -1617,6 +1892,21 @@ def _indicator_search_query(
     return (ind_name or "").strip()
 
 
+def _extract_legend_html(target_page) -> str:
+    """Fragment HTML legendy (tylko bloki wskaźników) — szybszy niż page.content()."""
+    try:
+        parts = target_page.evaluate(
+            """() => Array.from(
+                document.querySelectorAll('[data-qa-id="legend-source-item"]')
+            ).map(el => el.outerHTML)"""
+        )
+        if not parts:
+            return ""
+        return "<html><body>" + "".join(parts) + "</body></html>"
+    except Exception:
+        return ""
+
+
 def parse_indicators(html_content, indicators_to_find):
     """Pobiera i parsuje wartości wskaźników z html dla podanej listy nazw."""
     soup = BeautifulSoup(html_content, "lxml")
@@ -1929,14 +2219,12 @@ def add_indicator_to_chart(
             )
         time.sleep(SLEEP_AFTER_SMALL_ACTION_S)
         target_page.keyboard.press("Escape")
-        logger.info(
-            "Czekam na przeliczenie wskaźnika (%ss)...",
-            SLEEP_AFTER_INDICATOR_COMPUTE_S,
-        )
-        time.sleep(SLEEP_AFTER_INDICATOR_COMPUTE_S)
+        logger.info("Czekam na przeliczenie wskaźnika %s (adaptive)...", ind_name)
+        _wait_compute_for_indicator(target_page, ind_name)
 
+        verify_delay = max(0.15, scraper_perf().poll_interval_s)
         if _verify_indicator_present(
-            target_page, ind_name, attempts=3, delay_s=1.0
+            target_page, ind_name, attempts=3, delay_s=verify_delay
         ):
             return
 
@@ -2067,7 +2355,8 @@ def _retry_macd_parse(
         _wait_compute_for_indicator(target_page, "MacD")
         _ensure_legend_expanded(target_page)
         _move_crosshair_off_chart(target_page)
-        html_retry = target_page.content()
+        legend_html = _extract_legend_html(target_page)
+        html_retry = legend_html or target_page.content()
         indicator_data_retry = parse_indicators(html_retry, ["MacD"])
         line_val_retry = indicator_data_retry.get("MacD_Line")
         if cell_nonempty(line_val_retry):
@@ -2090,14 +2379,27 @@ def _parse_indicators_from_page(
     ticker: str = "",
     interval: str = "",
     indicator_search: Optional[Dict[str, str]] = None,
-) -> None:
-    for ind_name in indicators_to_parse:
-        if not _wait_compute_for_indicator(target_page, ind_name):
-            _note_indicator_error(row_data, ind_name, "timeout legendy")
+) -> Tuple[float, float]:
+    """Odczyt wskaźników z legendy. Zwraca (indicator_wait_s, parse_s)."""
+    if not indicators_to_parse:
+        return 0.0, 0.0
+    wait_t0 = time.perf_counter()
+    wait_ok = _wait_compute_for_indicators(target_page, indicators_to_parse)
+    indicator_wait_s = time.perf_counter() - wait_t0
+    if not wait_ok:
+        for ind_name in indicators_to_parse:
+            if not _legend_has_nonempty_values_locator(target_page, ind_name):
+                _note_indicator_error(row_data, ind_name, "timeout legendy")
     _ensure_legend_expanded(target_page)
     _move_crosshair_off_chart(target_page)
-    html_content = target_page.content()
-    indicator_data = parse_indicators(html_content, indicators_to_parse)
+    parse_t0 = time.perf_counter()
+    legend_html = _extract_legend_html(target_page)
+    if legend_html:
+        indicator_data = parse_indicators(legend_html, indicators_to_parse)
+    else:
+        logger.debug("Legenda evaluate pusta — fallback page.content()")
+        html_content = target_page.content()
+        indicator_data = parse_indicators(html_content, indicators_to_parse)
     for ind_name in indicators_to_parse:
         ind_slice = {
             k: v
@@ -2117,6 +2419,8 @@ def _parse_indicators_from_page(
                 indicator_search,
             )
         _note_missing_indicator_parse(row_data, ind_name)
+    parse_s = time.perf_counter() - parse_t0
+    return indicator_wait_s, parse_s
 
 
 def _resolve_ticker_metadata(
@@ -2172,6 +2476,41 @@ def _resolve_ticker_metadata(
     return company_name, exchange, current_price, None
 
 
+def _metadata_from_existing_rows(df, ticker: str) -> Optional[Tuple[str, str, str]]:
+    """Zwraca (company, exchange, price) z CSV gdy już mamy sensowne metadane."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    if "Ticker" not in df.columns:
+        return None
+    sub = df[df["Ticker"].astype(str) == str(ticker)]
+    if sub.empty:
+        return None
+    row = sub.iloc[0]
+    company = str(row.get("Company_Name", "") or "").strip()
+    exchange = str(row.get("Exchange", "") or "").strip()
+    price = str(row.get("Current_Price", "") or "").strip()
+    bad_names = {"", "Nieznana", "—", "\u2014", "?"}
+    if company in bad_names and not exchange and not price:
+        return None
+    if company in bad_names:
+        company = "Nieznana"
+    return company, exchange, price
+
+
+def _fundamentals_during_scrape() -> bool:
+    if not os.path.exists(CONFIG_FILE):
+        return False
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f) or {}
+        fund_cfg = cfg.get("fundamentals") or {}
+        if not fund_cfg.get("enabled", True):
+            return False
+        return bool(fund_cfg.get("during_scrape", False))
+    except Exception:
+        return False
+
+
 def _switch_ticker_on_chart(
     target_page,
     ticker: str,
@@ -2214,15 +2553,20 @@ def _execute_ticker_first_loop(
     persist_checkpoint,
     update_state,
     start_ticker_idx: int,
+    start_ind_idx: int = 0,
+    start_interval_idx: int = 0,
     show_resumed_label: bool,
-    session_started_at: Optional[float],
+    active_elapsed_s: Optional[float],
     run_t0: float,
+    eta_baseline_done: int = 0,
+    eta_baseline_elapsed_s: float = 0.0,
 ) -> bool:
     """Tryb ticker-first: partie wskaźników na wykresie (TV Free = max 2), jedno przełączenie tickera na partię."""
     perf = scraper_perf()
     max_on_chart = perf.max_indicators_on_chart
     batches = chunk_indicators(indicators, max_on_chart)
     n_batches = len(batches)
+    n_intervals = max(len(intervals), 1)
     logger.info(
         "=== Tryb ticker_first: %d wskaźników w %d partiach (max %d na wykresie) ===",
         len(indicators),
@@ -2230,9 +2574,51 @@ def _execute_ticker_first_loop(
         max_on_chart,
     )
 
+    def _report_progress(
+        ticker_idx: int,
+        *,
+        interval_name: str = "",
+        interval_idx: int = 0,
+        current_ticker: str = "",
+        current_indicator: str = "",
+        progress_resumed: bool = False,
+        batch_idx_val: int = 0,
+        phase: str = "",
+    ) -> None:
+        progress_str, eta_seconds, eta_label, eta_total_label = (
+            _build_running_scraper_progress_ticker_first(
+                ticker_idx,
+                len(tickers),
+                interval_name,
+                active_elapsed_s=active_elapsed_s,
+                run_t0=run_t0,
+                resumed=progress_resumed,
+                batch_idx=batch_idx_val,
+                n_batches=n_batches,
+                interval_idx=interval_idx,
+                n_intervals=n_intervals,
+                phase=phase,
+                eta_baseline_done=eta_baseline_done,
+                eta_baseline_elapsed_s=eta_baseline_elapsed_s,
+            )
+        )
+        write_scraper_status(
+            "running",
+            progress_str,
+            current_ticker,
+            current_indicator=current_indicator,
+            eta_seconds=eta_seconds,
+            eta_label=eta_label or None,
+            eta_total_label=eta_total_label or None,
+        )
+
     ticker_begin = max(int(start_ticker_idx), 0)
+    batch_begin = max(int(start_ind_idx), 0)
+    interval_begin = max(int(start_interval_idx), 0)
 
     for batch_idx, batch_inds in enumerate(batches):
+        if batch_idx < batch_begin:
+            continue
         is_last_batch = batch_idx == n_batches - 1
         added: List[str] = []
         for ind_name in batch_inds:
@@ -2252,7 +2638,7 @@ def _execute_ticker_first_loop(
                 return False
 
         batch_label = ", ".join(batch_inds)
-        ticker_start = ticker_begin if batch_idx == 0 else 0
+        ticker_start = ticker_begin if batch_idx == batch_begin else 0
 
         for ticker_idx in range(ticker_start, len(tickers)):
             ticker = tickers[ticker_idx]
@@ -2263,28 +2649,19 @@ def _execute_ticker_first_loop(
                 batch_idx,
                 mark_resumed=show_resumed_label
                 and ticker_idx == ticker_start
-                and batch_idx == 0,
+                and batch_idx == batch_begin,
             )
             progress_resumed = (
-                show_resumed_label and ticker_idx == ticker_start and batch_idx == 0
+                show_resumed_label
+                and ticker_idx == ticker_start
+                and batch_idx == batch_begin
             )
-            progress_str, eta_seconds, eta_label = _build_running_scraper_progress_ticker_first(
+            _report_progress(
                 ticker_idx,
-                len(tickers),
-                "",
-                session_started_at=session_started_at if persist_state else None,
-                run_t0=run_t0,
-                resumed=progress_resumed,
-                batch_idx=batch_idx,
-                n_batches=n_batches,
-            )
-            write_scraper_status(
-                "running",
-                progress_str,
-                ticker,
+                current_ticker=ticker,
                 current_indicator=batch_label,
-                eta_seconds=eta_seconds,
-                eta_label=eta_label or None,
+                progress_resumed=progress_resumed,
+                batch_idx_val=batch_idx,
             )
 
             existing_df = results_buf.dataframe
@@ -2321,9 +2698,21 @@ def _execute_ticker_first_loop(
                 continue
 
             try:
-                company_name, exchange, current_price, skip_reason = (
-                    _resolve_ticker_metadata(target_page, ticker, symbol_search_info)
+                cached_meta = _metadata_from_existing_rows(
+                    results_buf.dataframe, ticker
                 )
+                if cached_meta:
+                    company_name, exchange, current_price = cached_meta
+                    skip_reason = None
+                    logger.debug(
+                        "Metadane %s z CSV (pomijam odczyt nagłówka TV).", ticker
+                    )
+                else:
+                    company_name, exchange, current_price, skip_reason = (
+                        _resolve_ticker_metadata(
+                            target_page, ticker, symbol_search_info
+                        )
+                    )
             except Exception as e:
                 raise RuntimeError(
                     f"Błąd podczas pobierania danych dla {ticker}: {e}"
@@ -2346,7 +2735,15 @@ def _execute_ticker_first_loop(
                 batch_label,
             )
 
-            for interval in intervals:
+            for interval_idx, interval in enumerate(intervals):
+                update_state._last_interval_idx = interval_idx
+                if (
+                    batch_idx == batch_begin
+                    and ticker_idx == ticker_start
+                    and interval_idx < interval_begin
+                ):
+                    continue
+
                 existing_df = results_buf.dataframe
                 erow = get_row_for_ticker_interval(existing_df, ticker, interval)
 
@@ -2360,6 +2757,15 @@ def _execute_ticker_first_loop(
                     )
                     if is_last_batch:
                         update_state(ticker, interval)
+                    _report_progress(
+                        ticker_idx,
+                        interval_name=interval,
+                        interval_idx=interval_idx,
+                        current_ticker=ticker,
+                        current_indicator=f"{batch_label} · {interval}",
+                        progress_resumed=progress_resumed,
+                        batch_idx_val=batch_idx,
+                    )
                     continue
 
                 if (ticker, interval) in processed_combos:
@@ -2376,36 +2782,31 @@ def _execute_ticker_first_loop(
                             interval,
                         )
                     else:
+                        _report_progress(
+                            ticker_idx,
+                            interval_name=interval,
+                            interval_idx=interval_idx,
+                            current_ticker=ticker,
+                            current_indicator=f"{batch_label} · {interval}",
+                            progress_resumed=progress_resumed,
+                            batch_idx_val=batch_idx,
+                        )
                         continue
 
-                progress_str, eta_seconds, eta_label = (
-                    _build_running_scraper_progress_ticker_first(
-                        ticker_idx,
-                        len(tickers),
-                        interval,
-                        session_started_at=session_started_at if persist_state else None,
-                        run_t0=run_t0,
-                        resumed=progress_resumed,
-                        batch_idx=batch_idx,
-                        n_batches=n_batches,
-                    )
-                )
-                write_scraper_status(
-                    "running",
-                    progress_str,
-                    ticker,
-                    current_indicator=f"{batch_label} · {interval}",
-                    eta_seconds=eta_seconds,
-                    eta_label=eta_label or None,
+                _report_progress(
+                    ticker_idx,
+                    interval_name=interval,
+                    interval_idx=interval_idx,
+                    current_ticker=ticker,
+                    current_indicator=batch_label,
+                    progress_resumed=progress_resumed,
+                    batch_idx_val=batch_idx,
+                    phase="zmiana interwału",
                 )
 
-                logger.info("Ustawiam interwał: %s", interval)
-                target_page.keyboard.type(
-                    interval, delay=perf.keyboard_delay_ms
+                interval_ms = int(
+                    _switch_chart_interval(target_page, interval) * 1000
                 )
-                time.sleep(perf.small_action_s)
-                target_page.keyboard.press("Enter")
-                _wait_for_interval_loaded(target_page, interval)
 
                 row_data = {
                     "Ticker": ticker,
@@ -2430,19 +2831,38 @@ def _execute_ticker_first_loop(
                     or is_subset_run
                 ]
                 if indicators_to_parse:
+                    parse_label = ", ".join(indicators_to_parse)
+                    _report_progress(
+                        ticker_idx,
+                        interval_name=interval,
+                        interval_idx=interval_idx,
+                        current_ticker=ticker,
+                        current_indicator=parse_label,
+                        progress_resumed=progress_resumed,
+                        batch_idx_val=batch_idx,
+                        phase=f"odczyt {parse_label}",
+                    )
                     logger.info(
                         "Odczyt HTML (partia %d/%d): %s",
                         batch_idx + 1,
                         n_batches,
-                        ", ".join(indicators_to_parse),
+                        parse_label,
                     )
-                    _parse_indicators_from_page(
+                    wait_ms, parse_ms = _parse_indicators_from_page(
                         target_page,
                         indicators_to_parse,
                         row_data,
                         ticker=ticker,
                         interval=interval,
                         indicator_search=indicator_search,
+                    )
+                    logger.info(
+                        "Krok %s/%s: interwał=%dms wait=%dms parse=%dms",
+                        ticker,
+                        interval,
+                        interval_ms,
+                        int(wait_ms * 1000),
+                        int(parse_ms * 1000),
                     )
 
                 if is_indicator_subset and erow is not None:
@@ -2463,13 +2883,20 @@ def _execute_ticker_first_loop(
 
             if is_last_batch:
                 results_buf.flush()
-                try:
-                    scrape_tv_fundamentals(target_page, ticker)
-                except Exception as exc:
-                    logger.warning(
-                        "Fundamentale dla %s — błąd po fazie technicznej: %s",
+                if _fundamentals_during_scrape():
+                    try:
+                        scrape_tv_fundamentals(target_page, ticker)
+                    except Exception as exc:
+                        logger.warning(
+                            "Fundamentale dla %s — błąd po fazie technicznej: %s",
+                            ticker,
+                            exc,
+                        )
+                else:
+                    logger.debug(
+                        "Fundamentale %s pominięte w trakcie scrapingu "
+                        "(fundamentals.during_scrape=false).",
                         ticker,
-                        exc,
                     )
 
         for ind_name in reversed(added):
@@ -2517,10 +2944,14 @@ def run_scraper(
     processed_combos = set()
     current_run_file = None
     session_started_at: Optional[float] = None
+    active_elapsed_s: float = 0.0
     start_ind_idx = 0
     start_ticker_idx = 0
+    start_interval_idx = 0
     resumed = False
     show_resumed_label = False
+    eta_baseline_done = 0
+    eta_baseline_elapsed_s = 0.0
 
     if persist_state and os.path.exists(state_file):
         try:
@@ -2536,6 +2967,10 @@ def run_scraper(
                         session_started_at = os.path.getmtime(state_file)
                     except OSError:
                         pass
+                try:
+                    active_elapsed_s = float(state.get("active_elapsed_s") or 0.0)
+                except (TypeError, ValueError):
+                    active_elapsed_s = 0.0
                 if no_data_only and state.get("no_data_only") and state.get("tickers"):
                     saved_inds = [
                         str(i).strip()
@@ -2546,10 +2981,24 @@ def run_scraper(
                         tickers = list(state.get("tickers") or tickers)
                         start_ind_idx = max(int(state.get("ind_idx") or 0), 0)
                         start_ticker_idx = max(int(state.get("ticker_idx") or 0), 0)
+                        start_interval_idx = max(int(state.get("interval_idx") or 0), 0)
                         resumed = True
                         show_resumed_label = bool(state.get("resumed")) or (
                             start_ind_idx > 0 or start_ticker_idx > 0
                         )
+                        n_batches = len(
+                            chunk_indicators(indicators, perf.max_indicators_on_chart)
+                        )
+                        n_intervals = max(len(intervals), 1)
+                        eta_baseline_done, _ = scraper_overall_progress_ticker_first(
+                            start_ticker_idx,
+                            len(tickers),
+                            start_ind_idx,
+                            n_batches,
+                            start_interval_idx,
+                            n_intervals,
+                        )
+                        eta_baseline_elapsed_s = active_elapsed_s
                         logger.info(
                             "Wznawiam no_data run: ticker %d/%d, wsk. %d/%d, plik: %s",
                             start_ticker_idx + 1,
@@ -2565,8 +3014,35 @@ def run_scraper(
                             ", ".join(indicators or []),
                         )
                 elif not no_data_only and not state.get("no_data_only"):
+                    start_ticker_idx = max(int(state.get("ticker_idx") or 0), 0)
+                    start_ind_idx = max(int(state.get("ind_idx") or 0), 0)
+                    start_interval_idx = max(int(state.get("interval_idx") or 0), 0)
+                    resumed = True
+                    show_resumed_label = bool(state.get("resumed")) or (
+                        start_ind_idx > 0
+                        or start_ticker_idx > 0
+                        or start_interval_idx > 0
+                    )
+                    n_batches = len(
+                        chunk_indicators(indicators, perf.max_indicators_on_chart)
+                    )
+                    n_intervals = max(len(intervals), 1)
+                    eta_baseline_done, _ = scraper_overall_progress_ticker_first(
+                        start_ticker_idx,
+                        len(tickers),
+                        start_ind_idx,
+                        n_batches,
+                        start_interval_idx,
+                        n_intervals,
+                    )
+                    eta_baseline_elapsed_s = active_elapsed_s
                     logger.info(
-                        "Wznawiam pracę z poprzedniej sesji. Plik: %s (pominięto %d kombinacji)",
+                        "Wznawiam pełny run: ticker %d/%d, partia %d/%d, interwał idx %d, plik: %s (pominięto %d kombinacji)",
+                        start_ticker_idx + 1,
+                        len(tickers),
+                        start_ind_idx + 1,
+                        n_batches,
+                        start_interval_idx,
                         current_run_file,
                         len(processed_combos),
                     )
@@ -2577,6 +3053,7 @@ def run_scraper(
                     current_run_file = None
                     processed_combos = set()
                     session_started_at = None
+                    active_elapsed_s = 0.0
                 elif not no_data_only and state.get("no_data_only"):
                     logger.info(
                         "Istniejący stan no_data — rozpoczynam pełny run od nowa."
@@ -2584,6 +3061,7 @@ def run_scraper(
                     current_run_file = None
                     processed_combos = set()
                     session_started_at = None
+                    active_elapsed_s = 0.0
         except Exception as e:
             logger.warning("Błąd odczytu pliku stanu: %s", e)
 
@@ -2598,8 +3076,12 @@ def run_scraper(
         )
         start_ind_idx = 0
         start_ticker_idx = 0
+        start_interval_idx = 0
         resumed = False
         show_resumed_label = False
+        active_elapsed_s = 0.0
+        eta_baseline_done = 0
+        eta_baseline_elapsed_s = 0.0
 
     if persist_state and session_started_at is None:
         session_started_at = time.time()
@@ -2613,24 +3095,45 @@ def run_scraper(
         perf.keyboard_delay_ms,
     )
 
-    def persist_checkpoint(ticker_val_idx: int, ind_val_idx: int, *, mark_resumed: bool = False):
+    def persist_checkpoint(
+        ticker_val_idx: int,
+        ind_val_idx: int,
+        *,
+        mark_resumed: bool = False,
+        interval_val_idx: Optional[int] = None,
+    ):
         if not persist_state:
             return
+        nonlocal active_elapsed_s, run_t0
+        if run_t0 is not None:
+            active_elapsed_s = _scraper_elapsed_seconds(active_elapsed_s, run_t0)
+            run_t0 = time.perf_counter()
+        iv = (
+            interval_val_idx
+            if interval_val_idx is not None
+            else getattr(update_state, "_last_interval_idx", 0)
+        )
         try:
             _write_run_state_file(
                 state_file,
                 current_run_file=current_run_file,
                 processed_combos=processed_combos,
                 session_started_at=session_started_at,
+                active_elapsed_s=active_elapsed_s,
                 ticker_idx=ticker_val_idx,
                 ind_idx=ind_val_idx,
                 tickers=tickers,
                 indicators=indicators,
                 no_data_only=no_data_only,
                 resumed=mark_resumed or show_resumed_label,
+                interval_idx=iv,
+                eta_baseline_done=eta_baseline_done,
+                eta_baseline_elapsed_s=eta_baseline_elapsed_s,
             )
         except Exception as exc:
             logger.warning("Nie udało się zapisać stanu sesji: %s", exc)
+
+    run_t0 = None
 
     def update_state(ticker_val, interval_val):
         if not persist_state:
@@ -2639,16 +3142,17 @@ def run_scraper(
         persist_checkpoint(
             getattr(update_state, "_last_ticker_idx", 0),
             getattr(update_state, "_last_ind_idx", 0),
+            interval_val_idx=getattr(update_state, "_last_interval_idx", 0),
         )
 
     update_state._last_ticker_idx = 0
     update_state._last_ind_idx = 0
+    update_state._last_interval_idx = 0
 
     if persist_state and no_data_only and not resumed:
         persist_checkpoint(0, 0)
 
     with sync_playwright() as p:
-        run_t0 = None
         try:
             try:
                 browser = p.chromium.connect_over_cdp(cdp_url)
@@ -2761,7 +3265,7 @@ def run_scraper(
 
             n_inds = len(indicators)
 
-            use_ticker_first = perf.loop_mode == "ticker_first" and start_ind_idx == 0
+            use_ticker_first = perf.loop_mode == "ticker_first"
             if use_ticker_first:
                 completed = _execute_ticker_first_loop(
                     target_page,
@@ -2780,12 +3284,16 @@ def run_scraper(
                     persist_checkpoint=persist_checkpoint,
                     update_state=update_state,
                     start_ticker_idx=start_ticker_idx,
+                    start_ind_idx=start_ind_idx,
+                    start_interval_idx=start_interval_idx,
                     show_resumed_label=show_resumed_label,
-                    session_started_at=session_started_at,
+                    active_elapsed_s=active_elapsed_s,
                     run_t0=run_t0,
+                    eta_baseline_done=eta_baseline_done,
+                    eta_baseline_elapsed_s=eta_baseline_elapsed_s,
                 )
                 if completed:
-                    elapsed = time.perf_counter() - run_t0
+                    elapsed = _scraper_elapsed_seconds(active_elapsed_s, run_t0)
                     dh = _format_duration(elapsed)
                     logger.info(
                         "Zakończono ticker_first w %s (%.2fs). Dane: %s",
@@ -2796,6 +3304,7 @@ def run_scraper(
                     n_tf_batches = len(
                         chunk_indicators(indicators, perf.max_indicators_on_chart)
                     )
+                    n_tf_intervals = max(len(intervals), 1)
                     write_scraper_status(
                         "done",
                         _format_scraper_progress_ticker_first(
@@ -2803,6 +3312,8 @@ def run_scraper(
                             len(tickers),
                             batch_idx=n_tf_batches - 1,
                             n_batches=n_tf_batches,
+                            interval_idx=n_tf_intervals - 1,
+                            n_intervals=n_tf_intervals,
                         ),
                         "",
                         "",
@@ -2840,15 +3351,17 @@ def run_scraper(
                     progress_resumed = show_resumed_label and (
                         ticker_idx == ticker_begin and ind_idx == start_ind_idx
                     )
-                    progress_str, eta_seconds, eta_label = _build_running_scraper_progress(
+                    progress_str, eta_seconds, eta_label, eta_total_label = _build_running_scraper_progress(
                         ticker_idx,
                         len(tickers),
                         ind_idx,
                         n_inds,
                         ind_name,
-                        session_started_at=session_started_at if persist_state else None,
+                        active_elapsed_s=active_elapsed_s,
                         run_t0=run_t0,
                         resumed=progress_resumed,
+                        eta_baseline_done=eta_baseline_done,
+                        eta_baseline_elapsed_s=eta_baseline_elapsed_s,
                     )
                     write_scraper_status(
                         "running",
@@ -2857,6 +3370,7 @@ def run_scraper(
                         current_indicator=ind_name,
                         eta_seconds=eta_seconds,
                         eta_label=eta_label or None,
+                        eta_total_label=eta_total_label or None,
                     )
 
                     existing_df = results_buf.dataframe
@@ -2914,11 +3428,18 @@ def run_scraper(
                         continue
 
                     try:
-                        company_name, exchange, current_price, skip_reason = (
-                            _resolve_ticker_metadata(
-                                target_page, ticker, symbol_search_info
-                            )
+                        cached_meta = _metadata_from_existing_rows(
+                            results_buf.dataframe, ticker
                         )
+                        if cached_meta:
+                            company_name, exchange, current_price = cached_meta
+                            skip_reason = None
+                        else:
+                            company_name, exchange, current_price, skip_reason = (
+                                _resolve_ticker_metadata(
+                                    target_page, ticker, symbol_search_info
+                                )
+                            )
                         if skip_reason:
                             logger.warning("Ticker %s nie istnieje. Pomijam...", ticker)
                             results_buf.record_skipped(ticker, skip_reason)
@@ -2982,12 +3503,9 @@ def run_scraper(
                                 )
                                 continue
 
-                        logger.info("Ustawiam interwał: %s", interval)
-                        perf = scraper_perf()
-                        target_page.keyboard.type(interval, delay=perf.keyboard_delay_ms)
-                        time.sleep(perf.small_action_s)
-                        target_page.keyboard.press("Enter")
-                        _wait_for_interval_loaded(target_page, interval)
+                        interval_ms = int(
+                            _switch_chart_interval(target_page, interval) * 1000
+                        )
 
                         row_data = {
                             "Ticker": ticker,
@@ -3023,13 +3541,21 @@ def run_scraper(
                                 "Odczyt HTML dla wskaźnika: %s (adaptive wait)",
                                 ind_name,
                             )
-                            _parse_indicators_from_page(
+                            wait_ms, parse_ms = _parse_indicators_from_page(
                                 target_page,
                                 [ind_name],
                                 row_data,
                                 ticker=ticker,
                                 interval=interval,
                                 indicator_search=indicator_search,
+                            )
+                            logger.info(
+                                "Krok %s/%s: interwał=%dms wait=%dms parse=%dms",
+                                ticker,
+                                interval,
+                                interval_ms,
+                                int(wait_ms * 1000),
+                                int(parse_ms * 1000),
                             )
 
                         if is_last_indicator:
@@ -3050,7 +3576,7 @@ def run_scraper(
                             results_buf.upsert(row_data)
 
                     results_buf.flush()
-                    if is_last_indicator:
+                    if is_last_indicator and _fundamentals_during_scrape():
                         try:
                             scrape_tv_fundamentals(target_page, ticker)
                         except Exception as exc:
@@ -3063,7 +3589,7 @@ def run_scraper(
                 remove_active_indicator(target_page, ind_name, "faza")
 
             results_buf.flush()
-            elapsed = time.perf_counter() - run_t0
+            elapsed = _scraper_elapsed_seconds(active_elapsed_s, run_t0)
             dh = _format_duration(elapsed)
             logger.info(
                 "Zakończono pełny przebieg w %s (%.2fs). Pobrane dane są w: %s",
@@ -3091,7 +3617,7 @@ def run_scraper(
         except Exception as e:
             elapsed = None
             if run_t0 is not None:
-                elapsed = time.perf_counter() - run_t0
+                elapsed = _scraper_elapsed_seconds(active_elapsed_s, run_t0)
             logger.error("Błąd podczas scrapowania: %s", e)
             write_scraper_status(
                 "error",
@@ -3219,7 +3745,7 @@ if __name__ == "__main__":
     n_tickers = max(len(TICKERS), 1)
     n_inds = max(len(INDICATORS), 1)
     ind0 = INDICATORS[0] if INDICATORS else ""
-    progress_str, eta_seconds, eta_label = _build_running_scraper_progress(
+    progress_str, eta_seconds, eta_label, eta_total_label = _build_running_scraper_progress(
         0, n_tickers, 0, n_inds, ind0
     )
     write_scraper_status(
@@ -3228,6 +3754,7 @@ if __name__ == "__main__":
         current_indicator=ind0,
         eta_seconds=eta_seconds,
         eta_label=eta_label or None,
+        eta_total_label=eta_total_label or None,
     )
     try:
         run_scraper(

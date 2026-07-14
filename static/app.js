@@ -860,9 +860,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function consensusForRows(rows) {
-        const targetIv = intervalCodeForSignal();
-        const row = (rows || []).find(r => (r?.['Interval'] || '').trim().toUpperCase() === targetIv);
+    function consensusForInterval(rows, ivCode) {
+        const row = (rows || []).find(r => (r?.['Interval'] || '').trim().toUpperCase() === ivCode);
         if (!row) {
             return { direction: 'none', bullish: 0, bearish: 0, neutral: 0, total: 0, score: 0 };
         }
@@ -885,6 +884,10 @@ document.addEventListener('DOMContentLoaded', () => {
         return { direction, bullish, bearish, neutral, total, score: bullish - bearish };
     }
 
+    function consensusForRows(rows) {
+        return consensusForInterval(rows, intervalCodeForSignal());
+    }
+
     function tickerMatchesConsensus(rows) {
         if (!consensusFilter || consensusFilter === 'all') return true;
         return consensusForRows(rows).direction === consensusFilter;
@@ -895,6 +898,260 @@ document.addEventListener('DOMContentLoaded', () => {
         if (c.direction === 'bullish') return `${c.bullish}/${ALL_STRATEGY_IDS.length} bullish`;
         if (c.direction === 'bearish') return `${c.bearish}/${ALL_STRATEGY_IDS.length} bearish`;
         return `${c.neutral}/${ALL_STRATEGY_IDS.length} neutral`;
+    }
+
+    const MATRIX_INTERVALS = [
+        { code: '1D', label: 'D' },
+        { code: '1W', label: 'W' },
+        { code: '1M', label: 'M' },
+    ];
+
+    function signalLabelPl(signal) {
+        const sig = (signal || '').toLowerCase().trim();
+        if (sig === 'strong buy') return 'mocny kup';
+        if (sig === 'buy') return 'kup';
+        if (sig === 'neutral') return 'neutralny';
+        if (sig === 'sell') return 'sprzedaż';
+        if (sig === 'strong sell') return 'mocna sprzedaż';
+        return signal || '';
+    }
+
+    function signalCssClass(signal) {
+        const sig = (signal || '').toLowerCase().trim();
+        if (sig === 'strong buy') return 'strong-buy';
+        if (sig === 'buy') return 'buy';
+        if (sig === 'neutral') return 'neutral';
+        if (sig === 'sell') return 'sell';
+        if (sig === 'strong sell') return 'strong-sell';
+        return 'empty';
+    }
+
+    function strategyLabelForId(strategyId) {
+        const meta = availableSignalStrategies.find(s => s.id === strategyId);
+        return meta?.label || STRATEGY_LABEL_FALLBACK[strategyId] || strategyId;
+    }
+
+    function rowForIntervalCode(rows, ivCode) {
+        return (rows || []).find(r => (r?.['Interval'] || '').trim().toUpperCase() === ivCode);
+    }
+
+    function computeSingleStrategyVerdict(rows, strategyId) {
+        const row = rowForIntervalCode(rows, intervalCodeForSignal());
+        const sig = rowSignalForStrategy(row, strategyId);
+        if (!sig) return { kind: 'none', label: '', sublabel: '', tooltip: '' };
+
+        let kind;
+        let label;
+        if (sig === 'strong buy') {
+            kind = 'kup-strong';
+            label = 'KUP mocny';
+        } else if (sig === 'buy') {
+            kind = 'kup';
+            label = 'KUP';
+        } else if (sig === 'strong sell') {
+            kind = 'sprzedaj-strong';
+            label = 'SPRZEDAJ mocno';
+        } else if (sig === 'sell') {
+            kind = 'sprzedaj';
+            label = 'SPRZEDAJ';
+        } else if (sig === 'neutral') {
+            kind = 'neutralny';
+            label = 'NEUTRALNY';
+        } else {
+            kind = 'mix';
+            label = 'MIX';
+        }
+
+        const sublabel = `${strategyLabelForId(strategyId)} · ${signalInterval}`;
+        const tooltip = `${strategyLabelForId(strategyId)} (${signalInterval}): ${signalLabelPl(sig)}`;
+        return { kind, label, sublabel, tooltip };
+    }
+
+    function buildConsensusVerdictTooltip(rows, c) {
+        const row = rowForIntervalCode(rows, intervalCodeForSignal());
+        const lines = [
+            `Interwał ${signalInterval}: ${c.bullish} kup, ${c.bearish} sprzedaż, ${c.neutral} neutral`,
+        ];
+        ALL_STRATEGY_IDS.forEach(id => {
+            const sig = rowSignalForStrategy(row, id);
+            if (!sig) return;
+            lines.push(`${strategyLabelForId(id)}: ${signalLabelPl(sig)}`);
+        });
+        return lines.join('\n');
+    }
+
+    function computeConsensusVerdict(rows) {
+        const c = consensusForRows(rows);
+        const row = rowForIntervalCode(rows, intervalCodeForSignal());
+        if (!row || c.total === 0) {
+            return { kind: 'none', label: '', sublabel: '', tooltip: '' };
+        }
+
+        const signals = ALL_STRATEGY_IDS.map(id => rowSignalForStrategy(row, id)).filter(Boolean);
+        const allStrongBuy = signals.length === ALL_STRATEGY_IDS.length
+            && signals.every(sig => sig === 'strong buy');
+        const allStrongSell = signals.length === ALL_STRATEGY_IDS.length
+            && signals.every(sig => sig === 'strong sell');
+
+        let kind;
+        let label;
+        if (c.bullish > c.bearish) {
+            if (c.bullish === ALL_STRATEGY_IDS.length && allStrongBuy) {
+                kind = 'kup-strong';
+                label = 'KUP mocny';
+            } else {
+                kind = 'kup';
+                label = 'KUP';
+            }
+        } else if (c.bearish > c.bullish) {
+            if (c.bearish === ALL_STRATEGY_IDS.length && allStrongSell) {
+                kind = 'sprzedaj-strong';
+                label = 'SPRZEDAJ mocno';
+            } else {
+                kind = 'sprzedaj';
+                label = 'SPRZEDAJ';
+            }
+        } else if (c.neutral === c.total) {
+            kind = 'neutralny';
+            label = 'NEUTRALNY';
+        } else {
+            kind = 'mix';
+            label = 'MIX';
+        }
+
+        let countPart;
+        if (c.direction === 'bullish') countPart = `${c.bullish}/${ALL_STRATEGY_IDS.length}`;
+        else if (c.direction === 'bearish') countPart = `${c.bearish}/${ALL_STRATEGY_IDS.length}`;
+        else if (c.neutral > 0 && c.bullish === c.bearish) countPart = `${c.neutral}/${ALL_STRATEGY_IDS.length}`;
+        else countPart = `${c.bullish}↑ ${c.bearish}↓ ${c.neutral}—`;
+
+        return {
+            kind,
+            label,
+            sublabel: `${countPart} strategii · ${signalInterval}`,
+            tooltip: buildConsensusVerdictTooltip(rows, c),
+        };
+    }
+
+    function computeTaVerdict(rows) {
+        if (signalStrategy !== 'all') {
+            return computeSingleStrategyVerdict(rows, signalStrategy);
+        }
+        return computeConsensusVerdict(rows);
+    }
+
+    function taVerdictBucket(kind) {
+        if (kind === 'kup' || kind === 'kup-strong') return 'kup';
+        if (kind === 'sprzedaj' || kind === 'sprzedaj-strong') return 'sprzedaj';
+        return 'obserwuj';
+    }
+
+    function compositeConflictsWithTa(compositeVerdict, taKind) {
+        const cv = String(compositeVerdict || '').toLowerCase();
+        const ta = taVerdictBucket(taKind);
+        if (!cv || taKind === 'none') return false;
+        if (cv === ta) return false;
+        return (cv === 'kup' && ta === 'sprzedaj') || (cv === 'unikaj' && ta === 'kup');
+    }
+
+    function renderSignalVerdictStrip(cardClone, rows) {
+        const strip = cardClone.querySelector('.signal-verdict-strip');
+        if (!strip) return null;
+        const verdict = computeTaVerdict(rows);
+        if (!verdict.label) {
+            strip.hidden = true;
+            strip.textContent = '';
+            strip.className = 'signal-verdict-strip';
+            strip.removeAttribute('title');
+            return null;
+        }
+        strip.hidden = false;
+        strip.className = `signal-verdict-strip verdict-${verdict.kind}`;
+        strip.innerHTML = `<span class="verdict-label">${escapeHtml(verdict.label)}</span>`
+            + `<span class="verdict-sub">${escapeHtml(verdict.sublabel)}</span>`;
+        strip.title = verdict.tooltip;
+        return verdict;
+    }
+
+    function consensusCellText(c) {
+        if (!c || c.total === 0) return '—';
+        if (c.direction === 'bullish') return `${c.bullish}/${ALL_STRATEGY_IDS.length}`;
+        if (c.direction === 'bearish') return `${c.bearish}/${ALL_STRATEGY_IDS.length}`;
+        if (c.neutral > 0) return `${c.neutral}/${ALL_STRATEGY_IDS.length}`;
+        return `${c.bullish}/${ALL_STRATEGY_IDS.length}`;
+    }
+
+    function consensusCellTooltip(c, ivLabel) {
+        if (!c || c.total === 0) return `Brak sygnałów (${ivLabel})`;
+        return `${ivLabel}: ${c.bullish} kup, ${c.bearish} sprzedaż, ${c.neutral} neutral`;
+    }
+
+    function renderSignalMatrix(container, rows, strategiesToShow) {
+        if (!container) return;
+        container.innerHTML = '';
+        container.className = 'strategy-badges watchlist-badges';
+
+        const colDefs = [];
+        if (signalStrategy === 'all') {
+            colDefs.push({ kind: 'consensus', id: 'consensus', label: 'Cons.' });
+        }
+        strategiesToShow.forEach(sid => {
+            colDefs.push({ kind: 'strategy', id: sid, label: strategyLabelForId(sid) });
+        });
+
+        const matrix = document.createElement('div');
+        matrix.className = 'signal-matrix';
+        matrix.style.setProperty('--signal-matrix-cols', String(colDefs.length));
+
+        const corner = document.createElement('span');
+        corner.className = 'signal-matrix-corner';
+        matrix.appendChild(corner);
+
+        colDefs.forEach(colDef => {
+            const col = document.createElement('span');
+            col.className = 'signal-matrix-col';
+            col.textContent = colDef.label;
+            col.title = colDef.kind === 'consensus'
+                ? 'Consensus wszystkich strategii'
+                : colDef.label;
+            matrix.appendChild(col);
+        });
+
+        MATRIX_INTERVALS.forEach(({ code, label: ivLabel }) => {
+            const rowLabel = document.createElement('span');
+            rowLabel.className = 'signal-matrix-label';
+            if (ivLabel === signalInterval) rowLabel.classList.add('row-active');
+            rowLabel.textContent = ivLabel;
+            matrix.appendChild(rowLabel);
+
+            colDefs.forEach(colDef => {
+                const cell = document.createElement('span');
+                cell.className = 'signal-matrix-cell';
+                if (ivLabel === signalInterval) cell.classList.add('row-active');
+
+                if (colDef.kind === 'consensus') {
+                    const c = consensusForInterval(rows, code);
+                    if (c.total > 0 && c.direction !== 'none') {
+                        cell.classList.add(`consensus-${c.direction}`);
+                    } else {
+                        cell.classList.add('empty');
+                    }
+                    cell.textContent = consensusCellText(c);
+                    cell.title = consensusCellTooltip(c, ivLabel);
+                } else {
+                    const row = rowForIntervalCode(rows, code);
+                    const sig = rowSignalForStrategy(row, colDef.id);
+                    cell.classList.add(signalCssClass(sig));
+                    cell.textContent = sig ? '●' : '—';
+                    cell.title = sig
+                        ? `${colDef.label} · ${ivLabel}: ${signalLabelPl(sig)}`
+                        : `${colDef.label} · ${ivLabel}: brak sygnału`;
+                }
+                matrix.appendChild(cell);
+            });
+        });
+
+        container.appendChild(matrix);
     }
 
     function flattenDashboardTickers(tickerEntries) {
@@ -1044,7 +1301,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return tip;
     }
 
-    function addCompositeVerdictBadge(cardClone, rows) {
+    function addCompositeVerdictBadge(cardClone, rows, taVerdict) {
         const badge = cardClone.querySelector('.composite-verdict-badge');
         if (!badge) return;
         const row = (rows || []).find(r => r['Composite_Verdict']) || rows[0];
@@ -1057,9 +1314,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         badge.hidden = false;
-        badge.className = `composite-verdict-badge wl-badge verdict-${verdict}`;
+        const conflict = taVerdict && compositeConflictsWithTa(verdict, taVerdict.kind);
+        badge.className = `composite-verdict-badge wl-badge verdict-${verdict}${conflict ? ' verdict-conflict' : ''}`;
         badge.textContent = verdict === 'kup' ? 'Kup' : (verdict === 'unikaj' ? 'Unikaj' : 'Obserwuj');
-        badge.title = formatCompositeTooltip(row);
+        let tip = formatCompositeTooltip(row);
+        if (conflict && taVerdict) {
+            tip += `\n\nUwaga: sygnał TA (${taVerdict.label}) różni się od werdyktu composite (${badge.textContent}).`;
+        }
+        badge.title = tip;
     }
 
     function cmpVerdictGroups(aTicker, bTicker, groupedData) {
@@ -1854,7 +2116,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            addCompositeVerdictBadge(cardClone, rows);
+            const taVerdict = renderSignalVerdictStrip(cardClone, rows);
+            addCompositeVerdictBadge(cardClone, rows, taVerdict);
+
             const companyEl = cardClone.querySelector('.company-name');
             const hasRealName = companyName && companyName !== '—'
                 && companyName.toUpperCase() !== ticker.toUpperCase();
@@ -2012,21 +2276,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             const badgesContainer = cardClone.querySelector('.watchlist-badges');
-            const dRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1D') || rows[0];
-            const wRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1W');
-            const mRow = rows.find(r => (r['Interval'] || '').toUpperCase() === '1M');
-            addConsensusBadge(badgesContainer, rows);
             const strategiesToShow = signalStrategy === 'all'
                 ? availableSignalStrategies.map(s => s.id)
                 : [signalStrategy];
-            strategiesToShow.forEach(sid => {
-                const col = `Computed_Signal_${sid}`;
-                const meta = availableSignalStrategies.find(s => s.id === sid);
-                const prefix = strategiesToShow.length > 1 && meta ? `${meta.label} · ` : '';
-                if (dRow && dRow[col]) addSignalBadge(badgesContainer, `${prefix}D`, dRow[col]);
-                if (wRow && wRow[col]) addSignalBadge(badgesContainer, `${prefix}W`, wRow[col]);
-                if (mRow && mRow[col]) addSignalBadge(badgesContainer, `${prefix}M`, mRow[col]);
-            });
+            renderSignalMatrix(badgesContainer, rows, strategiesToShow);
 
             // Click header to toggle collapse (persist state)
             const header = cardClone.querySelector('.card-header');
@@ -2163,41 +2416,6 @@ document.addEventListener('DOMContentLoaded', () => {
         errorText.textContent = msg;
     }
     function hideError() { errorMessage.classList.add('hidden'); }
-
-    function addSignalBadge(container, label, signal) {
-        const badge = document.createElement('span');
-        badge.className = 'wl-badge';
-        const signalLower = signal.toLowerCase().trim();
-        
-        if (signalLower === 'strong buy') {
-            badge.classList.add('strong-buy');
-        } else if (signalLower === 'buy') {
-            badge.classList.add('buy');
-        } else if (signalLower === 'neutral') {
-            badge.classList.add('neutral');
-        } else if (signalLower === 'sell') {
-            badge.classList.add('sell');
-        } else if (signalLower === 'strong sell') {
-            badge.classList.add('strong-sell');
-        } else {
-            return; // Don't render empty signals
-        }
-        
-        badge.textContent = `${label}: ${signal}`;
-        container.appendChild(badge);
-    }
-
-    function addConsensusBadge(container, rows) {
-        if (!container) return;
-        const c = consensusForRows(rows);
-        const label = consensusLabel(c);
-        if (!label) return;
-        const badge = document.createElement('span');
-        badge.className = `wl-badge consensus-badge consensus-${c.direction}`;
-        badge.textContent = `Consensus ${signalInterval}: ${label}`;
-        badge.title = `Bullish ${c.bullish}, bearish ${c.bearish}, neutral ${c.neutral} z ${ALL_STRATEGY_IDS.length} strategii`;
-        container.appendChild(badge);
-    }
 
     function setTrendTextAndColor(node, val) {
         val = (val == null ? '' : String(val)).trim();
@@ -2647,8 +2865,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function formatScraperEtaSuffix(data) {
+        const display = data?.eta_display;
+        if (display && typeof display === 'string') return display;
         const label = data?.eta_label;
-        if (label && typeof label === 'string') return label;
+        const total = data?.eta_total_label;
+        if (label === 'szacowanie…') return 'szacowanie…';
+        if (label && total) return `pozostało ${label} (całość ${total})`;
+        if (label && typeof label === 'string') return `pozostało ${label}`;
         return '';
     }
 

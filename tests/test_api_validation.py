@@ -1299,7 +1299,47 @@ def test_stop_checkpoints_state_from_status(client, app_env, tmp_path, monkeypat
     assert saved["resumed"] is True
 
 
-# --- /api/results pass-through Exchange + backfill ------------------------
+def test_stop_checkpoints_state_from_ticker_first_progress(client, app_env, tmp_path, monkeypatch):
+    m, res, _dat = app_env
+    state_path = tmp_path / "scraper_state.json"
+    status_path = tmp_path / "scraper_status.json"
+    csv_path = res / "tradingview_results_2026-05-11.csv"
+    csv_path.write_text("Ticker,Interval\n", encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "current_file": str(csv_path),
+                "processed": [],
+                "no_data_only": False,
+                "tickers": ["A"] * 174,
+                "indicators": ["PCA", "HTS Panel", "MacD"],
+                "ticker_idx": 0,
+                "ind_idx": 0,
+                "active_elapsed_s": 5300.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "progress": "261/1044 · ticker 87/174 · partia 1/2 · 1M · odczyt PCA",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "STATE_FILE", str(state_path))
+    monkeypatch.setattr(m, "STATUS_FILE", str(status_path))
+
+    m._checkpoint_scraper_state_from_status()
+    with open(state_path, encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["ticker_idx"] == 86
+    assert saved["ind_idx"] == 0
+    assert saved["interval_idx"] == 2
+    assert saved["resumed"] is True
+    assert saved["active_elapsed_s"] == 5300.0
 
 def test_results_passes_through_exchange_column(client, app_env, monkeypatch):
     _m, res, _dat = app_env
