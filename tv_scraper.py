@@ -328,6 +328,91 @@ def _wait_for_ticker_loaded(target_page, ticker: str) -> bool:
     )
 
 
+# Kanoniczne interwały z configu → aliasy widoczne w toolbarze TradingView
+# (PL: tygodniowy często „1T", ang. „1W"; godzinowy „1H"/„60" NIE jest 1D).
+_INTERVAL_CANONICAL: Dict[str, frozenset] = {
+    "1D": frozenset({"1D", "D", "DAY", "DAILY", "DZIENNY", "DZIEN", "DŹIEŃ", "DZIEN"}),
+    "1W": frozenset(
+        {"1W", "W", "1T", "T", "WEEK", "WEEKLY", "TYDZIEŃ", "TYDZIEN", "TYDZ"}
+    ),
+    "1M": frozenset(
+        {"1M", "M", "MONTH", "MONTHLY", "MIESIĄC", "MIESIAC", "MIES"}
+    ),
+}
+
+
+def _canonical_interval(raw: object) -> str:
+    """Mapuje etykietę z toolbara TV (np. ``1T``, ``H1``) na ``1D``/``1W``/``1M``."""
+    token = str(raw or "").strip().upper()
+    if not token:
+        return ""
+    # Usuń zbędne znaki (np. „1D · ...").
+    token = re.split(r"[\s·|/,]+", token)[0]
+    for canon, aliases in _INTERVAL_CANONICAL.items():
+        if token == canon or token in aliases:
+            return canon
+    return token
+
+
+def _read_displayed_chart_interval(target_page) -> str:
+    """Odczyt faktycznie wyświetlanego interwału z toolbara wykresu (nie z listy ulubionych)."""
+    selectors = [
+        'button[data-name="time-intervals"]',
+        "#header-toolbar-intervals",
+        '[data-name="header-toolbar-intervals"]',
+        'button[id*="header-toolbar-intervals"]',
+    ]
+    for sel in selectors:
+        try:
+            loc = target_page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            dv = (loc.get_attribute("data-value") or "").strip()
+            if dv:
+                canon = _canonical_interval(dv)
+                if canon:
+                    return canon
+            text = (loc.inner_text(timeout=1500) or "").strip()
+            if text:
+                first = re.split(r"[\s\n·]+", text)[0]
+                canon = _canonical_interval(first)
+                if canon in _INTERVAL_CANONICAL:
+                    return canon
+        except Exception:
+            continue
+    try:
+        raw = target_page.evaluate(
+            """() => {
+                const sels = [
+                  'button[data-name="time-intervals"]',
+                  '#header-toolbar-intervals',
+                  '[data-name="header-toolbar-intervals"]',
+                ];
+                for (const sel of sels) {
+                  const el = document.querySelector(sel);
+                  if (!el) continue;
+                  const dv = (el.getAttribute('data-value') || '').trim();
+                  if (dv) return dv;
+                  const t = (el.innerText || el.textContent || '').trim();
+                  if (t) return t.split(/\\s+/)[0];
+                }
+                return '';
+            }"""
+        )
+        return _canonical_interval(str(raw or ""))
+    except Exception:
+        return ""
+
+
+def _chart_interval_is(target_page, expected: str) -> bool:
+    """True tylko gdy toolbar wykresu pokazuje żądany interwał (nie ulubiony przycisk w DOM)."""
+    want = _canonical_interval(expected)
+    if want not in _INTERVAL_CANONICAL:
+        return False
+    got = _read_displayed_chart_interval(target_page)
+    return got == want
+
+
 def _interval_button_is_active(target_page, interval: str) -> bool:
     """True gdy interwał jest zaznaczony w toolbarze (nie tylko obecny w DOM)."""
     iv = (interval or "").strip()
@@ -371,7 +456,7 @@ def _wait_for_interval_loaded(target_page, interval: str) -> bool:
     perf = scraper_perf()
 
     def _loaded() -> bool:
-        return _interval_button_is_active(target_page, interval)
+        return _chart_interval_is(target_page, interval)
 
     loaded = _adaptive_wait(
         _loaded,
@@ -381,9 +466,11 @@ def _wait_for_interval_loaded(target_page, interval: str) -> bool:
     if loaded:
         time.sleep(perf.interval_settle_s)
     else:
+        shown = _read_displayed_chart_interval(target_page) or "?"
         logger.warning(
-            "Interwał %s: nie potwierdzono aktywnego przycisku — kontynuuję po settle.",
+            "Interwał %s: toolbar wciąż pokazuje %s — kontynuuję po settle.",
             interval,
+            shown,
         )
         time.sleep(perf.interval_settle_s)
     return loaded
@@ -502,19 +589,44 @@ def _wait_compute_for_indicators(
     )
 
 
+def _apply_interval_via_keyboard(target_page, interval: str, *, use_comma: bool) -> None:
+    """Wpisanie interwału z klawiatury; opcjonalnie otwarcie pickera przecinkiem."""
+    perf = scraper_perf()
+    target_page.locator("body").click(force=True)
+    time.sleep(perf.micro_action_s)
+    if use_comma:
+        target_page.keyboard.press(",")
+        time.sleep(perf.small_action_s)
+    target_page.keyboard.type(interval, delay=perf.keyboard_delay_ms)
+    time.sleep(perf.small_action_s)
+    target_page.keyboard.press("Enter")
+
+
 def _switch_chart_interval(target_page, interval: str) -> float:
-    """Ustawia interwał wykresu; pomija wpisywanie gdy już aktywny. Zwraca czas w s."""
+    """Ustawia interwał wykresu; weryfikuje po toolbarze (nie po przyciskach w DOM)."""
     perf = scraper_perf()
     t0 = time.perf_counter()
-    if _interval_button_is_active(target_page, interval):
-        logger.debug("Interwał %s już aktywny — pomijam wpisywanie.", interval)
+    want = _canonical_interval(interval)
+    if _chart_interval_is(target_page, want):
+        logger.debug(
+            "Interwał %s już aktywny (toolbar) — pomijam wpisywanie.",
+            want,
+        )
         time.sleep(perf.interval_settle_active_s)
     else:
-        logger.info("Ustawiam interwał: %s", interval)
-        target_page.keyboard.type(interval, delay=perf.keyboard_delay_ms)
-        time.sleep(perf.small_action_s)
-        target_page.keyboard.press("Enter")
+        shown = _read_displayed_chart_interval(target_page) or "?"
+        logger.info("Ustawiam interwał: %s (toolbar: %s)", want, shown)
+        _apply_interval_via_keyboard(target_page, interval, use_comma=False)
         _wait_for_interval_loaded(target_page, interval)
+        if not _chart_interval_is(target_page, want):
+            shown_after = _read_displayed_chart_interval(target_page) or "?"
+            logger.warning(
+                "Interwał %s: po pierwszej próbie toolbar=%s — ponawiam z pickerem (,).",
+                want,
+                shown_after,
+            )
+            _apply_interval_via_keyboard(target_page, interval, use_comma=True)
+            _wait_for_interval_loaded(target_page, interval)
     return time.perf_counter() - t0
 
 logger = logging.getLogger("tv_scraper")

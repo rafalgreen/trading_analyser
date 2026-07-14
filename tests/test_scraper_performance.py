@@ -262,6 +262,111 @@ def test_format_scraper_progress_ticker_first_with_phases():
     assert "odczyt PCA, HTS Panel" in reading
 
 
+def test_canonical_interval_maps_polish_weekly():
+    assert tv._canonical_interval("1T") == "1W"
+    assert tv._canonical_interval("1W") == "1W"
+    assert tv._canonical_interval("1D") == "1D"
+    assert tv._canonical_interval("H1") == "H1"
+
+
+def test_chart_interval_is_compares_toolbar_display(monkeypatch):
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval", lambda page: "1W")
+    page = MagicMock()
+    assert tv._chart_interval_is(page, "1T") is True
+    assert tv._chart_interval_is(page, "1D") is False
+
+
+def _fake_page_h1_toolbar_favorite_1d_active():
+    """DOM jak na żywym TV: wykres H1, ulubiony 1D wygląda na „aktywny” w pasku."""
+    page = MagicMock()
+
+    class FakeLocator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        def count(self):
+            if 'button[data-name="time-intervals"]' in self.selector:
+                return 1
+            if "1D" in self.selector and (
+                '[aria-checked="true"]' in self.selector
+                or '[aria-pressed="true"]' in self.selector
+            ):
+                return 1
+            if self.selector == 'button[data-value="1D"]':
+                return 1
+            return 0
+
+        @property
+        def first(self):
+            return self
+
+        def get_attribute(self, name):
+            if 'data-name="time-intervals"' in self.selector:
+                if name == "data-value":
+                    return "60"
+                return None
+            if name == "class":
+                return "button interval-btn isActive"
+            if name in ("aria-checked", "aria-pressed"):
+                return "true"
+            return None
+
+        def inner_text(self, timeout=1500):
+            if 'data-name="time-intervals"' in self.selector:
+                return "1h"
+            return ""
+
+    page.locator = lambda sel: FakeLocator(sel)
+    return page
+
+
+def test_chart_interval_ignores_favorite_button_when_toolbar_shows_h1():
+    """Regresja: stara detekcja myliła ulubiony 1D z aktywnym wykresem na H1."""
+    page = _fake_page_h1_toolbar_favorite_1d_active()
+    assert tv._interval_button_is_active(page, "1D") is True
+    shown = tv._read_displayed_chart_interval(page)
+    assert shown != "1D"  # toolbar: 1h / data-value 60, nie dzienny
+    assert tv._chart_interval_is(page, "1D") is False
+
+
+def test_switch_chart_interval_switches_when_toolbar_h1_not_favorite_1d(monkeypatch):
+    """Regresja: przy H1 na wykresie scraper musi wpisać 1D, nie pomijać (~100ms)."""
+    perf = tv.ScraperPerformance({"mode": "fast"})
+    monkeypatch.setattr(tv, "_SCRAPER_PERF", perf)
+    page = _fake_page_h1_toolbar_favorite_1d_active()
+    page.keyboard = MagicMock()
+    real_locator = page.locator
+    body_click = MagicMock()
+
+    def locator(sel):
+        if sel == "body":
+            return body_click
+        return real_locator(sel)
+
+    page.locator = locator
+    displayed = {"value": "1H"}
+
+    def read_toolbar(target_page):
+        return displayed["value"]
+
+    def wait_loaded(target_page, interval):
+        displayed["value"] = tv._canonical_interval(interval)
+        return True
+
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval", read_toolbar)
+    monkeypatch.setattr(tv, "_wait_for_interval_loaded", wait_loaded)
+    monkeypatch.setattr(tv.time, "sleep", lambda s: None)
+
+    assert tv._interval_button_is_active(page, "1D") is True
+    assert tv._chart_interval_is(page, "1D") is False
+
+    tv._switch_chart_interval(page, "1D")
+
+    page.keyboard.type.assert_called_once_with("1D", delay=perf.keyboard_delay_ms)
+    page.keyboard.press.assert_any_call("Enter")
+    assert tv._chart_interval_is(page, "1D") is True
+
+
 def test_interval_button_is_active_detects_selected_not_mere_presence():
     page = MagicMock()
 
@@ -327,7 +432,7 @@ def test_wait_for_interval_loaded_waits_until_active(monkeypatch):
         calls["n"] += 1
         return calls["n"] >= 2
 
-    monkeypatch.setattr(tv, "_interval_button_is_active", active)
+    monkeypatch.setattr(tv, "_chart_interval_is", active)
     page = MagicMock()
     assert tv._wait_for_interval_loaded(page, "1D") is True
     assert calls["n"] >= 2
@@ -401,7 +506,7 @@ def test_switch_chart_interval_skips_keyboard_when_active(monkeypatch):
     monkeypatch.setattr(tv, "_SCRAPER_PERF", perf)
     page = MagicMock()
     page.keyboard = MagicMock()
-    monkeypatch.setattr(tv, "_interval_button_is_active", lambda *a, **k: True)
+    monkeypatch.setattr(tv, "_chart_interval_is", lambda *a, **k: True)
     monkeypatch.setattr(tv.time, "sleep", lambda s: None)
     elapsed = tv._switch_chart_interval(page, "1D")
     page.keyboard.type.assert_not_called()
@@ -414,12 +519,21 @@ def test_switch_chart_interval_types_when_inactive(monkeypatch):
     monkeypatch.setattr(tv, "_SCRAPER_PERF", perf)
     page = MagicMock()
     page.keyboard = MagicMock()
-    monkeypatch.setattr(tv, "_interval_button_is_active", lambda *a, **k: False)
+    page.locator = MagicMock(return_value=MagicMock())
+    checks = {"n": 0}
+
+    def chart_is(*args, **kwargs):
+        checks["n"] += 1
+        return checks["n"] > 1
+
+    monkeypatch.setattr(tv, "_chart_interval_is", chart_is)
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval", lambda *a, **k: "H1")
     monkeypatch.setattr(tv, "_wait_for_interval_loaded", lambda *a, **k: True)
     monkeypatch.setattr(tv.time, "sleep", lambda s: None)
     tv._switch_chart_interval(page, "1W")
     page.keyboard.type.assert_called_once()
-    page.keyboard.press.assert_called_once_with("Enter")
+    assert page.keyboard.press.call_count >= 1
+    page.keyboard.press.assert_any_call("Enter")
 
 
 def test_wait_for_interval_loaded_fallback_on_detection_failure(monkeypatch):
@@ -427,7 +541,8 @@ def test_wait_for_interval_loaded_fallback_on_detection_failure(monkeypatch):
     monkeypatch.setattr(tv, "_SCRAPER_PERF", perf)
     sleeps = []
     monkeypatch.setattr(tv.time, "sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr(tv, "_interval_button_is_active", lambda *a, **k: False)
+    monkeypatch.setattr(tv, "_chart_interval_is", lambda *a, **k: False)
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval", lambda *a, **k: "H1")
     monkeypatch.setattr(
         tv,
         "_adaptive_wait",
