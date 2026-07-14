@@ -341,6 +341,9 @@ _INTERVAL_CANONICAL: Dict[str, frozenset] = {
 }
 
 
+_INTERVAL_TOOLBAR_SELECTOR = 'button[data-name="time-intervals"]'
+
+
 def _canonical_interval(raw: object) -> str:
     """Mapuje etykietę z toolbara TV (np. ``1T``, ``H1``) na ``1D``/``1W``/``1M``."""
     token = str(raw or "").strip().upper()
@@ -354,54 +357,47 @@ def _canonical_interval(raw: object) -> str:
     return token
 
 
-def _read_displayed_chart_interval(target_page) -> str:
-    """Odczyt faktycznie wyświetlanego interwału z toolbara wykresu (nie z listy ulubionych)."""
-    selectors = [
-        'button[data-name="time-intervals"]',
-        "#header-toolbar-intervals",
-        '[data-name="header-toolbar-intervals"]',
-        'button[id*="header-toolbar-intervals"]',
-    ]
-    for sel in selectors:
-        try:
-            loc = target_page.locator(sel).first
-            if loc.count() == 0:
-                continue
-            dv = (loc.get_attribute("data-value") or "").strip()
-            if dv:
-                canon = _canonical_interval(dv)
-                if canon:
-                    return canon
-            text = (loc.inner_text(timeout=1500) or "").strip()
-            if text:
-                first = re.split(r"[\s\n·]+", text)[0]
-                canon = _canonical_interval(first)
-                if canon in _INTERVAL_CANONICAL:
-                    return canon
-        except Exception:
-            continue
+def _toolbar_interval_to_canonical(raw: object) -> str:
+    """Tylko 1D/1W/1M — inne (30M, H1, 60) zwracają pusty string."""
+    canon = _canonical_interval(raw)
+    if canon in _INTERVAL_CANONICAL:
+        return canon
+    return ""
+
+
+def _read_displayed_chart_interval_raw(target_page) -> str:
+    """Etykieta z głównego przycisku interwału (nie z paska ulubionych)."""
+    sel = _INTERVAL_TOOLBAR_SELECTOR
+    try:
+        loc = target_page.locator(sel).first
+        if loc.count() == 0:
+            return ""
+        text = (loc.inner_text(timeout=1500) or "").strip()
+        if text:
+            return re.split(r"[\s\n·]+", text)[0]
+        dv = (loc.get_attribute("data-value") or "").strip()
+        if dv:
+            return dv
+    except Exception:
+        pass
     try:
         raw = target_page.evaluate(
             """() => {
-                const sels = [
-                  'button[data-name="time-intervals"]',
-                  '#header-toolbar-intervals',
-                  '[data-name="header-toolbar-intervals"]',
-                ];
-                for (const sel of sels) {
-                  const el = document.querySelector(sel);
-                  if (!el) continue;
-                  const dv = (el.getAttribute('data-value') || '').trim();
-                  if (dv) return dv;
-                  const t = (el.innerText || el.textContent || '').trim();
-                  if (t) return t.split(/\\s+/)[0];
-                }
-                return '';
+                const el = document.querySelector('button[data-name="time-intervals"]');
+                if (!el) return '';
+                const t = (el.innerText || el.textContent || '').trim();
+                if (t) return t.split(/\\s+/)[0];
+                return (el.getAttribute('data-value') || '').trim();
             }"""
         )
-        return _canonical_interval(str(raw or ""))
+        return str(raw or "").strip()
     except Exception:
         return ""
+
+
+def _read_displayed_chart_interval(target_page) -> str:
+    """Kanoniczny interwał wykresu (1D/1W/1M) albo '' dla intraday."""
+    return _toolbar_interval_to_canonical(_read_displayed_chart_interval_raw(target_page))
 
 
 def _chart_interval_is(target_page, expected: str) -> bool:
@@ -466,7 +462,7 @@ def _wait_for_interval_loaded(target_page, interval: str) -> bool:
     if loaded:
         time.sleep(perf.interval_settle_s)
     else:
-        shown = _read_displayed_chart_interval(target_page) or "?"
+        shown = _read_displayed_chart_interval_raw(target_page) or "?"
         logger.warning(
             "Interwał %s: toolbar wciąż pokazuje %s — kontynuuję po settle.",
             interval,
@@ -614,19 +610,27 @@ def _switch_chart_interval(target_page, interval: str) -> float:
         )
         time.sleep(perf.interval_settle_active_s)
     else:
-        shown = _read_displayed_chart_interval(target_page) or "?"
-        logger.info("Ustawiam interwał: %s (toolbar: %s)", want, shown)
+        shown_before = _read_displayed_chart_interval_raw(target_page) or "?"
+        logger.info("Ustawiam interwał: %s (toolbar: %s)", want, shown_before)
         _apply_interval_via_keyboard(target_page, interval, use_comma=False)
         _wait_for_interval_loaded(target_page, interval)
         if not _chart_interval_is(target_page, want):
-            shown_after = _read_displayed_chart_interval(target_page) or "?"
-            logger.warning(
-                "Interwał %s: po pierwszej próbie toolbar=%s — ponawiam z pickerem (,).",
-                want,
-                shown_after,
-            )
-            _apply_interval_via_keyboard(target_page, interval, use_comma=True)
-            _wait_for_interval_loaded(target_page, interval)
+            shown_after = _read_displayed_chart_interval_raw(target_page) or "?"
+            if shown_after == shown_before:
+                logger.warning(
+                    "Interwał %s: toolbar bez zmiany (%s) — ponawiam z pickerem (,).",
+                    want,
+                    shown_after,
+                )
+                _apply_interval_via_keyboard(target_page, interval, use_comma=True)
+                _wait_for_interval_loaded(target_page, interval)
+            else:
+                logger.info(
+                    "Interwał %s: toolbar %s → %s — pomijam drugą próbę.",
+                    want,
+                    shown_before,
+                    shown_after,
+                )
     return time.perf_counter() - t0
 
 logger = logging.getLogger("tv_scraper")

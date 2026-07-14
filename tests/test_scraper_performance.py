@@ -324,9 +324,52 @@ def test_chart_interval_ignores_favorite_button_when_toolbar_shows_h1():
     """Regresja: stara detekcja myliła ulubiony 1D z aktywnym wykresem na H1."""
     page = _fake_page_h1_toolbar_favorite_1d_active()
     assert tv._interval_button_is_active(page, "1D") is True
-    shown = tv._read_displayed_chart_interval(page)
-    assert shown != "1D"  # toolbar: 1h / data-value 60, nie dzienny
+    assert tv._read_displayed_chart_interval(page) == ""
+    assert tv._read_displayed_chart_interval_raw(page).lower() in ("1h", "60")
     assert tv._chart_interval_is(page, "1D") is False
+
+
+def test_switch_chart_interval_skips_comma_retry_when_toolbar_changed(monkeypatch):
+    """Regresja: nie wpisuj 1D drugi raz, gdy toolbar już się zmienił."""
+    perf = tv.ScraperPerformance({"mode": "fast"})
+    monkeypatch.setattr(tv, "_SCRAPER_PERF", perf)
+    page = MagicMock()
+    page.keyboard = MagicMock()
+    page.locator = MagicMock(return_value=MagicMock())
+    reads = iter(["30M", "1D", "1D"])
+
+    monkeypatch.setattr(
+        tv,
+        "_read_displayed_chart_interval_raw",
+        lambda p: next(reads, "1D"),
+    )
+    monkeypatch.setattr(tv, "_wait_for_interval_loaded", lambda *a, **k: True)
+    monkeypatch.setattr(tv.time, "sleep", lambda s: None)
+
+    tv._switch_chart_interval(page, "1D")
+
+    page.keyboard.type.assert_called_once_with("1D", delay=perf.keyboard_delay_ms)
+    assert page.keyboard.press.call_count == 1
+    page.keyboard.press.assert_called_once_with("Enter")
+
+
+def test_switch_chart_interval_comma_retry_when_toolbar_unchanged(monkeypatch):
+    """Picker (,) tylko gdy toolbar w ogóle nie zareagował na pierwszą próbę."""
+    perf = tv.ScraperPerformance({"mode": "fast"})
+    monkeypatch.setattr(tv, "_SCRAPER_PERF", perf)
+    page = MagicMock()
+    page.keyboard = MagicMock()
+    page.locator = MagicMock(return_value=MagicMock())
+
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval_raw", lambda p: "30M")
+    monkeypatch.setattr(tv, "_wait_for_interval_loaded", lambda *a, **k: False)
+    monkeypatch.setattr(tv.time, "sleep", lambda s: None)
+
+    tv._switch_chart_interval(page, "1D")
+
+    assert page.keyboard.type.call_count == 2
+    assert page.keyboard.press.call_count == 3
+    page.keyboard.press.assert_any_call(",")
 
 
 def test_switch_chart_interval_switches_when_toolbar_h1_not_favorite_1d(monkeypatch):
@@ -353,7 +396,7 @@ def test_switch_chart_interval_switches_when_toolbar_h1_not_favorite_1d(monkeypa
         displayed["value"] = tv._canonical_interval(interval)
         return True
 
-    monkeypatch.setattr(tv, "_read_displayed_chart_interval", read_toolbar)
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval_raw", read_toolbar)
     monkeypatch.setattr(tv, "_wait_for_interval_loaded", wait_loaded)
     monkeypatch.setattr(tv.time, "sleep", lambda s: None)
 
@@ -527,7 +570,7 @@ def test_switch_chart_interval_types_when_inactive(monkeypatch):
         return checks["n"] > 1
 
     monkeypatch.setattr(tv, "_chart_interval_is", chart_is)
-    monkeypatch.setattr(tv, "_read_displayed_chart_interval", lambda *a, **k: "H1")
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval_raw", lambda *a, **k: "H1")
     monkeypatch.setattr(tv, "_wait_for_interval_loaded", lambda *a, **k: True)
     monkeypatch.setattr(tv.time, "sleep", lambda s: None)
     tv._switch_chart_interval(page, "1W")
@@ -542,7 +585,7 @@ def test_wait_for_interval_loaded_fallback_on_detection_failure(monkeypatch):
     sleeps = []
     monkeypatch.setattr(tv.time, "sleep", lambda s: sleeps.append(s))
     monkeypatch.setattr(tv, "_chart_interval_is", lambda *a, **k: False)
-    monkeypatch.setattr(tv, "_read_displayed_chart_interval", lambda *a, **k: "H1")
+    monkeypatch.setattr(tv, "_read_displayed_chart_interval_raw", lambda *a, **k: "H1")
     monkeypatch.setattr(
         tv,
         "_adaptive_wait",
