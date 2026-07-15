@@ -2728,10 +2728,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderConfigUI() {
-        // Render Tickers
-        tickersCountEl.textContent = currentConfig.tickers.length;
+        // Render Tickers (pole "Dodaj" filtruje też listę poniżej)
+        const tickerFilterTerm = (newTickerInput.value || '').trim().toUpperCase();
+        const visibleTickers = tickerFilterTerm
+            ? currentConfig.tickers.filter(t => t.toUpperCase().includes(tickerFilterTerm))
+            : currentConfig.tickers;
+        tickersCountEl.textContent = tickerFilterTerm
+            ? `${visibleTickers.length}/${currentConfig.tickers.length}`
+            : currentConfig.tickers.length;
         tickersListEl.innerHTML = '';
-        currentConfig.tickers.forEach(t => {
+        if (tickerFilterTerm && visibleTickers.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'ticker-item ticker-item-empty';
+            empty.textContent = `Brak tickera „${tickerFilterTerm}” — Dodaj, aby utworzyć.`;
+            tickersListEl.appendChild(empty);
+        }
+        visibleTickers.forEach(t => {
             const safe = escapeHtml(t);
             const item = document.createElement('div');
             item.className = 'ticker-item';
@@ -2808,6 +2820,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     newTickerInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') btnAddTicker.click();
+    });
+
+    // Filtrowanie listy tickerów podczas wpisywania (debounce jak w dashboardzie)
+    let tickerFilterDebounce = null;
+    newTickerInput.addEventListener('input', () => {
+        clearTimeout(tickerFilterDebounce);
+        tickerFilterDebounce = setTimeout(() => renderConfigUI(), 120);
     });
 
     selectAllTickers.addEventListener('change', (e) => {

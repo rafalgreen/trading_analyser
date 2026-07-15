@@ -276,21 +276,21 @@ def test_chart_interval_is_compares_toolbar_display(monkeypatch):
     assert tv._chart_interval_is(page, "1D") is False
 
 
-def _fake_page_h1_toolbar_favorite_1d_active():
-    """DOM jak na żywym TV: wykres H1, ulubiony 1D wygląda na „aktywny” w pasku."""
+def _fake_page_intraday_chart(active_data_value="60"):
+    """DOM jak na żywym TV: aktywny przycisk aria-checked=true w #header-toolbar-intervals.
+
+    Wykres stoi na intraday (data-value 60 = 1h), ulubione 1D/1W/1M są w DOM,
+    ale nie są aktywne. page.evaluate zwraca data-value aktywnego przycisku.
+    """
     page = MagicMock()
+    page.evaluate = lambda script: active_data_value
 
     class FakeLocator:
         def __init__(self, selector):
             self.selector = selector
 
         def count(self):
-            if 'button[data-name="time-intervals"]' in self.selector:
-                return 1
-            if "1D" in self.selector and (
-                '[aria-checked="true"]' in self.selector
-                or '[aria-pressed="true"]' in self.selector
-            ):
+            if '[aria-checked="true"]' in self.selector:
                 return 1
             if self.selector == 'button[data-value="1D"]':
                 return 1
@@ -301,31 +301,29 @@ def _fake_page_h1_toolbar_favorite_1d_active():
             return self
 
         def get_attribute(self, name):
-            if 'data-name="time-intervals"' in self.selector:
-                if name == "data-value":
-                    return "60"
-                return None
-            if name == "class":
-                return "button interval-btn isActive"
-            if name in ("aria-checked", "aria-pressed"):
-                return "true"
+            if name == "data-value":
+                return active_data_value
             return None
 
         def inner_text(self, timeout=1500):
-            if 'data-name="time-intervals"' in self.selector:
-                return "1h"
-            return ""
+            return "1h"
 
     page.locator = lambda sel: FakeLocator(sel)
     return page
 
 
-def test_chart_interval_ignores_favorite_button_when_toolbar_shows_h1():
-    """Regresja: stara detekcja myliła ulubiony 1D z aktywnym wykresem na H1."""
-    page = _fake_page_h1_toolbar_favorite_1d_active()
-    assert tv._interval_button_is_active(page, "1D") is True
+def test_chart_interval_reads_active_button_not_favorites():
+    """Regresja: wykres na 1h (data-value 60) nie może być uznany za 1D/1W/1M."""
+    page = _fake_page_intraday_chart("60")
+    assert tv._read_displayed_chart_interval_raw(page) == "60"
     assert tv._read_displayed_chart_interval(page) == ""
-    assert tv._read_displayed_chart_interval_raw(page).lower() in ("1h", "60")
+    assert tv._chart_interval_is(page, "1D") is False
+
+
+def test_chart_interval_detects_active_weekly():
+    page = _fake_page_intraday_chart("1W")
+    assert tv._read_displayed_chart_interval(page) == "1W"
+    assert tv._chart_interval_is(page, "1W") is True
     assert tv._chart_interval_is(page, "1D") is False
 
 
@@ -372,22 +370,14 @@ def test_switch_chart_interval_comma_retry_when_toolbar_unchanged(monkeypatch):
     page.keyboard.press.assert_any_call(",")
 
 
-def test_switch_chart_interval_switches_when_toolbar_h1_not_favorite_1d(monkeypatch):
-    """Regresja: przy H1 na wykresie scraper musi wpisać 1D, nie pomijać (~100ms)."""
+def test_switch_chart_interval_switches_when_chart_intraday(monkeypatch):
+    """Regresja: przy 1h na wykresie scraper musi wpisać 1D, nie pomijać (~100ms)."""
     perf = tv.ScraperPerformance({"mode": "fast"})
     monkeypatch.setattr(tv, "_SCRAPER_PERF", perf)
-    page = _fake_page_h1_toolbar_favorite_1d_active()
+    page = MagicMock()
     page.keyboard = MagicMock()
-    real_locator = page.locator
-    body_click = MagicMock()
-
-    def locator(sel):
-        if sel == "body":
-            return body_click
-        return real_locator(sel)
-
-    page.locator = locator
-    displayed = {"value": "1H"}
+    page.locator = MagicMock(return_value=MagicMock())
+    displayed = {"value": "60"}
 
     def read_toolbar(target_page):
         return displayed["value"]
@@ -400,7 +390,6 @@ def test_switch_chart_interval_switches_when_toolbar_h1_not_favorite_1d(monkeypa
     monkeypatch.setattr(tv, "_wait_for_interval_loaded", wait_loaded)
     monkeypatch.setattr(tv.time, "sleep", lambda s: None)
 
-    assert tv._interval_button_is_active(page, "1D") is True
     assert tv._chart_interval_is(page, "1D") is False
 
     tv._switch_chart_interval(page, "1D")

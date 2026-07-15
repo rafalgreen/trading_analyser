@@ -341,7 +341,12 @@ _INTERVAL_CANONICAL: Dict[str, frozenset] = {
 }
 
 
-_INTERVAL_TOOLBAR_SELECTOR = 'button[data-name="time-intervals"]'
+# Aktywny interwał: przycisk aria-checked="true" w pasku ulubionych interwałów.
+# Fallback: przycisk menu interwałów (pokazuje bieżący, gdy brak ulubionych).
+_INTERVAL_ACTIVE_SELECTOR = (
+    '#header-toolbar-intervals button[aria-checked="true"]'
+)
+_INTERVAL_MENU_SELECTOR = 'button[data-name="time-intervals"]'
 
 
 def _canonical_interval(raw: object) -> str:
@@ -366,33 +371,42 @@ def _toolbar_interval_to_canonical(raw: object) -> str:
 
 
 def _read_displayed_chart_interval_raw(target_page) -> str:
-    """Etykieta z głównego przycisku interwału (nie z paska ulubionych)."""
-    sel = _INTERVAL_TOOLBAR_SELECTOR
-    try:
-        loc = target_page.locator(sel).first
-        if loc.count() == 0:
-            return ""
-        text = (loc.inner_text(timeout=1500) or "").strip()
-        if text:
-            return re.split(r"[\s\n·]+", text)[0]
-        dv = (loc.get_attribute("data-value") or "").strip()
-        if dv:
-            return dv
-    except Exception:
-        pass
+    """Aktywny interwał z toolbara: data-value przycisku aria-checked=true."""
     try:
         raw = target_page.evaluate(
             """() => {
-                const el = document.querySelector('button[data-name="time-intervals"]');
-                if (!el) return '';
-                const t = (el.innerText || el.textContent || '').trim();
-                if (t) return t.split(/\\s+/)[0];
-                return (el.getAttribute('data-value') || '').trim();
+                const active = document.querySelector(
+                  '#header-toolbar-intervals button[aria-checked="true"]'
+                );
+                if (active) {
+                  const dv = (active.getAttribute('data-value') || '').trim();
+                  if (dv) return dv;
+                  return (active.innerText || active.textContent || '').trim();
+                }
+                const menu = document.querySelector('button[data-name="time-intervals"]');
+                if (menu) {
+                  const t = (menu.innerText || menu.textContent || '').trim();
+                  if (t) return t.split(/\\s+/)[0];
+                  return (menu.getAttribute('data-value') || '').trim();
+                }
+                return '';
             }"""
         )
         return str(raw or "").strip()
     except Exception:
-        return ""
+        pass
+    try:
+        loc = target_page.locator(_INTERVAL_ACTIVE_SELECTOR).first
+        if loc.count() > 0:
+            dv = (loc.get_attribute("data-value") or "").strip()
+            if dv:
+                return dv
+            text = (loc.inner_text(timeout=1500) or "").strip()
+            if text:
+                return re.split(r"[\s\n·]+", text)[0]
+    except Exception:
+        pass
+    return ""
 
 
 def _read_displayed_chart_interval(target_page) -> str:
