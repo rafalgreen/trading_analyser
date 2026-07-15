@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -920,7 +921,17 @@ def parse_legend_number(raw: object) -> Optional[float]:
         .replace("'", "")
         .replace(" ", "")
     )
-    if not s or s.lower() in ("ok", "--", "\u2014", "-") or "brak" in s.lower():
+    if not s or s.lower() in (
+        "ok",
+        "--",
+        "\u2014",
+        "-",
+        "nan",
+        "inf",
+        "-inf",
+        "infinity",
+        "-infinity",
+    ) or "brak" in s.lower():
         return None
     if "," in s and "." in s:
         # Ostatni separator to separator dziesiętny, drugi — tysięcy.
@@ -939,9 +950,12 @@ def parse_legend_number(raw: object) -> Optional[float]:
         if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
             s = "".join(parts)
     try:
-        return float(s)
+        val = float(s)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(val):
+        return None
+    return val
 
 
 FUNDAMENTALS_COLUMNS: List[str] = [

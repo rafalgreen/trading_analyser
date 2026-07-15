@@ -195,6 +195,13 @@ def test_band_touch_empty_without_price_or_band():
     assert compute_band_touch(_band_row("100", "", ""))["state"] == ""
 
 
+def test_band_touch_rejects_nan_price_string_from_csv():
+    """CSV zapisuje brak ceny jako literalny string 'nan' — nie wolno liczyć odległości."""
+    out = compute_band_touch(_band_row("nan", "40.02 (Czerwony)", "38.09 (Czerwony)"))
+    assert out["state"] == ""
+    assert out["distance_pct"] is None
+
+
 def test_strategy_band_touch_strong_buy_uptrend_touch_low_pca():
     r = _band_row("100", "101", "98", hts_trend="Wzrostowy", pca="25.0")
     assert strategy_band_touch(r) == "strong buy"
@@ -247,10 +254,11 @@ def test_strategy_band_touch_computed_even_without_macd():
 
 def test_strategy_band_touch_custom_params():
     r = _band_row("103", "100", "97", hts_trend="Wzrostowy", pca="40.0")
-    # Domyślnie: distance 3% > 2% tolerancji → neutral
-    assert strategy_band_touch(r) == "neutral"
-    # Luźniejsze progi: tolerance 4% i PCA max 45 → buy
-    out = strategy_band_touch(
-        r, params={"tolerance_pct": 4.0, "buy_pca_max": 45.0}
-    )
+    # Domyślnie: distance 3% ≤ 4% tolerancji i PCA 40 → buy
+    assert strategy_band_touch(r) == "buy"
+    # Za wysokie PCA przy domyślnych progach → neutral
+    r_high_pca = _band_row("103", "100", "97", hts_trend="Wzrostowy", pca="41.0")
+    assert strategy_band_touch(r_high_pca) == "neutral"
+    # Luźniejszy próg PCA → buy
+    out = strategy_band_touch(r_high_pca, params={"buy_pca_max": 45.0})
     assert out == "buy"

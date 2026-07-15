@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const sortSelect = document.getElementById('sort-select');
     const verdictFilter = document.getElementById('verdict-filter');
     const favoritesFilter = document.getElementById('favorites-filter');
+    const bandTouchFirstFilter = document.getElementById('band-touch-first-filter');
     const fundPeMax = document.getElementById('fund-pe-max');
     const fundRoeMin = document.getElementById('fund-roe-min');
     const fundFcfPositive = document.getElementById('fund-fcf-positive');
@@ -55,6 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renamedHidden: 'ta_renamed_hidden',
         favoriteTickers: 'ta_favorite_tickers',
         favoritesOnly: 'ta_favorites_only',
+        bandTouchFirst: 'ta_band_touch_first',
     };
 
     const FAVORITES_STORAGE_KEY = UI_KEYS.favoriteTickers;
@@ -138,7 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
         cross_priority: 'Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem. PCA jako tie-breaker (≤40 → buy, ≥60 → sell). Gdy brak crossów — fallback na strategię trendową.',
         pca_buckets: 'Wyłącznie z wartości PCA: ≤20 → Strong Buy, 20–40 → Buy, 40–60 → Neutral, 60–80 → Sell, ≥80 → Strong Sell. Najprostsza i najbardziej kontr-trendowa.',
         scoring: 'HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma w zakresie [−3..+3] mapowana na 5 koszyków: ≥+2 Strong Buy, +1 Buy, 0 Neutral, −1 Sell, ≤−2 Strong Sell.',
-        band_touch: 'Wstęga czerwona (HTS Slow) jako strefa wejścia/wyjścia. KUP: trend Wzrostowy + cena dotyka lub prawie dotyka (≤2%) czerwonej wstęgi + PCA niski („prawie niebieski", ≤35); dotknięcie → Strong Buy. SPRZEDAJ: trend Spadkowy + cena dotyka/prawie dotyka wstęgi od dołu (opór); dotknięcie + PCA ≥ 60 → Strong Sell. Tylko interwały D i W.',
+        band_touch: 'Wstęga czerwona (HTS Slow) jako strefa wejścia/wyjścia. KUP: trend Wzrostowy + cena dotyka lub prawie dotyka (≤4%) czerwonej wstęgi + PCA niski („prawie niebieski", ≤40); dotknięcie → Strong Buy. SPRZEDAJ: trend Spadkowy + cena dotyka/prawie dotyka wstęgi od dołu (opór); dotknięcie + PCA ≥ 60 → Strong Sell. Tylko interwały D i W.',
     };
 
     let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'data-status'))
@@ -181,6 +183,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let fundFilterFcfPositive = Boolean(loadPref(UI_KEYS.fundFcfPositive, false));
     let fundFilterDeMax = loadPref(UI_KEYS.fundDeMax, '') || '';
     let favoritesOnly = Boolean(loadPref(UI_KEYS.favoritesOnly, false));
+    let bandTouchFirst = Boolean(loadPref(UI_KEYS.bandTouchFirst, false));
     let availableSignalStrategies = ALL_STRATEGY_IDS.map(id => ({ id, label: id }));
 
     const storedFavorites = loadPref(FAVORITES_STORAGE_KEY, []);
@@ -553,6 +556,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (sortSelect) sortSelect.value = currentSortMode;
         if (verdictFilter) verdictFilter.value = currentVerdictFilter;
         if (favoritesFilter) favoritesFilter.checked = favoritesOnly;
+        if (bandTouchFirstFilter) bandTouchFirstFilter.checked = bandTouchFirst;
         if (fundPeMax) fundPeMax.value = fundFilterPeMax;
         if (fundRoeMin) fundRoeMin.value = fundFilterRoeMin;
         if (fundFcfPositive) fundFcfPositive.checked = fundFilterFcfPositive;
@@ -611,6 +615,12 @@ document.addEventListener('DOMContentLoaded', () => {
     favoritesFilter?.addEventListener('change', (e) => {
         favoritesOnly = Boolean(e.target.checked);
         savePref(UI_KEYS.favoritesOnly, favoritesOnly);
+        filterAndRenderCards(searchInput.value.toLowerCase().trim());
+    });
+
+    bandTouchFirstFilter?.addEventListener('change', (e) => {
+        bandTouchFirst = Boolean(e.target.checked);
+        savePref(UI_KEYS.bandTouchFirst, bandTouchFirst);
         filterAndRenderCards(searchInput.value.toLowerCase().trim());
     });
 
@@ -1499,6 +1509,20 @@ document.addEventListener('DOMContentLoaded', () => {
         return 0;
     }
 
+    function bandTouchBuyRank(rows) {
+        if (!tickerHasBuySignalForStrategy(rows, 'band_touch')) return 2;
+        const iv = intervalCodeForSignal();
+        const row = (rows || []).find(r => (r?.['Interval'] || '').trim().toUpperCase() === iv) || rows[0];
+        const sig = rowSignalForStrategy(row, 'band_touch');
+        if (sig === 'strong buy') return 0;
+        if (sig === 'buy') return 1;
+        return 2;
+    }
+
+    function cmpBandTouchBuyGroups(aTicker, bTicker, groupedData) {
+        return bandTouchBuyRank(groupedData[aTicker]) - bandTouchBuyRank(groupedData[bTicker]);
+    }
+
     function formatFundDividendYield(val) {
         const n = Number(val);
         if (!Number.isFinite(n)) return null;
@@ -2064,6 +2088,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 break;
             default:
                 break; // Keep CSV order
+        }
+
+        if (bandTouchFirst) {
+            const orderIndex = Object.fromEntries(sortedKeys.map((k, i) => [k, i]));
+            sortedKeys.sort((a, b) => {
+                const bt = cmpBandTouchBuyGroups(a, b, groupedData);
+                if (bt !== 0) return bt;
+                return orderIndex[a] - orderIndex[b];
+            });
         }
 
         const columnTemplate = document.getElementById('interval-column-template');
@@ -2809,12 +2842,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Config Actions ---
 
-    btnAddTicker.addEventListener('click', () => {
+    btnAddTicker.addEventListener('click', async () => {
         const val = newTickerInput.value.trim().toUpperCase();
         if (val && !currentConfig.tickers.includes(val)) {
             currentConfig.tickers.push(val);
             newTickerInput.value = '';
             renderConfigUI();
+            await persistConfig({ silent: true });
         }
     });
 
@@ -2847,8 +2881,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') btnAddIndicator.click();
     });
 
-    btnSaveConfig.addEventListener('click', async () => {
-        // Collect intervals
+    btnSaveConfig.addEventListener('click', () => persistConfig({ silent: false }));
+
+    async function persistConfig({ silent = true } = {}) {
         const selectedIntervals = Array.from(intervalsCheckboxes)
             .filter(cb => cb.checked).map(cb => cb.value);
         currentConfig.intervals = selectedIntervals;
@@ -2860,9 +2895,11 @@ document.addEventListener('DOMContentLoaded', () => {
             run_on_startup: autoScheduleRunOnStartup.checked,
         };
 
-        btnSaveConfig.disabled = true;
-        configSaveStatus.textContent = 'Zapisywanie...';
-        configSaveStatus.className = 'save-status';
+        if (!silent) {
+            btnSaveConfig.disabled = true;
+            configSaveStatus.textContent = 'Zapisywanie...';
+            configSaveStatus.className = 'save-status';
+        }
 
         try {
             const res = await fetch('/api/config', {
@@ -2871,22 +2908,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify(currentConfig)
             });
 
-            if (res.ok) {
+            if (!res.ok) {
+                throw new Error('API błąd');
+            }
+            if (!silent) {
                 configSaveStatus.textContent = 'Zapisano pomyślnie!';
                 configSaveStatus.classList.add('success');
-            } else {
-                throw new Error("API błąd");
             }
+            return true;
         } catch (e) {
-            configSaveStatus.textContent = 'Błąd zapisywania.';
-            configSaveStatus.classList.add('error');
+            if (!silent) {
+                configSaveStatus.textContent = 'Błąd zapisywania.';
+                configSaveStatus.classList.add('error');
+            }
+            return false;
         } finally {
-            setTimeout(() => {
-                configSaveStatus.textContent = '';
-                btnSaveConfig.disabled = false;
-            }, 3000);
+            if (!silent) {
+                setTimeout(() => {
+                    configSaveStatus.textContent = '';
+                    btnSaveConfig.disabled = false;
+                }, 3000);
+            }
         }
-    });
+    }
 
     // --- Scraper Control ---
     const errorMsgContainer = document.getElementById('scraper-error-msg');
@@ -3211,13 +3255,20 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    btnRunSelected.addEventListener('click', () => {
+    btnRunSelected.addEventListener('click', async () => {
         const cbs = document.querySelectorAll('.ticker-select-cb:checked');
         const selectedTickers = Array.from(cbs).map(cb => cb.value);
         if (selectedTickers.length === 0) {
             alert("Nie zaznaczono żadnych tickerów!");
             return;
         }
+        for (const t of selectedTickers) {
+            if (!currentConfig.tickers.includes(t)) {
+                currentConfig.tickers.push(t);
+            }
+        }
+        renderConfigUI();
+        await persistConfig({ silent: true });
         startScraper(selectedTickers);
     });
 

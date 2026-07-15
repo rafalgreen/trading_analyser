@@ -9,6 +9,7 @@ Identyfikatory strategii i ich semantyka są spójne z UI (filtr/badże).
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from results_store import (
@@ -220,9 +221,9 @@ def strategy_scoring(
 # sekcja "signals").
 BAND_TOUCH_DEFAULTS: Dict[str, Any] = {
     # „Prawie dotknięcie": odległość ceny od krawędzi wstęgi ≤ X% ceny.
-    "tolerance_pct": 2.0,
+    "tolerance_pct": 4.0,
     # „PCA prawie niebieskie" (niski risk) — warunek kupna.
-    "buy_pca_max": 35.0,
+    "buy_pca_max": 40.0,
     # Silne przegrzanie PCA wzmacnia sygnał sprzedaży.
     "sell_pca_min": 60.0,
     # Interwały, na których strategia generuje sygnały.
@@ -266,7 +267,7 @@ def compute_band_touch(
     price = parse_legend_number(row.get("Current_Price"))
     slow_high = parse_legend_number(row.get("HTS Panel_Slow_High"))
     slow_low = parse_legend_number(row.get("HTS Panel_Slow_Low"))
-    if price is None or price <= 0:
+    if price is None or not math.isfinite(price) or price <= 0:
         return empty
     if slow_high is None and slow_low is None:
         return empty

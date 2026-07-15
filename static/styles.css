@@ -651,6 +651,10 @@ body {
     accent-color: #fbbf24;
 }
 
+.band-touch-first-cb {
+    accent-color: var(--accent-primary);
+}
+
 .system-health-section {
     margin-top: 16px;
 }

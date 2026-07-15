@@ -952,6 +952,43 @@ def test_scraper_run_single_ticker_alb(client, monkeypatch):
     assert seen["tickers"] == ["ALB"]
 
 
+def test_scraper_run_adds_new_ticker_to_config(client, monkeypatch, tmp_path):
+    """Subset run dopisuje brakujące tickery do configu — inaczej znikają po odświeżeniu."""
+    import app as m
+
+    cfg_path = tmp_path / "scraper_config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "tickers": ["FCX"],
+                "intervals": ["1D", "1W", "1M"],
+                "indicators": ["PCA", "HTS Panel", "MacD"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "CONFIG_FILE", str(cfg_path))
+    m._invalidate_config_cache()
+    monkeypatch.setattr(
+        m,
+        "start_scraper_subprocess",
+        lambda tickers=None, indicators=None, **kwargs: {
+            "status": "started",
+            "pid": 1,
+        },
+    )
+    monkeypatch.setattr(m, "reschedule_auto_scraper", lambda: None)
+
+    r = client.post("/api/scraper/run", json={"tickers": ["NASDAQ:WMT"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "started"
+    assert body.get("config_tickers_added") == ["NASDAQ:WMT"]
+
+    saved = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert "NASDAQ:WMT" in saved["tickers"]
+
+
 def test_resolve_config_symbol_bare_alb():
     import app as m
 

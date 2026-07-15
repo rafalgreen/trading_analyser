@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import glob
 import csv
@@ -21,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Iterable
 from collections import defaultdict
 
 import pandas as pd
@@ -301,6 +302,34 @@ def save_config(config: Dict[str, Any]):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
     _invalidate_config_cache()
+
+
+def _ensure_tickers_in_config(tickers: Iterable[str]) -> List[str]:
+    """Dopisz brakujące tickery do configu (np. nowy ticker + „Wybrane")."""
+    added: List[str] = []
+    normalized: List[str] = []
+    for raw in tickers:
+        t = str(raw or "").strip()
+        if t:
+            normalized.append(t)
+    if not normalized:
+        return added
+
+    config = load_config()
+    existing = {
+        str(t).strip()
+        for t in (config.get("tickers") or [])
+        if str(t).strip()
+    }
+    for t in normalized:
+        if t not in existing:
+            config.setdefault("tickers", []).append(t)
+            existing.add(t)
+            added.append(t)
+    if added:
+        save_config(config)
+        reschedule_auto_scraper()
+    return added
 
 
 _scraper_process: Optional[subprocess.Popen] = None
@@ -1995,7 +2024,10 @@ def _annotate_row_signals(
     except Exception:
         touch = {"state": "", "distance_pct": None, "side": ""}
     row["Band_Touch_State"] = touch.get("state") or ""
-    row["Band_Touch_Distance_Pct"] = touch.get("distance_pct")
+    dist = touch.get("distance_pct")
+    if isinstance(dist, float) and not math.isfinite(dist):
+        dist = None
+    row["Band_Touch_Distance_Pct"] = dist
     row["Band_Touch_Side"] = touch.get("side") or ""
 
 
@@ -2311,10 +2343,14 @@ def run_scraper(body: ScraperRunRequest):
     # ewentualny pending state, żeby scraper nie dopisywał do wczorajszego pliku.
     if body.fresh and not tickers and not run_indicators:
         _remove_scraper_state()
-    return start_scraper_subprocess(
+    config_added = _ensure_tickers_in_config(tickers) if tickers else []
+    started = start_scraper_subprocess(
         tickers if tickers else None,
         run_indicators,
     )
+    if isinstance(started, dict) and config_added:
+        started["config_tickers_added"] = config_added
+    return started
 
 
 @app.get("/api/scraper/pending_run")

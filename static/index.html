@@ -71,6 +71,12 @@
                                 <span>Ulubione</span>
                             </label>
                         </div>
+                        <div class="sort-container favorites-filter-wrap">
+                            <label class="favorites-filter-label band-touch-first-label" title="Sortuj karty: kandydaci KUP/Strong Buy ze strategii Wstęga na górze listy">
+                                <input type="checkbox" id="band-touch-first-filter" class="band-touch-first-cb">
+                                <span>Wstęga najpierw</span>
+                            </label>
+                        </div>
                         <div class="sort-container">
                             <select id="interval-filter" class="sort-select toolbar-select" title="Filtruj interwał">
                                 <option value="All">Wszystkie interwały</option>
@@ -208,7 +214,7 @@
                             <button type="button" class="filter-chip" data-filter-strategy="cross_priority" title="Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem; PCA jako tie-breaker (≥60 buy, ≤40 sell). Fallback na trend gdy brak crossów.">Crossy (priorytet)</button>
                             <button type="button" class="filter-chip" data-filter-strategy="pca_buckets" title="Tylko PCA: ≤20 Strong Buy, 20–40 Buy, 40–60 Neutral, 60–80 Sell, ≥80 Strong Sell.">PCA (kosze)</button>
                             <button type="button" class="filter-chip" data-filter-strategy="scoring" title="HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma ∈ [−3..+3] mapowana na 5 koszyków.">Punktowy</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="band_touch" title="Trend Wzrostowy + cena dotyka/prawie dotyka czerwonej wstęgi (HTS Slow) + PCA niski → KUP. Trend Spadkowy + dotknięcie wstęgi od dołu → SPRZEDAJ. Interwały D i W.">Wstęga (touch)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="band_touch" title="Trend Wzrostowy + cena dotyka/prawie dotyka (≤4%) czerwonej wstęgi (HTS Slow) + PCA ≤40 → KUP. Trend Spadkowy + dotknięcie wstęgi od dołu → SPRZEDAJ. Interwały D i W.">Wstęga (touch)</button>
                         </div>
                         <div class="filter-separator"></div>
                         <div class="filter-group">
@@ -684,6 +690,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=28"></script>
+    <script src="app.js?v=31"></script>
 </body>
 </html>
