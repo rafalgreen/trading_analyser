@@ -63,6 +63,7 @@ from signal_strategies import (
     BAND_TOUCH_DEFAULTS,
     STRATEGIES as SIGNAL_STRATEGIES,
     STRATEGY_LABELS as SIGNAL_STRATEGY_LABELS,
+    _trend as hts_trend,
     compute_band_touch,
     compute_signals as compute_row_signals,
 )
@@ -2019,16 +2020,24 @@ def _annotate_row_signals(
     # Wskaźnik „dotknięcie czerwonej wstęgi" — niezależny od sygnału strategii,
     # widoczny w UI per interwał.
     try:
-        tol = float((bt_params or BAND_TOUCH_DEFAULTS).get("tolerance_pct", 2.0))
-        touch = compute_band_touch(row, tolerance_pct=tol)
+        bt = bt_params or BAND_TOUCH_DEFAULTS
+        tol = float(bt.get("tolerance_pct", 2.0))
+        edge = float(bt.get("edge_touch_pct", BAND_TOUCH_DEFAULTS["edge_touch_pct"]))
+        touch = compute_band_touch(
+            row,
+            tolerance_pct=tol,
+            edge_touch_pct=edge,
+            trend=hts_trend(row.get("HTS Panel_Trend")),
+        )
     except Exception:
-        touch = {"state": "", "distance_pct": None, "side": ""}
+        touch = {"state": "", "distance_pct": None, "side": "", "ribbon": ""}
     row["Band_Touch_State"] = touch.get("state") or ""
     dist = touch.get("distance_pct")
     if isinstance(dist, float) and not math.isfinite(dist):
         dist = None
     row["Band_Touch_Distance_Pct"] = dist
     row["Band_Touch_Side"] = touch.get("side") or ""
+    row["Band_Touch_Ribbon"] = touch.get("ribbon") or ""
 
 
 def _flatten_dashboard_to_rows(

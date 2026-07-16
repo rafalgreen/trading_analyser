@@ -13,7 +13,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const sortSelect = document.getElementById('sort-select');
     const verdictFilter = document.getElementById('verdict-filter');
     const favoritesFilter = document.getElementById('favorites-filter');
-    const bandTouchFirstFilter = document.getElementById('band-touch-first-filter');
     const fundPeMax = document.getElementById('fund-pe-max');
     const fundRoeMin = document.getElementById('fund-roe-min');
     const fundFcfPositive = document.getElementById('fund-fcf-positive');
@@ -56,7 +55,6 @@ document.addEventListener('DOMContentLoaded', () => {
         renamedHidden: 'ta_renamed_hidden',
         favoriteTickers: 'ta_favorite_tickers',
         favoritesOnly: 'ta_favorites_only',
-        bandTouchFirst: 'ta_band_touch_first',
     };
 
     const FAVORITES_STORAGE_KEY = UI_KEYS.favoriteTickers;
@@ -111,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const ALLOWED_SORT = new Set([
-        'data-status', 'favorites-first', 'default', 'pca-desc', 'pca-asc',
+        'data-status', 'favorites-first', 'band-touch-first', 'default', 'pca-desc', 'pca-asc',
         'macd-desc', 'macd-asc', 'pe-desc', 'pe-asc', 'roe-desc', 'roe-asc', 'fcf-desc', 'fcf-asc',
         'consensus-bullish', 'consensus-bearish',
         'verdict-kup-first', 'composite-desc',
@@ -128,15 +126,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const ALLOWED_STRATEGIES = new Set([...ALL_STRATEGY_IDS, 'all']);
 
     const STRATEGY_LABEL_FALLBACK = {
-        trend_only: 'Trendy + PCA',
-        cross_priority: 'Crossy (priorytet)',
+        trend_only: 'HTS+MacD trend + PCA',
+        cross_priority: 'HTS+MacD cross + PCA',
         pca_buckets: 'PCA (kosze)',
-        scoring: 'Punktowy',
-        band_touch: 'Wstęga (touch)',
+        scoring: 'HTS+MacD+PCA (pkt)',
+        band_touch: 'HTS wstęga + PCA',
     };
     const STRATEGY_DESCRIPTIONS = {
         all: 'Pokazuje wszystkie tickery — bez filtra strategii. Badże na karcie wyświetlają wynik każdej ze strategii.',
-        trend_only: '2× Wzrostowy + PCA ≤ 40 → Strong Buy; 2× Wzrostowy → Buy; mieszane → Neutral; 2× Spadkowy → Sell; 2× Spadkowy + PCA ≥ 60 → Strong Sell. PCA niskie = okazja, wysokie = drogo (jak kosze PCA).',
+        trend_only: '2× Wzrostowy + PCA ≤ 20 → Strong Buy; + PCA ≤ 40 → Buy; + PCA ≥ 60 → Sell; + PCA ≥ 80 → Strong Sell (drogo mimo trendu). 2× Spadkowy + PCA ≥ 60 → Sell; + PCA ≥ 80 → Strong Sell; + PCA ≤ 40 → Buy; + PCA ≤ 20 → Strong Buy. Mieszane trendy (HTS ≠ MacD) → Neutral.',
         cross_priority: 'Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem. PCA jako tie-breaker (≤40 → buy, ≥60 → sell). Gdy brak crossów — fallback na strategię trendową.',
         pca_buckets: 'Wyłącznie z wartości PCA: ≤20 → Strong Buy, 20–40 → Buy, 40–60 → Neutral, 60–80 → Sell, ≥80 → Strong Sell. Najprostsza i najbardziej kontr-trendowa.',
         scoring: 'HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma w zakresie [−3..+3] mapowana na 5 koszyków: ≥+2 Strong Buy, +1 Buy, 0 Neutral, −1 Sell, ≤−2 Strong Sell.',
@@ -145,6 +143,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentSortMode = ALLOWED_SORT.has(loadPref(UI_KEYS.sortMode, 'data-status'))
         ? loadPref(UI_KEYS.sortMode, 'data-status') : 'data-status';
+    if (loadPref('ta_band_touch_first', false)) {
+        currentSortMode = 'band-touch-first';
+        savePref(UI_KEYS.sortMode, currentSortMode);
+        try { localStorage.removeItem('ta_band_touch_first'); } catch (e) { /* quota */ }
+    }
     function sanitizeChartMetric(raw) {
         const val = typeof raw === 'string' ? raw : 'pca';
         if (!METRIC_TO_FIELD[val]) return 'pca';
@@ -183,7 +186,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let fundFilterFcfPositive = Boolean(loadPref(UI_KEYS.fundFcfPositive, false));
     let fundFilterDeMax = loadPref(UI_KEYS.fundDeMax, '') || '';
     let favoritesOnly = Boolean(loadPref(UI_KEYS.favoritesOnly, false));
-    let bandTouchFirst = Boolean(loadPref(UI_KEYS.bandTouchFirst, false));
     let availableSignalStrategies = ALL_STRATEGY_IDS.map(id => ({ id, label: id }));
 
     const storedFavorites = loadPref(FAVORITES_STORAGE_KEY, []);
@@ -556,7 +558,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (sortSelect) sortSelect.value = currentSortMode;
         if (verdictFilter) verdictFilter.value = currentVerdictFilter;
         if (favoritesFilter) favoritesFilter.checked = favoritesOnly;
-        if (bandTouchFirstFilter) bandTouchFirstFilter.checked = bandTouchFirst;
         if (fundPeMax) fundPeMax.value = fundFilterPeMax;
         if (fundRoeMin) fundRoeMin.value = fundFilterRoeMin;
         if (fundFcfPositive) fundFcfPositive.checked = fundFilterFcfPositive;
@@ -615,12 +616,6 @@ document.addEventListener('DOMContentLoaded', () => {
     favoritesFilter?.addEventListener('change', (e) => {
         favoritesOnly = Boolean(e.target.checked);
         savePref(UI_KEYS.favoritesOnly, favoritesOnly);
-        filterAndRenderCards(searchInput.value.toLowerCase().trim());
-    });
-
-    bandTouchFirstFilter?.addEventListener('change', (e) => {
-        bandTouchFirst = Boolean(e.target.checked);
-        savePref(UI_KEYS.bandTouchFirst, bandTouchFirst);
         filterAndRenderCards(searchInput.value.toLowerCase().trim());
     });
 
@@ -1509,11 +1504,16 @@ document.addEventListener('DOMContentLoaded', () => {
         return 0;
     }
 
+    function bandTouchRowForSort(rows) {
+        const iv = getEffectiveChartInterval();
+        return (rows || []).find(r => (r?.['Interval'] || '').trim().toUpperCase() === iv) || null;
+    }
+
     function bandTouchBuyRank(rows) {
-        if (!tickerHasBuySignalForStrategy(rows, 'band_touch')) return 2;
-        const iv = intervalCodeForSignal();
-        const row = (rows || []).find(r => (r?.['Interval'] || '').trim().toUpperCase() === iv) || rows[0];
+        const row = bandTouchRowForSort(rows);
+        if (!row) return 99;
         const sig = rowSignalForStrategy(row, 'band_touch');
+        if (!sig) return 99;
         if (sig === 'strong buy') return 0;
         if (sig === 'buy') return 1;
         return 2;
@@ -1521,6 +1521,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function cmpBandTouchBuyGroups(aTicker, bTicker, groupedData) {
         return bandTouchBuyRank(groupedData[aTicker]) - bandTouchBuyRank(groupedData[bTicker]);
+    }
+
+    function cmpBandTouchDistanceGroups(aTicker, bTicker, groupedData) {
+        const aRow = bandTouchRowForSort(groupedData[aTicker]);
+        const bRow = bandTouchRowForSort(groupedData[bTicker]);
+        const aDist = Number(aRow?.['Band_Touch_Distance_Pct']);
+        const bDist = Number(bRow?.['Band_Touch_Distance_Pct']);
+        const aOk = Number.isFinite(aDist);
+        const bOk = Number.isFinite(bDist);
+        if (aOk && bOk && aDist !== bDist) return aDist - bDist;
+        if (aOk !== bOk) return aOk ? -1 : 1;
+        return 0;
     }
 
     function formatFundDividendYield(val) {
@@ -2038,6 +2050,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     return cmpDataStatusGroups(a, b, groupedData);
                 });
                 break;
+            case 'band-touch-first': {
+                const orderIndex = Object.fromEntries(tickerOrder.map((k, i) => [k, i]));
+                sortedKeys.sort((a, b) => {
+                    const bt = cmpBandTouchBuyGroups(a, b, groupedData);
+                    if (bt !== 0) return bt;
+                    const dist = cmpBandTouchDistanceGroups(a, b, groupedData);
+                    if (dist !== 0) return dist;
+                    return orderIndex[a] - orderIndex[b];
+                });
+                break;
+            }
             case 'pca-desc':
                 sortedKeys.sort((a, b) => cmpPcaDesc(getGroupPCA(groupedData[a]), getGroupPCA(groupedData[b])));
                 break;
@@ -2088,15 +2111,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 break;
             default:
                 break; // Keep CSV order
-        }
-
-        if (bandTouchFirst) {
-            const orderIndex = Object.fromEntries(sortedKeys.map((k, i) => [k, i]));
-            sortedKeys.sort((a, b) => {
-                const bt = cmpBandTouchBuyGroups(a, b, groupedData);
-                if (bt !== 0) return bt;
-                return orderIndex[a] - orderIndex[b];
-            });
         }
 
         const columnTemplate = document.getElementById('interval-column-template');
@@ -2377,21 +2391,23 @@ document.addEventListener('DOMContentLoaded', () => {
                         const btDist = row['Band_Touch_Distance_Pct'];
                         const btSide = String(row['Band_Touch_Side'] || '');
                         const btSignal = rowSignalForStrategy(row, 'band_touch');
+                        const btRibbon = String(row['Band_Touch_Ribbon'] || 'red').toLowerCase();
+                        const ribbonAdj = btRibbon === 'blue' ? 'niebieskiej' : 'czerwonej';
                         btEl.classList.remove('hidden');
                         btEl.classList.toggle('band-touch-touch', btState === 'touch');
                         btEl.classList.toggle('band-touch-near', btState === 'near');
                         btEl.classList.toggle('band-touch-buy', BUY_SIGNALS.has(btSignal));
                         btEl.classList.toggle('band-touch-sell', SELL_SIGNALS.has(btSignal));
                         const stateLabel = btState === 'touch'
-                            ? 'Dotknięcie czerwonej wstęgi'
-                            : 'Blisko czerwonej wstęgi';
+                            ? `Dotknięcie ${ribbonAdj} wstęgi`
+                            : `Blisko ${ribbonAdj} wstęgi`;
                         const distLabel = (btState === 'near' && btDist != null)
                             ? ` (${btDist}%)` : '';
                         btEl.textContent = `〰 ${stateLabel}${distLabel}`;
                         const sideLabel = btSide === 'above' ? 'cena nad wstęgą'
                             : btSide === 'below' ? 'cena pod wstęgą' : 'cena wewnątrz wstęgi';
                         const sigLabel = btSignal ? ` · sygnał: ${signalLabelPl(btSignal)}` : '';
-                        btEl.title = `HTS Slow band — ${sideLabel}${sigLabel}`;
+                        btEl.title = `HTS ${btRibbon === 'blue' ? 'Fast' : 'Slow'} band — ${sideLabel}${sigLabel}`;
                     } else {
                         btEl.classList.add('hidden');
                         btEl.textContent = '';

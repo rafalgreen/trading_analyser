@@ -29,18 +29,52 @@ def test_trend_only_strong_buy_with_low_pca():
     r = _row(
         hts_trend="Wzrostowy",
         macd_trend="Wzrostowy",
-        pca="22.10 (color: rgb(0, 128, 255);)",
+        pca="18.0 (color: rgb(0, 128, 255);)",
     )
     assert strategy_trend_only(r) == "strong buy"
 
 
-def test_trend_only_strong_sell_with_high_pca():
-    r = _row(hts_trend="Spadkowy", macd_trend="Spadkowy", pca="72.0")
+def test_trend_only_buy_with_pca_up_to_40():
+    r = _row(
+        hts_trend="Wzrostowy",
+        macd_trend="Wzrostowy",
+        pca="22.10 (color: rgb(0, 128, 255);)",
+    )
+    assert strategy_trend_only(r) == "buy"
+
+
+def test_trend_only_neutral_when_uptrend_but_pca_midrange():
+    r = _row(hts_trend="Wzrostowy", macd_trend="Wzrostowy", pca="55.0")
+    assert strategy_trend_only(r) == "neutral"
+
+
+def test_trend_only_sell_when_uptrend_but_pca_high():
+    r = _row(hts_trend="Wzrostowy", macd_trend="Wzrostowy", pca="72.0")
+    assert strategy_trend_only(r) == "sell"
+
+
+def test_trend_only_strong_sell_when_uptrend_but_pca_very_high():
+    r = _row(hts_trend="Wzrostowy", macd_trend="Wzrostowy", pca="90.19")
     assert strategy_trend_only(r) == "strong sell"
 
 
-def test_trend_only_buy_without_pca_threshold():
-    r = _row(hts_trend="Wzrostowy", macd_trend="Wzrostowy", pca="55.0")
+def test_trend_only_strong_sell_with_very_high_pca():
+    r = _row(hts_trend="Spadkowy", macd_trend="Spadkowy", pca="85.0")
+    assert strategy_trend_only(r) == "strong sell"
+
+
+def test_trend_only_sell_with_pca_from_60():
+    r = _row(hts_trend="Spadkowy", macd_trend="Spadkowy", pca="72.0")
+    assert strategy_trend_only(r) == "sell"
+
+
+def test_trend_only_neutral_when_downtrend_but_pca_midrange():
+    r = _row(hts_trend="Spadkowy", macd_trend="Spadkowy", pca="45.0")
+    assert strategy_trend_only(r) == "neutral"
+
+
+def test_trend_only_buy_when_downtrend_but_pca_low():
+    r = _row(hts_trend="Spadkowy", macd_trend="Spadkowy", pca="35.0")
     assert strategy_trend_only(r) == "buy"
 
 
@@ -116,7 +150,7 @@ def test_compute_signals_returns_all_strategies():
         "scoring",
         "band_touch",
     }
-    assert out["trend_only"] == "strong buy"  # 2× Wzrostowy, PCA<=40
+    assert out["trend_only"] == "buy"  # 2× Wzrostowy, PCA 35 ∈ (20, 40]
     assert out["scoring"] == "strong buy"  # +1 +1 +1 (PCA<=40) = 3
     assert out["pca_buckets"] == "buy"  # 35 ∈ (20, 40]
     assert out["cross_priority"] == "buy"  # brak crossów, fallback do trendu
@@ -154,11 +188,17 @@ def _band_row(
     hts_trend: str = "Wzrostowy",
     pca: str = "25.0",
     interval: str = "1D",
+    fast_high: str = "",
+    fast_low: str = "",
 ):
     row = _row(hts_trend=hts_trend, pca=pca)
     row["Current_Price"] = price
     row["HTS Panel_Slow_High"] = slow_high
     row["HTS Panel_Slow_Low"] = slow_low
+    if fast_high:
+        row["HTS Panel_Fast_High"] = fast_high
+    if fast_low:
+        row["HTS Panel_Fast_Low"] = fast_low
     row["Interval"] = interval
     return row
 
@@ -262,3 +302,40 @@ def test_strategy_band_touch_custom_params():
     # Luźniejszy próg PCA → buy
     out = strategy_band_touch(r_high_pca, params={"buy_pca_max": 45.0})
     assert out == "buy"
+
+
+def test_band_touch_wmt_d1_red_edge_counts_as_touch():
+    """NASDAQ:WMT 1D — cena tuż nad czerwoną Slow, wizualnie dotyka krawędzi."""
+    r = _band_row(
+        "113.7",
+        "113.45 (Czerwony)",
+        "110.54 (Czerwony)",
+        fast_high="121.17 (Niebieski)",
+        fast_low="117.92 (Niebieski)",
+        hts_trend="Wzrostowy",
+        pca="25.0",
+        interval="1D",
+    )
+    touch = compute_band_touch(r, tolerance_pct=4.0, edge_touch_pct=0.3)
+    assert touch["state"] == "touch"
+    assert touch["ribbon"] == "red"
+    assert touch["distance_pct"] == 0.22
+    assert strategy_band_touch(r) == "strong buy"
+
+
+def test_band_touch_wmt_w1_blue_fast_band():
+    """NASDAQ:WMT 1W — cena przy niebieskiej Fast, czerwona Slow daleko."""
+    r = _band_row(
+        "113.7",
+        "78.37 (Czerwony)",
+        "74.24 (Czerwony)",
+        fast_high="113.65 (Niebieski)",
+        fast_low="107.14 (Niebieski)",
+        hts_trend="Wzrostowy",
+        pca="25.53",
+        interval="1W",
+    )
+    touch = compute_band_touch(r, tolerance_pct=4.0, edge_touch_pct=0.3)
+    assert touch["state"] == "touch"
+    assert touch["ribbon"] == "blue"
+    assert strategy_band_touch(r) == "strong buy"

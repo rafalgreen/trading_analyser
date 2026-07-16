@@ -71,12 +71,6 @@
                                 <span>Ulubione</span>
                             </label>
                         </div>
-                        <div class="sort-container favorites-filter-wrap">
-                            <label class="favorites-filter-label band-touch-first-label" title="Sortuj karty: kandydaci KUP/Strong Buy ze strategii Wstęga na górze listy">
-                                <input type="checkbox" id="band-touch-first-filter" class="band-touch-first-cb">
-                                <span>Wstęga najpierw</span>
-                            </label>
-                        </div>
                         <div class="sort-container">
                             <select id="interval-filter" class="sort-select toolbar-select" title="Filtruj interwał">
                                 <option value="All">Wszystkie interwały</option>
@@ -89,6 +83,7 @@
                             <select id="sort-select" class="sort-select toolbar-select" title="Sortuj karty">
                                 <option value="data-status">Problemy najpierw</option>
                                 <option value="favorites-first">Ulubione najpierw</option>
+                                <option value="band-touch-first">Wstęga najpierw</option>
                                 <option value="default">Kolejność config</option>
                                 <option value="pca-desc">PCA ↓ (najwyższe)</option>
                                 <option value="pca-asc">PCA ↑ (najniższe)</option>
@@ -210,11 +205,11 @@
                         <div class="filter-group">
                             <span class="filter-group-label">Strategia</span>
                             <button type="button" class="filter-chip active" data-filter-strategy="all" title="Bez filtra: pokazuje wszystkie tickery.">Wszystkie</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="trend_only" title="2× Wzrostowy + PCA ≥ 60 → Strong Buy; 2× Wzrostowy → Buy; mieszane → Neutral; 2× Spadkowy → Sell; 2× Spadkowy + PCA ≤ 40 → Strong Sell.">Trendy + PCA</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="cross_priority" title="Sygnały przecięcia (BULL/BEAR CROSS) z HTS i MacD przeważają nad trendem; PCA jako tie-breaker (≥60 buy, ≤40 sell). Fallback na trend gdy brak crossów.">Crossy (priorytet)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="trend_only" title="HTS trend + MacD trend + PCA. 2× Wzrostowy + PCA ≤ 20 Strong Buy, ≤ 40 Buy, ≥ 60 Sell, ≥ 80 Strong Sell. 2× Spadkowy + PCA ≥ 60 Sell, ≥ 80 Strong Sell, ≤ 40 Buy, ≤ 20 Strong Buy. Mieszane trendy HTS/MacD → Neutral.">HTS+MacD trend + PCA</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="cross_priority" title="HTS cross + MacD cross + PCA. BULL/BEAR CROSS przeważają nad trendem; PCA jako tie-breaker (≤40 buy, ≥60 sell). Fallback na trend gdy brak crossów.">HTS+MacD cross + PCA</button>
                             <button type="button" class="filter-chip" data-filter-strategy="pca_buckets" title="Tylko PCA: ≤20 Strong Buy, 20–40 Buy, 40–60 Neutral, 60–80 Sell, ≥80 Strong Sell.">PCA (kosze)</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="scoring" title="HTS Trend (±1) + MacD Trend (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma ∈ [−3..+3] mapowana na 5 koszyków.">Punktowy</button>
-                            <button type="button" class="filter-chip" data-filter-strategy="band_touch" title="Trend Wzrostowy + cena dotyka/prawie dotyka (≤4%) czerwonej wstęgi (HTS Slow) + PCA ≤40 → KUP. Trend Spadkowy + dotknięcie wstęgi od dołu → SPRZEDAJ. Interwały D i W.">Wstęga (touch)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="scoring" title="HTS trend + MacD trend + PCA (punkty). HTS (±1) + MacD (±1) + PCA (≥60 ⇒ −1, ≤40 ⇒ +1). Suma ∈ [−3..+3] → 5 koszyków.">HTS+MacD+PCA (pkt)</button>
+                            <button type="button" class="filter-chip" data-filter-strategy="band_touch" title="HTS wstęga (Slow/Fast) + HTS trend + PCA. Wzrostowy + dotknięcie wstęgi (≤4%) + PCA ≤40 → KUP. Spadkowy + dotknięcie od dołu → SPRZEDAJ. Interwały D i W.">HTS wstęga + PCA</button>
                         </div>
                         <div class="filter-separator"></div>
                         <div class="filter-group">
@@ -690,6 +685,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=31"></script>
+    <script src="app.js?v=38"></script>
 </body>
 </html>

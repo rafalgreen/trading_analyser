@@ -10,7 +10,7 @@ Identyfikatory strategii i ich semantyka są spójne z UI (filtr/badże).
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from results_store import (
     parse_legend_number,
@@ -103,10 +103,12 @@ def _bucket_score(score: float) -> str:
 
 
 def strategy_trend_only(row: Dict[str, object]) -> str:
-    """2× Wzrostowy + PCA≤40 → Strong Buy; 2× Wzrostowy → Buy; 2× Spadkowy + PCA≥60 → Strong Sell; 2× Spadkowy → Sell; reszta → Neutral.
+    """2× Wzrostowy + PCA≤20 → Strong Buy; +PCA≤40 → Buy; +PCA≥60 → Sell; +PCA≥80 → Strong Sell.
+    2× Spadkowy + PCA≥80 → Strong Sell; +PCA≥60 → Sell; +PCA≤20 → Strong Buy; +PCA≤40 → Buy.
+    Mieszane trendy (HTS ≠ MacD) lub PCA w środku (40–60 przy 2× Wzrostowy) → Neutral.
 
-    PCA jest skalą risk-on jak w ``pca_buckets``: niskie = okazja (bullish),
-    wysokie = drogo/przegrzane (bearish).
+    PCA jest skalą risk-on jak w ``pca_buckets``: niskie = okazja, wysokie = drogo/przegrzane —
+    nawet przy zgodnym trendzie wzrostowym.
     """
     i = _row_inputs(row)
     h, m, p = i["hts_trend"], i["macd_trend"], i["pca"]
@@ -115,13 +117,27 @@ def strategy_trend_only(row: Dict[str, object]) -> str:
     ups = sum(1 for x in (h, m) if x == "up")
     downs = sum(1 for x in (h, m) if x == "down")
     if ups >= 2:
-        if p is not None and p <= 40:
-            return SIGNAL_STRONG_BUY
-        return SIGNAL_BUY
+        if p is not None:
+            if p <= 20:
+                return SIGNAL_STRONG_BUY
+            if p <= 40:
+                return SIGNAL_BUY
+            if p >= 80:
+                return SIGNAL_STRONG_SELL
+            if p >= 60:
+                return SIGNAL_SELL
+        return SIGNAL_NEUTRAL
     if downs >= 2:
-        if p is not None and p >= 60:
-            return SIGNAL_STRONG_SELL
-        return SIGNAL_SELL
+        if p is not None:
+            if p >= 80:
+                return SIGNAL_STRONG_SELL
+            if p >= 60:
+                return SIGNAL_SELL
+            if p <= 20:
+                return SIGNAL_STRONG_BUY
+            if p <= 40:
+                return SIGNAL_BUY
+        return SIGNAL_NEUTRAL
     return SIGNAL_NEUTRAL
 
 
@@ -222,6 +238,8 @@ def strategy_scoring(
 BAND_TOUCH_DEFAULTS: Dict[str, Any] = {
     # „Prawie dotknięcie": odległość ceny od krawędzi wstęgi ≤ X% ceny.
     "tolerance_pct": 4.0,
+    # Odległość ≤ tego progu traktujemy jako dotknięcie krawędzi (nie tylko „near").
+    "edge_touch_pct": 0.3,
     # „PCA prawie niebieskie" (niski risk) — warunek kupna.
     "buy_pca_max": 40.0,
     # Silne przegrzanie PCA wzmacnia sygnał sprzedaży.
@@ -248,56 +266,164 @@ def _pca_color_is_blueish(color: Optional[str]) -> bool:
     return b > 120 and b > r and b >= g
 
 
-def compute_band_touch(
-    row: Dict[str, object], *, tolerance_pct: float = 2.0
+def _normalize_band_edges(
+    high: Optional[float], low: Optional[float]
+) -> Tuple[Optional[float], Optional[float]]:
+    if high is None and low is None:
+        return None, None
+    if high is None:
+        high = low
+    if low is None:
+        low = high
+    if low is not None and high is not None and low > high:
+        low, high = high, low
+    return high, low
+
+
+def _single_band_touch(
+    price: float,
+    band_high: Optional[float],
+    band_low: Optional[float],
+    *,
+    tolerance_pct: float,
+    edge_touch_pct: float,
 ) -> Dict[str, Any]:
-    """Wskaźnik „dotknięcie czerwonej wstęgi" (HTS Slow band) dla wiersza.
-
-    Zwraca dict:
-      - ``state``: ``"touch"`` (cena wewnątrz wstęgi / na krawędzi),
-        ``"near"`` (w odległości ≤ tolerance_pct% ceny od najbliższej
-        krawędzi), ``"none"`` (daleko) albo ``""`` gdy brak danych
-        (cena/wstęga nieparsowalne).
-      - ``distance_pct``: znormalizowana odległość od najbliższej krawędzi
-        w % ceny (0.0 przy dotknięciu; ``None`` gdy brak danych).
-      - ``side``: ``"above"`` (cena nad wstęgą — typowe dla trendu
-        wzrostowego), ``"below"`` (pod wstęgą), ``"inside"`` albo ``""``.
-    """
-    empty = {"state": "", "distance_pct": None, "side": ""}
-    price = parse_legend_number(row.get("Current_Price"))
-    slow_high = parse_legend_number(row.get("HTS Panel_Slow_High"))
-    slow_low = parse_legend_number(row.get("HTS Panel_Slow_Low"))
-    if price is None or not math.isfinite(price) or price <= 0:
+    """Odległość ceny od jednej pary krawędzi wstęgi (high/low)."""
+    empty: Dict[str, Any] = {"state": "", "distance_pct": None, "side": ""}
+    high, low = _normalize_band_edges(band_high, band_low)
+    if high is None or low is None:
         return empty
-    if slow_high is None and slow_low is None:
-        return empty
-    if slow_high is None:
-        slow_high = slow_low
-    if slow_low is None:
-        slow_low = slow_high
-    if slow_low > slow_high:
-        slow_low, slow_high = slow_high, slow_low
 
-    if slow_low <= price <= slow_high:
+    if low <= price <= high:
         return {
             "state": BAND_TOUCH_STATE_TOUCH,
             "distance_pct": 0.0,
             "side": "inside",
         }
 
-    if price > slow_high:
-        distance = (price - slow_high) / price * 100.0
+    if price > high:
+        distance = (price - high) / price * 100.0
         side = "above"
     else:
-        distance = (slow_low - price) / price * 100.0
+        distance = (low - price) / price * 100.0
         side = "below"
 
-    state = (
-        BAND_TOUCH_STATE_NEAR
-        if distance <= float(tolerance_pct)
-        else BAND_TOUCH_STATE_NONE
-    )
+    if distance <= float(edge_touch_pct):
+        state = BAND_TOUCH_STATE_TOUCH
+    elif distance <= float(tolerance_pct):
+        state = BAND_TOUCH_STATE_NEAR
+    else:
+        state = BAND_TOUCH_STATE_NONE
+
     return {"state": state, "distance_pct": round(distance, 2), "side": side}
+
+
+def _pick_best_band_touch(candidates: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    empty: Dict[str, Any] = {"state": "", "distance_pct": None, "side": "", "ribbon": ""}
+    items = list(candidates)
+    if not items:
+        return empty
+
+    actionable = [
+        c
+        for c in items
+        if c.get("state") in (BAND_TOUCH_STATE_TOUCH, BAND_TOUCH_STATE_NEAR)
+    ]
+    if actionable:
+
+        def sort_key(c: Dict[str, Any]) -> Tuple[int, float]:
+            state_rank = 0 if c.get("state") == BAND_TOUCH_STATE_TOUCH else 1
+            dist = c.get("distance_pct")
+            if dist is None:
+                dist = 0.0 if c.get("state") == BAND_TOUCH_STATE_TOUCH else 999.0
+            return state_rank, float(dist)
+
+        return min(actionable, key=sort_key)
+
+    distant = [c for c in items if c.get("state") == BAND_TOUCH_STATE_NONE]
+    if distant:
+        return max(distant, key=lambda c: float(c.get("distance_pct") or 0.0))
+
+    return empty
+
+
+def compute_band_touch(
+    row: Dict[str, object],
+    *,
+    tolerance_pct: float = 2.0,
+    edge_touch_pct: float = 0.3,
+    trend: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Wskaźnik dotknięcia wstęgi HTS dla wiersza.
+
+    W trendzie wzrostowym bierze bliższą wstęgę: czerwoną (Slow) lub niebieską
+    (Fast). W spadkowym — tylko czerwoną Slow jako opór.
+
+    Zwraca dict:
+      - ``state``: ``"touch"``, ``"near"``, ``"none"`` albo ``""`` (brak danych)
+      - ``distance_pct``, ``side``
+      - ``ribbon``: ``"red"`` | ``"blue"`` | ``""``
+    """
+    empty: Dict[str, Any] = {
+        "state": "",
+        "distance_pct": None,
+        "side": "",
+        "ribbon": "",
+    }
+    price = parse_legend_number(row.get("Current_Price"))
+    if price is None or not math.isfinite(price) or price <= 0:
+        return empty
+
+    slow_high = parse_legend_number(row.get("HTS Panel_Slow_High"))
+    slow_low = parse_legend_number(row.get("HTS Panel_Slow_Low"))
+    fast_high = parse_legend_number(row.get("HTS Panel_Fast_High"))
+    fast_low = parse_legend_number(row.get("HTS Panel_Fast_Low"))
+
+    trend_dir = trend if trend in ("up", "down") else _trend(row.get("HTS Panel_Trend"))
+
+    slow_touch = _single_band_touch(
+        price,
+        slow_high,
+        slow_low,
+        tolerance_pct=tolerance_pct,
+        edge_touch_pct=edge_touch_pct,
+    )
+    if slow_touch["state"]:
+        slow_touch = {**slow_touch, "ribbon": "red"}
+
+    if trend_dir == "down":
+        if not slow_touch.get("state"):
+            return empty
+        return {
+            "state": slow_touch["state"],
+            "distance_pct": slow_touch["distance_pct"],
+            "side": slow_touch["side"],
+            "ribbon": slow_touch.get("ribbon") or "red",
+        }
+
+    candidates: List[Dict[str, Any]] = []
+    if slow_touch.get("state"):
+        candidates.append(slow_touch)
+
+    fast_touch = _single_band_touch(
+        price,
+        fast_high,
+        fast_low,
+        tolerance_pct=tolerance_pct,
+        edge_touch_pct=edge_touch_pct,
+    )
+    if fast_touch.get("state"):
+        candidates.append({**fast_touch, "ribbon": "blue"})
+
+    best = _pick_best_band_touch(candidates)
+    if not best.get("state"):
+        return empty
+    return {
+        "state": best["state"],
+        "distance_pct": best["distance_pct"],
+        "side": best["side"],
+        "ribbon": best.get("ribbon") or "",
+    }
 
 
 def strategy_band_touch(
@@ -326,7 +452,12 @@ def strategy_band_touch(
         return ""
 
     trend = _trend(row.get("HTS Panel_Trend"))
-    touch = compute_band_touch(row, tolerance_pct=float(p["tolerance_pct"]))
+    touch = compute_band_touch(
+        row,
+        tolerance_pct=float(p["tolerance_pct"]),
+        edge_touch_pct=float(p.get("edge_touch_pct", BAND_TOUCH_DEFAULTS["edge_touch_pct"])),
+        trend=trend,
+    )
     state = touch["state"]
     if trend is None or not state:
         return ""
@@ -362,11 +493,11 @@ STRATEGIES: Dict[str, Callable[[Dict[str, object]], str]] = {
 }
 
 STRATEGY_LABELS: Dict[str, str] = {
-    "trend_only": "Trendy + PCA",
-    "cross_priority": "Crossy (priorytet)",
+    "trend_only": "HTS+MacD trend + PCA",
+    "cross_priority": "HTS+MacD cross + PCA",
     "pca_buckets": "PCA (kosze)",
-    "scoring": "Punktowy",
-    "band_touch": "Wstęga (touch)",
+    "scoring": "HTS+MacD+PCA (pkt)",
+    "band_touch": "HTS wstęga + PCA",
 }
 
 
